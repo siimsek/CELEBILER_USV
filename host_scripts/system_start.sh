@@ -34,13 +34,21 @@ sleep 2
 CURRENT_IPS=$(hostname -I)
 TARGET_IP="192.168.11.5"
 
-if [[ "$CURRENT_IPS" != *"$TARGET_IP"* ]]; then
-    echo -e "${YELLOW}[AĞ]${NC} Lidar ağı için $TARGET_IP atanıyor..."
-    sudo ip addr add 192.168.11.5/24 dev eth0 > /dev/null 2>&1 || echo "Uyarı: eth0 bulunamadı veya IP eklenemedi."
-    sleep 1
-    CURRENT_IPS=$(hostname -I) # Güncelle
+# Ethernet Arayüzünü Otomatik Bul (eth0, end0, enp3s0 vb.)
+ETH_IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(e|en|eth)' | grep -v 'lo' | head -n 1)
+
+if [[ -z "$ETH_IFACE" ]]; then
+    echo -e "${RED}[AĞ HATASI]${NC} Kablolu Ethernet kartı (eth/end) bulunamadı!"
+    echo "       Lütfen Ethernet kablosunu kontrol edin."
 else
-    echo -e "${GREEN}[AĞ]${NC} Lidar IP ($TARGET_IP) mevcut."
+    if [[ "$CURRENT_IPS" != *"$TARGET_IP"* ]]; then
+        echo -e "${YELLOW}[AĞ]${NC} Lidar ağı ($ETH_IFACE) için $TARGET_IP atanıyor..."
+        sudo ip addr add 192.168.11.5/24 dev $ETH_IFACE > /dev/null 2>&1 || echo "Uyarı: IP zaten var olabilir."
+        sleep 1
+        CURRENT_IPS=$(hostname -I) # Güncelle
+    else
+        echo -e "${GREEN}[AĞ]${NC} Lidar IP ($TARGET_IP) zaten $ETH_IFACE üzerinde aktif."
+    fi
 fi
 
 # 4. DOCKER BAŞLATMA
