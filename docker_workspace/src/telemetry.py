@@ -60,6 +60,14 @@ HTML_PAGE = """
                 });
         }
         setInterval(updateStats, 1000);
+
+        // Dinamik Iframe Yükleyici (Hangi IP'den girildiyse o IP'yi kullanır)
+        window.onload = function() {
+            var host = window.location.hostname;
+            console.log("Detected Host: " + host);
+            document.getElementById('cam_frame').src = "http://" + host + ":5000";
+            document.getElementById('map_frame').src = "http://" + host + ":5001";
+        }
     </script>
 </head>
 <body>
@@ -67,11 +75,11 @@ HTML_PAGE = """
     <div class="grid-container">
         <div class="video-box">
             <h2>📷 KAMERA (Port 5000)</h2>
-            <iframe src="http://192.168.11.5:5000"></iframe>
+            <iframe id="cam_frame" src=""></iframe>
         </div>
         <div class="video-box">
             <h2>📡 LIDAR HARİTA (Port 5001)</h2>
-            <iframe src="http://192.168.11.5:5001"></iframe>
+            <iframe id="map_frame" src=""></iframe>
         </div>
         <div class="stats-box">
             <h2>📊 CANLI TELEMETRİ</h2>
