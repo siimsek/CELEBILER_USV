@@ -134,6 +134,14 @@ def capture_thread():
                 
                 stream_bytes += data
                 
+                # --- ANTIGRAVITY LAG KILLER ---
+                # Eğer buffer çok şişerse (örn: 100KB'dan fazla, yani birden çok frame biriktiyse)
+                # eski veriyi komple çöpe at ve en yeniye odaklan.
+                if len(stream_bytes) > 100000:
+                    stream_bytes = b'' # Flush
+                    continue
+                # ------------------------------
+                
                 # frame bul
                 first = stream_bytes.find(b'\xff\xd8')
                 last = stream_bytes.find(b'\xff\xd9')

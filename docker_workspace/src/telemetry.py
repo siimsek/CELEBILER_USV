@@ -115,9 +115,9 @@ HTML_PAGE = """
             flex: 1;
             display: grid;
             grid-template-columns: 1fr 1fr;
-            grid-template-rows: 65% 35%; /* Video daha büyük */
-            gap: 20px;
-            padding: 20px;
+            grid-template-rows: 75% 25%; /* Video Alanı Artırıldı, İstatistik Azaltıldı */
+            gap: 15px; /* Boşluklar azaltıldı */
+            padding: 15px;
             max-width: 1920px;
             margin: 0 auto;
             width: 100%;
@@ -127,19 +127,19 @@ HTML_PAGE = """
         /* CARDS */
         .card {
             background: var(--card-bg);
-            border-radius: 16px;
+            border-radius: 12px; /* Köşeler biraz daha keskin */
             border: 1px solid rgba(255,255,255,0.06);
             display: flex;
             flex-direction: column;
             overflow: hidden;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
             position: relative;
         }
 
         .card-header {
-            padding: 12px 20px;
+            padding: 8px 15px; /* Header küçültüldü */
             background: rgba(15, 23, 42, 0.4);
-            font-size: 0.85rem;
+            font-size: 0.8rem;
             font-weight: 700;
             color: var(--text-secondary);
             display: flex;
@@ -173,30 +173,31 @@ HTML_PAGE = """
             grid-column: span 2;
             display: grid;
             grid-template-columns: repeat(5, 1fr);
-            gap: 20px;
+            gap: 15px;
         }
 
         .stat-card {
             background: linear-gradient(145deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
-            border-radius: 12px;
-            padding: 20px;
+            border-radius: 10px;
+            padding: 15px; /* İç boşluk azaltıldı */
             display: flex;
             flex-direction: column;
-            justify-content: space-between;
+            justify-content: center; /* Ortalandı */
+            gap: 5px;
             border: 1px solid rgba(255,255,255,0.05);
         }
 
         .stat-label { 
-            font-size: 0.75rem; 
+            font-size: 0.7rem; 
             color: var(--text-secondary); 
             text-transform: uppercase; 
             font-weight: 600;
-            margin-bottom: 8px;
+            margin-bottom: 2px;
         }
         
         .stat-value { 
             font-family: var(--font-mono); 
-            font-size: 1.6rem; 
+            font-size: 1.4rem; /* Biraz küçültüldü */
             font-weight: 700; 
             color: var(--text-primary); 
             white-space: nowrap;
