@@ -34,13 +34,50 @@ HTML_PAGE = """
     <title>CELEBILER USV - MISSION CONTROL</title>
     <meta charset="UTF-8">
     <style>
-        body { background-color: #121212; color: #e0e0e0; font-family: monospace; margin: 0; padding: 20px; }
+        body { background-color: #121212; color: #e0e0e0; font-family: 'Courier New', monospace; margin: 0; padding: 20px; }
         h1 { text-align: center; color: #00d4ff; border-bottom: 2px solid #00d4ff; padding-bottom: 10px; }
-        .grid-container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
-        .video-box { border: 2px solid #333; background: #000; text-align: center; height: 400px; }
-        .video-box h2 { margin: 0; padding: 10px; background: #1f1f1f; color: #ffeb3b; }
-        iframe { width: 100%; height: 350px; border: none; }
-        .stats-box { grid-column: span 2; background: #1e1e1e; padding: 20px; border: 1px solid #444; }
+        
+        .grid-container { 
+            display: grid; 
+            grid-template-columns: 1fr 1fr; 
+            gap: 20px; 
+            margin-top: 20px; 
+        }
+        
+        .video-box { 
+            border: 2px solid #333; 
+            background: #000; 
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            /* Yükseklik içeriğe göre veya sabit */
+            height: 400px; 
+            overflow: hidden;
+        }
+        
+        .video-box h2 { 
+            margin: 0; 
+            padding: 8px; 
+            background: #1f1f1f; 
+            color: #ffeb3b; 
+            font-size: 1.2rem;
+            flex-shrink: 0; /* Başlık küçülmesin */
+        }
+        
+        iframe { 
+            width: 100%; 
+            height: 100%; 
+            border: none; 
+            flex-grow: 1; /* Kalan alanı doldur */
+        }
+        
+        .stats-box { 
+            grid-column: span 2; 
+            background: #1e1e1e; 
+            padding: 20px; 
+            border: 1px solid #444; 
+        }
+        
         table { width: 100%; border-collapse: collapse; }
         th, td { border: 1px solid #333; padding: 10px; text-align: left; }
         th { background-color: #2c2c2c; color: #00d4ff; }

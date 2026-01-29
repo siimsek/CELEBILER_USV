@@ -16,8 +16,8 @@ WEB_PORT = 5000
 app = Flask(__name__)
 
 # Global Değişkenler (Threadler arası veri paylaşımı için)
-output_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-cv2.putText(output_frame, "SYSTEM STARTING...", (400, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2)
+output_frame = np.zeros((360, 640, 3), dtype=np.uint8)
+cv2.putText(output_frame, "SYSTEM STARTING...", (100, 180), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 lock = threading.Lock()
 
 # --- MOD SEÇİMİ ---
@@ -66,22 +66,22 @@ def process_vision(frame):
     return frame
 
 def get_simulated_frame():
-    """Kamera yoksa sahte bir kare üretir"""
-    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    """Kamera yoksa sahte bir kare üretir (360p)"""
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
     
     # Hareketli kutular
     t = time.time()
-    x1 = int(640 + 300 * np.sin(t))
-    y1 = int(360 + 200 * np.cos(t))
-    x2 = int(640 + 300 * np.sin(t + 2))
-    y2 = int(360 + 200 * np.cos(t + 2))
+    x1 = int(320 + 150 * np.sin(t))
+    y1 = int(180 + 100 * np.cos(t))
+    x2 = int(320 + 150 * np.sin(t + 2))
+    y2 = int(180 + 100 * np.cos(t + 2))
     
-    cv2.rectangle(frame, (x1, y1), (x1+100, y1+100), (0, 0, 255), -1)
-    cv2.putText(frame, "SIM_ENGEL", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-    cv2.rectangle(frame, (x2, y2), (x2+80, y2+150), (0, 255, 0), -1)
-    cv2.putText(frame, "SIM_SANCAK", (x2, y2-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-    cv2.putText(frame, "⚠️ KAMERA BAGLANTISI YOK - SIMULASYON MODU", (300, 360), 
-                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+    cv2.rectangle(frame, (x1, y1), (x1+50, y1+50), (0, 0, 255), -1)
+    cv2.putText(frame, "SIM_ENGEL", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    cv2.rectangle(frame, (x2, y2), (x2+40, y2+75), (0, 255, 0), -1)
+    cv2.putText(frame, "SIM_SANCAK", (x2, y2-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    cv2.putText(frame, "⚠️ NO SIGNAL - SIMULATION", (150, 180), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
     return frame
 
 def camera_thread():
@@ -136,14 +136,18 @@ def camera_thread():
                     frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
                     
                     if frame is not None:
+                        # 1. BOYUT KÜÇÜLTME (PERFORMANS İÇİN KRİTİK)
+                        # Processing 720p on CPU is slow. 360p is 4x faster.
+                        frame = cv2.resize(frame, (640, 360))
+
                         # İşleme
                         processed_frame = process_vision(frame)
                         
                         # Bilgi Bas
                         t_now = time.strftime("%H:%M:%S")
-                        cv2.rectangle(processed_frame, (0, 0), (1280, 40), (0, 0, 0), -1)
-                        cv2.putText(processed_frame, f"REC: {t_now} | EGE USV WEB VIEW | LIVE", (10, 30), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        cv2.rectangle(processed_frame, (0, 0), (640, 35), (0, 0, 0), -1)
+                        cv2.putText(processed_frame, f"REC: {t_now} | LIVE | 360p", (10, 25), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
                         
                         out.write(processed_frame)
                         with lock:
