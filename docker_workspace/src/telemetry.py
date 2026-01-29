@@ -6,6 +6,7 @@ import threading
 import os
 import glob
 import json
+import random
 from flask import Flask, jsonify, render_template_string
 
 # --- AYARLAR ---
@@ -23,6 +24,7 @@ telemetry_data = {
     "Rain_Val": 0, "Env_Temp": 0
 }
 COLUMNS = list(telemetry_data.keys())
+SIMULATION_MODE = False
 
 # --- HTML ARAYÜZ ---
 HTML_PAGE = """
@@ -88,6 +90,7 @@ def clean_port(port):
     """Sadece belirtilen portu kullanan işlemi öldürür."""
     print(f"🧹 Port {port} temizleniyor...")
     os.system(f"fuser -k {port}/tcp > /dev/null 2>&1")
+    os.system(f"lsof -t -i:{port} | xargs kill -9 > /dev/null 2>&1")
     time.sleep(0.5)
 
 class SmartTelemetry:
@@ -95,6 +98,8 @@ class SmartTelemetry:
         self.master = None
         self.running = True
         self.lock = threading.Lock()
+        self.sim_lat = 38.4192
+        self.sim_lon = 27.1287
         
         # Log klasörü kontrolü
         if not os.path.exists("/root/workspace/logs"):
@@ -104,26 +109,60 @@ class SmartTelemetry:
         ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
         for port in ports:
             try:
+                print(f"🔌 Port deneniyor: {port}")
                 conn = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
                 conn.wait_heartbeat(timeout=1)
+                print(f"✅ Pixhawk bulundu: {port}")
                 return conn
             except: pass
         return None
 
+    def update_simulation(self):
+        """Donanım yoksa rastgele veriler üret"""
+        global telemetry_data
+        with self.lock:
+            # Random Walk GPS
+            self.sim_lat += random.uniform(-0.0001, 0.0001)
+            self.sim_lon += random.uniform(-0.0001, 0.0001)
+            
+            telemetry_data["Timestamp"] = time.strftime("%H:%M:%S")
+            telemetry_data["Lat"] = self.sim_lat
+            telemetry_data["Lon"] = self.sim_lon
+            telemetry_data["Heading"] = (telemetry_data["Heading"] + 1) % 360
+            telemetry_data["Battery"] = 12.0 + random.uniform(0, 0.5)
+            telemetry_data["Speed"] = random.uniform(0, 3.0)
+            telemetry_data["Mode"] = "SIMULATION"
+
     def read_loop(self):
+        global SIMULATION_MODE
+        
         # CSV Başlıkları
         if not os.path.isfile(CSV_FILE):
             pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
 
+        print(f"📡 Telemetri Döngüsü Başladı...")
+
         while self.running:
             if not self.master:
                 self.master = self.connect_pixhawk()
-                time.sleep(1)
-                continue
+                if not self.master:
+                    if not SIMULATION_MODE:
+                        print("⚠️ DONANIM YOK - SIMULASYON MODUNDA ÇALIŞIYOR")
+                        SIMULATION_MODE = True
+                    
+                    self.update_simulation()
+                    time.sleep(1)
+                    continue
+                else:
+                    SIMULATION_MODE = False
+                    print("🚀 CANLI MOD AKTİF")
 
             try:
+                # Canlı Veri Okuma
                 msg = self.master.recv_match(blocking=True, timeout=1.0)
-                if not msg: continue
+                if not msg:
+                    # Timeout durumunda bağlantıyı kontrol et veya simülasyona dön
+                    continue
                 
                 with self.lock:
                     telemetry_data["Timestamp"] = time.strftime("%H:%M:%S")
@@ -144,7 +183,9 @@ class SmartTelemetry:
                     df = pd.DataFrame([telemetry_data])
                     df.to_csv(CSV_FILE, mode='a', header=False, index=False)
 
-            except Exception: pass
+            except Exception as e:
+                print(f"⚠️ Hata: {e}")
+                self.master = None # Yeniden bağlanmayı dene
 
     def start(self):
         t = threading.Thread(target=self.read_loop, daemon=True)

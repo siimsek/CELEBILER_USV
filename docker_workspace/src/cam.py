@@ -18,7 +18,8 @@ output_frame = None
 lock = threading.Lock()
 
 # --- MOD SEÇİMİ ---
-TEST_MODE = True 
+TEST_MODE = True
+SIMULATION_MODE = False
 
 # --- RENK ARALIKLARI ---
 COLOR_RANGES = {
@@ -61,42 +62,83 @@ def process_vision(frame):
                     cv2.putText(frame, f"{name}", (int(x)-20, int(y)-20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     return frame
 
+def get_simulated_frame():
+    """Kamera yoksa sahte bir kare üretir"""
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    
+    # Hareketli kutular için basit mantık
+    t = time.time()
+    x1 = int(640 + 300 * np.sin(t))
+    y1 = int(360 + 200 * np.cos(t))
+    
+    x2 = int(640 + 300 * np.sin(t + 2))
+    y2 = int(360 + 200 * np.cos(t + 2))
+    
+    # Kırmızı Engel
+    cv2.rectangle(frame, (x1, y1), (x1+100, y1+100), (0, 0, 255), -1)
+    cv2.putText(frame, "SIM_ENGEL", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    
+    # Yeşil Sancak
+    cv2.rectangle(frame, (x2, y2), (x2+80, y2+150), (0, 255, 0), -1)
+    cv2.putText(frame, "SIM_SANCAK", (x2, y2-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    
+    # Uyarı Metni
+    cv2.putText(frame, "⚠️ KAMERA BAGLANTISI YOK - SIMULASYON MODU", (300, 360), 
+                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+    
+    return frame
+
 def camera_thread():
     """Kamerayı okuyan ve işleyen ana döngü"""
-    global output_frame
+    global output_frame, SIMULATION_MODE
     
     print(f"📷 [CAM] Yayın aranıyor: {STREAM_URL}...")
-    cap = cv2.VideoCapture(STREAM_URL)
     
-    # Bekleme
-    while not cap.isOpened():
-        time.sleep(2)
+    cap = None
+    try:
         cap = cv2.VideoCapture(STREAM_URL)
-
+        if not cap.isOpened():
+            raise Exception("Kamera açılamadı")
+    except Exception as e:
+        print(f"⚠️ [CAM] Bağlantı Hatası: {e}")
+        SIMULATION_MODE = True
+        print("⚠️ DONANIM YOK - SIMULASYON MODUNDA ÇALIŞIYOR")
+    
     # Kayıt Ayarları
     if not os.path.exists(SAVE_PATH): os.makedirs(SAVE_PATH)
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     timestamp_str = time.strftime("%Y%m%d_%H%M%S")
     out = cv2.VideoWriter(f"{SAVE_PATH}USV_{timestamp_str}.avi", fourcc, 30.0, (1280, 720))
 
-    print("✅ [CAM] Kamera Aktif ve Kayıtta!")
+    print(f"✅ [CAM] Kamera Modu: {'SİMÜLASYON' if SIMULATION_MODE else 'CANLI'}")
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("⚠️ [CAM] Sinyal koptu...")
-            cap.release()
-            time.sleep(1)
-            cap = cv2.VideoCapture(STREAM_URL)
-            continue
+        if SIMULATION_MODE:
+            frame = get_simulated_frame()
+            time.sleep(0.05) # ~20 FPS simulation
+        else:
+            ret, frame = cap.read()
+            if not ret:
+                print("⚠️ [CAM] Sinyal koptu, yeniden bağlanılıyor...")
+                cap.release()
+                time.sleep(1)
+                try:
+                    cap = cv2.VideoCapture(STREAM_URL)
+                    if not cap.isOpened(): raise Exception("Fail")
+                except:
+                    print("⚠️ [CAM] Yeniden bağlanamadı -> Simülasyona geçiliyor")
+                    SIMULATION_MODE = True
+                continue
 
         # Görüntüyü İşle
-        processed_frame = process_vision(frame)
+        # Simülasyon değilse işle, simülasyonda zaten çizdik
+        processed_frame = process_vision(frame) if not SIMULATION_MODE else frame
 
         # Bilgi Bas (Overlay)
         t_now = time.strftime("%H:%M:%S")
         cv2.rectangle(processed_frame, (0, 0), (1280, 40), (0, 0, 0), -1)
-        cv2.putText(processed_frame, f"REC: {t_now} | EGE USV WEB VIEW", (10, 30), 
+        mode_str = "SIMULATION" if SIMULATION_MODE else "LIVE"
+        cv2.putText(processed_frame, f"REC: {t_now} | EGE USV WEB VIEW | MODE: {mode_str}", (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # Kaydet
@@ -112,6 +154,7 @@ def generate():
     while True:
         with lock:
             if output_frame is None:
+                time.sleep(0.1)
                 continue
             (flag, encodedImage) = cv2.imencode(".jpg", output_frame)
             if not flag:
@@ -123,7 +166,9 @@ def generate():
 
 def clean_port(port):
     print(f"🧹 Port {port} temizleniyor...")
+    # Robust kill (bazen fuser yetmez)
     os.system(f"fuser -k {port}/tcp > /dev/null 2>&1")
+    os.system(f"lsof -t -i:{port} | xargs kill -9 > /dev/null 2>&1")
     time.sleep(0.5)
 
 @app.route("/")
@@ -136,7 +181,7 @@ if __name__ == "__main__":
     t = threading.Thread(target=camera_thread)
     t.daemon = True
     t.start()
-
+    
     # Web sunucusunu başlat (Burası kodu bloklar)
     print(f"🌍 WEB ARAYÜZÜ BAŞLATILIYOR: http://0.0.0.0:{WEB_PORT}")
     app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)

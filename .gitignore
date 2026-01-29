@@ -2,6 +2,7 @@
 # kaynak klasörünü tamamen yok say
 kaynak/
 *.pdf
+old/
 
 # --- Log ve Geçici Dosyalar ---
 *.log
