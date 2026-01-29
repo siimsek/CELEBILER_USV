@@ -1,0 +1,17 @@
+# --- Antigravity Kaynak Dosyaları (PDF, Manuel vs.) ---
+# kaynak klasörünü tamamen yok say
+kaynak/
+*.pdf
+
+# --- Log ve Geçici Dosyalar ---
+*.log
+system_boot.log
+logs/
+*.csv
+__pycache__/
+*.pyc
+
+# --- VS Code ve Sistem Dosyaları ---
+.vscode/
+.DS_Store
+Thumbs.db
