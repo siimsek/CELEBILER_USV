@@ -1,154 +1,142 @@
 import cv2
 import time
-import socket
 import numpy as np
+import os
 import threading
 from flask import Flask, Response
 
 # --- AYARLAR ---
-HOST = '127.0.0.1'
-PORT = 8888
+STREAM_URL = "tcp://127.0.0.1:8888" # Host'tan gelen yayın
+SAVE_PATH = "/root/workspace/logs/"
+WEB_PORT = 5000
 
-# --- GELİŞMİŞ RENK TANIMLAMALARI (SIKI FİLTRELER) ---
-# Siyahın algılanmaması için 'V' (Parlaklık) ve 'S' (Doygunluk) alt limitleri yükseltildi.
-# OpenCV HSV Aralıkları: H: 0-179, S: 0-255, V: 0-255
-COLOR_RANGES = {
-    "SARI (ENGEL)": {
-        # Sarı genelde parlaktır, V en az 100 olsun
-        "lower": np.array([20, 100, 100]),
-        "upper": np.array([35, 255, 255]),
-        "color": (0, 255, 255) # BGR: Sarı
-    },
-    "MAVI (HEDEF)": {
-        # Koyu lacivert ile siyah karışmasın diye V limitini 80 yaptık
-        "lower": np.array([100, 150, 80]),
-        "upper": np.array([140, 255, 255]),
-        "color": (255, 0, 0)   # BGR: Mavi
-    },
-    "YESIL (HEDEF)": {
-        # SIYAH SORUNUNU ÇÖZEN AYAR BURADA
-        # V (Parlaklık) en az 80, S (Doygunluk) en az 80 olmalı. 
-        # Böylece siyah veya gri tonları yeşil sanılmaz.
-        "lower": np.array([40, 80, 80]),
-        "upper": np.array([85, 255, 255]),
-        "color": (0, 255, 0)   # BGR: Yeşil
-    },
-    "KIRMIZI (YASAK)": {
-        "lower": np.array([0, 150, 100]),
-        "upper": np.array([10, 255, 255]),
-        "lower2": np.array([170, 150, 100]),
-        "upper2": np.array([180, 255, 255]),
-        "color": (0, 0, 255)   # BGR: Kırmızı
-    }
-}
-
-class VideoCamera(object):
-    def __init__(self):
-        self.frame = None
-        self.stopped = False
-        self.connected = False
-        print(f"📡 EGE İDA Görüntü Sistemi Başlatılıyor...")
-
-    def start(self):
-        threading.Thread(target=self.update, args=(), daemon=True).start()
-        return self
-
-    def update(self):
-        while not self.stopped:
-            try:
-                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                client_socket.settimeout(5)
-                client_socket.connect((HOST, PORT))
-                connection = client_socket.makefile('rb')
-                self.connected = True
-                print("✅ Kamera Bağlantısı Sağlandı!")
-
-                stream_bytes = b''
-                while not self.stopped:
-                    data = connection.read(4096)
-                    if not data: break
-                    stream_bytes += data
-                    
-                    first = stream_bytes.find(b'\xff\xd8')
-                    last = stream_bytes.find(b'\xff\xd9')
-
-                    if first != -1 and last != -1:
-                        jpg = stream_bytes[first:last + 2]
-                        stream_bytes = stream_bytes[last + 2:]
-                        image = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
-                        if image is not None:
-                            self.frame = image
-            except Exception:
-                self.connected = False
-                time.sleep(2)
-
-    def process_frame(self, frame):
-        # 1. Ön İşleme: Hafif Bulanıklaştırma (Gürültüyü azaltır)
-        blurred = cv2.GaussianBlur(frame, (9, 9), 0)
-        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-
-        # 2. Renk Taraması
-        for name, params in COLOR_RANGES.items():
-            mask = cv2.inRange(hsv, params["lower"], params["upper"])
-            if "lower2" in params:
-                mask2 = cv2.inRange(hsv, params["lower2"], params["upper2"])
-                mask = cv2.bitwise_or(mask, mask2)
-
-            # Morfolojik Açılış (Erosion + Dilation): Beyaz noktacıkları (gürültü) siler
-            # Bu işlem hatalı tespitleri ciddi oranda düşürür
-            kernel = np.ones((5,5), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                # 1000 pikselden küçük alanları görmezden gel (Küçük lekeleri ele)
-                if area > 1000:
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), params["color"], 2)
-                    
-                    # Yazı Arka Planı (Okunabilirlik için)
-                    label_size, baseline = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                    cv2.rectangle(frame, (x, y - label_size[1] - 10), (x + label_size[0], y), params["color"], -1)
-                    cv2.putText(frame, name, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-
-        # 3. HUD ve Bilgi Ekranı (Şartname Gereği Zaman Etiketi)
-        h, w = frame.shape[:2]
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Üst Siyah Bar
-        cv2.rectangle(frame, (0, 0), (w, 35), (0, 0, 0), -1)
-        cv2.putText(frame, f"REC: {timestamp}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        cv2.putText(frame, "EGE IDA AI SYSTEM", (w - 200, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        # Merkez Nişangah
-        cv2.line(frame, (w//2 - 15, h//2), (w//2 + 15, h//2), (200, 200, 200), 2)
-        cv2.line(frame, (w//2, h//2 - 15), (w//2, h//2 + 15), (200, 200, 200), 2)
-        
-        return frame
-
-    def get_frame(self):
-        if not self.connected or self.frame is None: return None
-        processed = self.process_frame(self.frame.copy())
-        ret, jpeg = cv2.imencode('.jpg', processed, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-        return jpeg.tobytes()
-
+# Flask Uygulaması
 app = Flask(__name__)
-camera_stream = VideoCamera().start()
 
-@app.route('/')
+# Global Değişkenler (Threadler arası veri paylaşımı için)
+output_frame = None
+lock = threading.Lock()
+
+# --- MOD SEÇİMİ ---
+TEST_MODE = True 
+
+# --- RENK ARALIKLARI ---
+COLOR_RANGES = {
+    "SARI_ENGEL": {"lower": np.array([20, 100, 100]), "upper": np.array([35, 255, 255]), "color": (0, 255, 255)},
+    "YESIL_SANCAK": {"lower": np.array([40, 50, 50]), "upper": np.array([90, 255, 255]), "color": (0, 255, 0)}
+}
+RED_LOWER1 = np.array([0, 70, 50]); RED_UPPER1 = np.array([10, 255, 255])
+RED_LOWER2 = np.array([170, 70, 50]); RED_UPPER2 = np.array([180, 255, 255])
+
+def process_vision(frame):
+    """Görüntü İşleme ve Çizim Fonksiyonu"""
+    blurred = cv2.GaussianBlur(frame, (11, 11), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+    
+    detected_objects = []
+
+    # Kırmızı Tespiti
+    mask1 = cv2.inRange(hsv, RED_LOWER1, RED_UPPER1)
+    mask2 = cv2.inRange(hsv, RED_LOWER2, RED_UPPER2)
+    mask_red = cv2.bitwise_or(mask1, mask2)
+    detected_objects.append(("KIRMIZI_ISKELE", mask_red, (0, 0, 255)))
+
+    # Diğer Renkler
+    for name, params in COLOR_RANGES.items():
+        mask = cv2.inRange(hsv, params["lower"], params["upper"])
+        detected_objects.append((name, mask, params["color"]))
+
+    for name, mask, color in detected_objects:
+        mask = cv2.erode(mask, None, iterations=2)
+        mask = cv2.dilate(mask, None, iterations=2)
+        contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if len(contours) > 0:
+            c = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(c)
+            if area > 500:
+                ((x, y), radius) = cv2.minEnclosingCircle(c)
+                if TEST_MODE:
+                    cv2.circle(frame, (int(x), int(y)), int(radius), color, 2)
+                    cv2.putText(frame, f"{name}", (int(x)-20, int(y)-20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    return frame
+
+def camera_thread():
+    """Kamerayı okuyan ve işleyen ana döngü"""
+    global output_frame
+    
+    print(f"📷 [CAM] Yayın aranıyor: {STREAM_URL}...")
+    cap = cv2.VideoCapture(STREAM_URL)
+    
+    # Bekleme
+    while not cap.isOpened():
+        time.sleep(2)
+        cap = cv2.VideoCapture(STREAM_URL)
+
+    # Kayıt Ayarları
+    if not os.path.exists(SAVE_PATH): os.makedirs(SAVE_PATH)
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+    out = cv2.VideoWriter(f"{SAVE_PATH}USV_{timestamp_str}.avi", fourcc, 30.0, (1280, 720))
+
+    print("✅ [CAM] Kamera Aktif ve Kayıtta!")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("⚠️ [CAM] Sinyal koptu...")
+            cap.release()
+            time.sleep(1)
+            cap = cv2.VideoCapture(STREAM_URL)
+            continue
+
+        # Görüntüyü İşle
+        processed_frame = process_vision(frame)
+
+        # Bilgi Bas (Overlay)
+        t_now = time.strftime("%H:%M:%S")
+        cv2.rectangle(processed_frame, (0, 0), (1280, 40), (0, 0, 0), -1)
+        cv2.putText(processed_frame, f"REC: {t_now} | EGE USV WEB VIEW", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        # Kaydet
+        out.write(processed_frame)
+
+        # Web Yayını İçin Kopyala
+        with lock:
+            output_frame = processed_frame.copy()
+
+def generate():
+    """Web tarayıcısına kare kare resim gönderir"""
+    global output_frame
+    while True:
+        with lock:
+            if output_frame is None:
+                continue
+            (flag, encodedImage) = cv2.imencode(".jpg", output_frame)
+            if not flag:
+                continue
+        
+        yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + 
+              bytearray(encodedImage) + b'\r\n')
+        time.sleep(0.03) # 30 FPS limiti
+
+def clean_port(port):
+    print(f"🧹 Port {port} temizleniyor...")
+    os.system(f"fuser -k {port}/tcp > /dev/null 2>&1")
+    time.sleep(0.5)
+
+@app.route("/")
 def video_feed():
-    def generate():
-        while True:
-            frame = camera_stream.get_frame()
-            if frame is not None:
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-            else:
-                time.sleep(0.1)
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
-if __name__ == '__main__':
-    # 0.0.0.0 ile dışarıya açıyoruz
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+if __name__ == "__main__":
+    clean_port(5000)
+    # Önce kamera işini arka planda başlat
+    t = threading.Thread(target=camera_thread)
+    t.daemon = True
+    t.start()
+
+    # Web sunucusunu başlat (Burası kodu bloklar)
+    print(f"🌍 WEB ARAYÜZÜ BAŞLATILIYOR: http://0.0.0.0:{WEB_PORT}")
+    app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)

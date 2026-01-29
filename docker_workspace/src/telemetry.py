@@ -5,210 +5,162 @@ import sys
 import threading
 import os
 import glob
-import serial
 import json
+from flask import Flask, jsonify, render_template_string
 
 # --- AYARLAR ---
 BAUD_RATE_PIXHAWK = 115200
-BAUD_RATE_STM32 = 115200  # STM32 kodunla aynı olmalı
-CSV_FILE = "/root/workspace/telemetri_verisi.csv"
+CSV_FILE = "/root/workspace/logs/telemetri_verisi.csv"
+WEB_PORT = 8080
 
-# Veri Başlıkları
-COLUMNS = [
-    "Timestamp", "Lat", "Lon", "Speed_m_s", "Roll", "Pitch", "Heading", "Mode",
-    "STM_Date", "Env_Temp", "Env_Hum", "Rain_Val"
-]
+# Flask Uygulaması
+app = Flask(__name__)
+
+# Küresel Veri
+telemetry_data = {
+    "Timestamp": "--", "Lat": 0, "Lon": 0, "Heading": 0,
+    "Battery": 0, "Mode": "DISCONNECTED", "Speed": 0, "Roll": 0, "Pitch": 0,
+    "Rain_Val": 0, "Env_Temp": 0
+}
+COLUMNS = list(telemetry_data.keys())
+
+# --- HTML ARAYÜZ ---
+HTML_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CELEBILER USV - MISSION CONTROL</title>
+    <meta charset="UTF-8">
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: monospace; margin: 0; padding: 20px; }
+        h1 { text-align: center; color: #00d4ff; border-bottom: 2px solid #00d4ff; padding-bottom: 10px; }
+        .grid-container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+        .video-box { border: 2px solid #333; background: #000; text-align: center; height: 400px; }
+        .video-box h2 { margin: 0; padding: 10px; background: #1f1f1f; color: #ffeb3b; }
+        iframe { width: 100%; height: 350px; border: none; }
+        .stats-box { grid-column: span 2; background: #1e1e1e; padding: 20px; border: 1px solid #444; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #333; padding: 10px; text-align: left; }
+        th { background-color: #2c2c2c; color: #00d4ff; }
+        .status-ok { color: #00ff00; }
+    </style>
+    <script>
+        function updateStats() {
+            fetch('/api/data')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('ts').innerText = data.Timestamp;
+                    document.getElementById('mode').innerText = data.Mode;
+                    document.getElementById('bat').innerText = data.Battery.toFixed(1) + " V";
+                    document.getElementById('gps').innerText = data.Lat.toFixed(6) + ", " + data.Lon.toFixed(6);
+                    document.getElementById('hdg').innerText = data.Heading.toFixed(1) + "°";
+                    document.getElementById('spd').innerText = data.Speed.toFixed(1) + " m/s";
+                });
+        }
+        setInterval(updateStats, 1000);
+    </script>
+</head>
+<body>
+    <h1>🚀 ÇELEBİLER USV - YER İSTASYONU</h1>
+    <div class="grid-container">
+        <div class="video-box">
+            <h2>📷 KAMERA (Port 5000)</h2>
+            <iframe src="http://192.168.11.5:5000"></iframe>
+        </div>
+        <div class="video-box">
+            <h2>📡 LIDAR HARİTA (Port 5001)</h2>
+            <iframe src="http://192.168.11.5:5001"></iframe>
+        </div>
+        <div class="stats-box">
+            <h2>📊 CANLI TELEMETRİ</h2>
+            <table>
+                <tr><th>Zaman</th><td id="ts">--</td><th>Mod</th><td id="mode">--</td></tr>
+                <tr><th>Batarya</th><td id="bat">--</td><th>Konum</th><td id="gps">--</td></tr>
+                <tr><th>Pusula</th><td id="hdg">--</td><th>Hız</th><td id="spd">--</td></tr>
+            </table>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+def clean_port(port):
+    """Sadece belirtilen portu kullanan işlemi öldürür."""
+    print(f"🧹 Port {port} temizleniyor...")
+    os.system(f"fuser -k {port}/tcp > /dev/null 2>&1")
+    time.sleep(0.5)
 
 class SmartTelemetry:
     def __init__(self):
-        self.data = {col: 0 for col in COLUMNS}
-        self.data.update({
-            "Mode": "DISCONNECTED", "STM_Date": "--:--:--", 
-            "Env_Temp": 0.0, "Env_Hum": 0.0, "Rain_Val": 0
-        })
+        self.master = None
         self.running = True
-        self.pixhawk = None
-        self.stm32 = None
-        self.record_count = 0
-        self.lock = threading.Lock() # Veri çakışmasını önlemek için kilit
-
-    def scan_ports(self):
-        """Sistemdeki tüm USB/ACM portlarını bulur ve kimlik tespiti yapar."""
-        potential_ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
-        print(f"\n🔍 Taranan Portlar: {potential_ports}")
+        self.lock = threading.Lock()
         
-        found_pix = None
-        found_stm = None
+        # Log klasörü kontrolü
+        if not os.path.exists("/root/workspace/logs"):
+            os.makedirs("/root/workspace/logs")
 
-        # 1. Tur: STM32 Avı (JSON Formatı Arayan Dedektif)
-        for port in potential_ports:
-            if found_stm: break
+    def connect_pixhawk(self):
+        ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
+        for port in ports:
             try:
-                print(f"   Testing STM32 @ {port}...", end=" ")
-                # Timeout kısa tutulur ki hızlı geçsin
-                s = serial.Serial(port, BAUD_RATE_STM32, timeout=2)
-                time.sleep(1.5) # Arduino reset payı
-                
-                # 5 denemede geçerli JSON yakala
-                for _ in range(5):
-                    line = s.readline().decode('utf-8', errors='ignore').strip()
-                    if line.startswith("{") and "temp" in line:
-                        print("✅ BULUNDU! (Sensör Kartı)")
-                        found_stm = s
-                        break
-                
-                if not found_stm: s.close()
-                else: print("") # Yeni satır
-            except: 
-                print("❌")
+                conn = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
+                conn.wait_heartbeat(timeout=1)
+                return conn
+            except: pass
+        return None
 
-        # 2. Tur: Pixhawk Avı (MAVLink Sinyali Arayan Dedektif)
-        for port in potential_ports:
-            # STM32 bulduğumuz portu elleme
-            if found_stm and found_stm.port == port: continue
-            
-            try:
-                print(f"   Testing Pixhawk @ {port}...", end=" ")
-                master = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
-                # Heartbeat bekle
-                msg = master.wait_heartbeat(timeout=1)
-                if msg:
-                    print("✅ BULUNDU! (Uçuş Kontrolcü)")
-                    found_pix = master
-                    break
-                else:
-                    master.close()
-                    print("❌")
-            except: 
-                print("❌")
+    def read_loop(self):
+        # CSV Başlıkları
+        if not os.path.isfile(CSV_FILE):
+            pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
 
-        return found_pix, found_stm
-
-    def connect_system(self):
-        """Bağlantı koparsa veya başlangıçta çalışır."""
         while self.running:
-            if self.pixhawk and self.stm32:
-                return # İkisi de bağlıysa çık
+            if not self.master:
+                self.master = self.connect_pixhawk()
+                time.sleep(1)
+                continue
 
-            self.pixhawk, self.stm32 = self.scan_ports()
-            
-            if not self.pixhawk or not self.stm32:
-                print("⚠️ Eksik cihaz var! 3 saniye sonra tekrar taranacak...")
-                time.sleep(3)
-            else:
-                # Pixhawk veri akışını başlat
-                self.pixhawk.mav.request_data_stream_send(
-                    self.pixhawk.target_system, self.pixhawk.target_component,
-                    mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1)
-                print("🚀 SİSTEM HAZIR! Veri akışı başlıyor...")
-                return
-
-    def read_pixhawk(self):
-        while self.running:
-            if not self.pixhawk: 
-                time.sleep(1); continue
             try:
-                msg = self.pixhawk.recv_match(blocking=True, timeout=1.0)
+                msg = self.master.recv_match(blocking=True, timeout=1.0)
                 if not msg: continue
                 
-                with self.lock: # Veri yazarken kilitle
+                with self.lock:
+                    telemetry_data["Timestamp"] = time.strftime("%H:%M:%S")
+                    
                     if msg.get_type() == 'GLOBAL_POSITION_INT':
-                        self.data["Lat"] = msg.lat / 1e7
-                        self.data["Lon"] = msg.lon / 1e7
-                        self.data["Heading"] = msg.hdg / 100.0
-                    elif msg.get_type() == 'VFR_HUD':
-                        self.data["Speed_m_s"] = msg.groundspeed
-                    elif msg.get_type() == 'ATTITUDE':
-                        self.data["Roll"] = msg.roll * 57.2958
-                        self.data["Pitch"] = msg.pitch * 57.2958
+                        telemetry_data['Lat'] = msg.lat / 1e7
+                        telemetry_data['Lon'] = msg.lon / 1e7
+                        telemetry_data['Heading'] = msg.hdg / 100.0
+                    elif msg.get_type() == 'SYS_STATUS':
+                        telemetry_data['Battery'] = msg.voltage_battery / 1000.0
                     elif msg.get_type() == 'HEARTBEAT':
-                        self.data["Mode"] = mavutil.mode_string_v10(msg)
-            except Exception:
-                # Bağlantı koptu mu?
-                pass
+                        telemetry_data['Mode'] = mavutil.mode_string_v10(msg)
+                    elif msg.get_type() == 'VFR_HUD':
+                        telemetry_data['Speed'] = msg.groundspeed
 
-    def read_stm32(self):
-        while self.running:
-            if not self.stm32: 
-                time.sleep(1); continue
-            try:
-                if self.stm32.in_waiting > 0:
-                    line = self.stm32.readline().decode('utf-8', errors='ignore').strip()
-                    if line.startswith("{") and line.endswith("}"):
-                        try:
-                            sensor_data = json.loads(line)
-                            with self.lock:
-                                self.data["STM_Date"] = sensor_data.get("tarih", "N/A")
-                                self.data["Env_Temp"] = float(sensor_data.get("temp", 0.0))
-                                self.data["Env_Hum"]  = float(sensor_data.get("hum", 0.0))
-                                self.data["Rain_Val"] = int(sensor_data.get("rain", 0))
-                        except: pass
-            except Exception:
-                # Bağlantı hatası durumunda pas geç, ana döngü yeniden bağlar
-                pass
+                # CSV Kayıt (Saniyede bir)
+                if int(time.time()) % 2 == 0:
+                    df = pd.DataFrame([telemetry_data])
+                    df.to_csv(CSV_FILE, mode='a', header=False, index=False)
 
-    def display_dashboard(self):
-        # CSV Başlat
-        df = pd.DataFrame(columns=COLUMNS)
-        df.to_csv(CSV_FILE, index=False)
-        
-        while self.running:
-            self.data["Timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Ekranı Temizle ve Yaz
-            os.system('clear')
-            
-            rain_val = self.data['Rain_Val']
-            rain_status = "KURU ☀️" if rain_val > 3000 else "YAGISLI 🌧️"
-            
-            print(f"========== EGE İDA OTONOM SİSTEMİ ==========")
-            print(f"📡 DURUM: {'BAĞLI' if (self.pixhawk and self.stm32) else 'ARANIYOR...'}")
-            print(f"⏱️  Zaman: {self.data['Timestamp']} | Kayıt: {self.record_count}")
-            print("-" * 44)
-            print(f"🚁 PIXHAWK TELEMETRİ")
-            print(f"   Konum    : {self.data['Lat']:.6f}, {self.data['Lon']:.6f}")
-            print(f"   Hız/Mod  : {self.data['Speed_m_s']:.1f} m/s  [{self.data['Mode']}]")
-            print(f"   Yönelim  : Head:{self.data['Heading']:.0f}° Roll:{self.data['Roll']:.1f}°")
-            print("-" * 44)
-            print(f"🌡️ STM32 SENSÖR KARTI")
-            print(f"   Ortam    : {self.data['Env_Temp']}°C | {self.data['Env_Hum']}% Nem")
-            print(f"   Yağmur   : {rain_status} ({rain_val})")
-            print("-" * 44)
-            print("Çıkış için CTRL+C yapın. (Otomatik Upload Aktif)")
-
-            # CSV Kayıt
-            with self.lock:
-                df_new = pd.DataFrame([self.data])
-            df_new.to_csv(CSV_FILE, mode='a', header=False, index=False)
-            
-            self.record_count += 1
-            time.sleep(0.5)
+            except Exception: pass
 
     def start(self):
-        print("Sistem başlatılıyor...")
-        self.connect_system()
+        t = threading.Thread(target=self.read_loop, daemon=True)
+        t.start()
         
-        # İş parçacıklarını başlat
-        t1 = threading.Thread(target=self.read_pixhawk, daemon=True)
-        t2 = threading.Thread(target=self.read_stm32, daemon=True)
-        t3 = threading.Thread(target=self.display_dashboard, daemon=True)
-        
-        t1.start(); t2.start(); t3.start()
-        
-        try:
-            while True: time.sleep(1)
-        except KeyboardInterrupt:
-            self.running = False
-            print("\nVeriler kaydediliyor...")
-            time.sleep(1)
-            self.upload_csv()
+        print(f"🌍 WEB SERVER BAŞLATILIYOR: Port {WEB_PORT}")
+        app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)
 
-    def upload_csv(self):
-        if os.path.exists(CSV_FILE):
-            print("☁️  up.sb'ye yükleniyor...")
-            os.system(f"curl -s https://up.sb -T {CSV_FILE}")
-            print("\n✅ Tamamlandı.")
+# Flask Rotaları
+@app.route('/')
+def index(): return render_template_string(HTML_PAGE)
+
+@app.route('/api/data')
+def get_data(): return jsonify(telemetry_data)
 
 if __name__ == "__main__":
-    app = SmartTelemetry()
-    app.start()
+    clean_port(WEB_PORT)
+    st = SmartTelemetry()
+    st.start()
