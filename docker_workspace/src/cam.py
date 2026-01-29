@@ -77,8 +77,10 @@ class VideoCamera:
                         stream_bytes = stream_bytes[last + 2:]
                         image = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
                         if image is not None:
-                            # PERFORMANS: 720p -> 360p küçült
-                            image = cv2.resize(image, (640, 360))
+                            # ÇÖZÜNÜRLÜK: 720p (Orijinal gelen görüntü zaten 720p ise resize'a gerek yok)
+                            h, w = image.shape[:2]
+                            if (w, h) != (1280, 720):
+                                image = cv2.resize(image, (1280, 720))
                             self.frame = image
                             
             except Exception as e:
@@ -108,25 +110,25 @@ class VideoCamera:
                 if area > 1000:
                     x, y, w, h = cv2.boundingRect(cnt)
                     cv2.rectangle(frame, (x, y), (x + w, y + h), params["color"], 2)
-                    cv2.putText(frame, name, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, params["color"], 2)
+                    cv2.putText(frame, name, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, params["color"], 2)
 
         # HUD
         h, w = frame.shape[:2]
         timestamp = time.strftime("%H:%M:%S")
-        cv2.rectangle(frame, (0, 0), (w, 30), (0, 0, 0), -1)
-        cv2.putText(frame, f"REC: {timestamp} | LIVE", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        cv2.rectangle(frame, (0, 0), (w, 35), (0, 0, 0), -1)
+        cv2.putText(frame, f"REC: {timestamp} | FPS: 30 | LIVE", (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         # Merkez Nişangah
-        cv2.line(frame, (w//2 - 15, h//2), (w//2 + 15, h//2), (200, 200, 200), 1)
-        cv2.line(frame, (w//2, h//2 - 15), (w//2, h//2 + 15), (200, 200, 200), 1)
+        cv2.line(frame, (w//2 - 20, h//2), (w//2 + 20, h//2), (200, 200, 200), 2)
+        cv2.line(frame, (w//2, h//2 - 20), (w//2, h//2 + 20), (200, 200, 200), 2)
         
         return frame
 
     def get_frame(self):
         if not self.connected or self.frame is None:
-            # Simülasyon Karesi
-            sim = np.zeros((360, 640, 3), dtype=np.uint8)
-            cv2.putText(sim, "KAMERA BEKLENIYOR...", (180, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            # Simülasyon Karesi (720p)
+            sim = np.zeros((720, 1280, 3), dtype=np.uint8)
+            cv2.putText(sim, "KAMERA BEKLENIYOR...", (450, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
             ret, jpeg = cv2.imencode('.jpg', sim)
             return jpeg.tobytes()
         
