@@ -188,16 +188,16 @@ HTML_PAGE = """
         }
 
         .stat-label { 
-            font-size: 0.7rem; 
+            font-size: 0.85rem; 
             color: var(--text-secondary); 
             text-transform: uppercase; 
             font-weight: 600;
-            margin-bottom: 2px;
+            margin-bottom: 4px;
         }
         
         .stat-value { 
             font-family: var(--font-mono); 
-            font-size: 1.4rem; /* Biraz küçültüldü */
+            font-size: 1.8rem;
             font-weight: 700; 
             color: var(--text-primary); 
             white-space: nowrap;
