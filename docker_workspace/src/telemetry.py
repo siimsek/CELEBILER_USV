@@ -29,59 +29,139 @@ SIMULATION_MODE = False
 # --- HTML ARAYÜZ ---
 HTML_PAGE = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <title>CELEBILER USV - MISSION CONTROL</title>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { background-color: #121212; color: #e0e0e0; font-family: 'Courier New', monospace; margin: 0; padding: 20px; }
-        h1 { text-align: center; color: #00d4ff; border-bottom: 2px solid #00d4ff; padding-bottom: 10px; }
-        
-        .grid-container { 
-            display: grid; 
-            grid-template-columns: 1fr 1fr; 
-            gap: 20px; 
-            margin-top: 20px; 
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --accent: #38bdf8;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --success: #4ade80;
+            --danger: #ef4444;
+            --font-mono: 'JetBrains Mono', 'Courier New', monospace;
         }
-        
-        .video-box { 
-            border: 2px solid #333; 
-            background: #000; 
-            text-align: center;
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            overflow: hidden; /* Scroll yok */
             display: flex;
             flex-direction: column;
-            /* Yükseklik içeriğe göre veya sabit */
-            height: 400px; 
-            overflow: hidden;
         }
-        
-        .video-box h2 { 
-            margin: 0; 
-            padding: 8px; 
-            background: #1f1f1f; 
-            color: #ffeb3b; 
+
+        /* HEADER */
+        header {
+            background: rgba(30, 41, 59, 0.8);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            padding: 0 20px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        h1 {
             font-size: 1.2rem;
-            flex-shrink: 0; /* Başlık küçülmesin */
+            font-weight: 700;
+            margin: 0;
+            color: var(--accent);
+            letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
-        
-        iframe { 
-            width: 100%; 
-            height: 100%; 
-            border: none; 
-            flex-grow: 1; /* Kalan alanı doldur */
+
+        /* MAIN LAYOUT */
+        .dashboard-grid {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 1fr; /* Sol Kamera, Sağ Harita */
+            grid-template-rows: 2fr 1fr;    /* Üst Video, Alt İstatistik */
+            gap: 15px;
+            padding: 15px;
+            height: calc(100vh - 60px);
         }
-        
-        .stats-box { 
-            grid-column: span 2; 
-            background: #1e1e1e; 
-            padding: 20px; 
-            border: 1px solid #444; 
+
+        /* CARDS */
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.05);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
         }
+
+        .card-header {
+            padding: 10px 15px;
+            background: rgba(0,0,0,0.2);
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        /* VIDEO FRAMES */
+        .video-container {
+            flex: 1;
+            position: relative;
+            background: #000;
+        }
+
+        iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+            display: block;
+        }
+
+        /* STATS GRID */
+        .stats-area {
+            grid-column: span 2; /* Alt kısım boydan boya */
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+        }
+
+        .stat-card {
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            transition: transform 0.2s;
+        }
+
+        .stat-card:hover { transform: translateY(-2px); background: rgba(255,255,255,0.05); }
+
+        .stat-label { font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat-value { font-family: var(--font-mono); font-size: 1.5rem; font-weight: 700; color: var(--text-primary); margin-top: 5px; }
         
-        table { width: 100%; border-collapse: collapse; }
-        th, td { border: 1px solid #333; padding: 10px; text-align: left; }
-        th { background-color: #2c2c2c; color: #00d4ff; }
-        .status-ok { color: #00ff00; }
+        /* STATUS INDICATORS */
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+        .status-online { background-color: var(--success); box-shadow: 0 0 10px var(--success); }
+        .status-offline { background-color: var(--danger); }
+
+        /* MODIFIER COLORS */
+        .val-accent { color: var(--accent); }
+        .val-success { color: var(--success); }
     </style>
     <script>
         function updateStats() {
@@ -91,14 +171,18 @@ HTML_PAGE = """
                     document.getElementById('ts').innerText = data.Timestamp;
                     document.getElementById('mode').innerText = data.Mode;
                     document.getElementById('bat').innerText = data.Battery.toFixed(1) + " V";
-                    document.getElementById('gps').innerText = data.Lat.toFixed(6) + ", " + data.Lon.toFixed(6);
-                    document.getElementById('hdg').innerText = data.Heading.toFixed(1) + "°";
+                    document.getElementById('gps').innerText = data.Lat.toFixed(5) + ", " + data.Lon.toFixed(5);
+                    document.getElementById('hdg').innerText = data.Heading.toFixed(0) + "°";
                     document.getElementById('spd').innerText = data.Speed.toFixed(1) + " m/s";
+
+                    // Mod Renklendirme
+                    const modeEl = document.getElementById('mode');
+                    modeEl.style.color = data.Mode === "DISCONNECTED" ? "var(--danger)" : "var(--success)";
                 });
         }
         setInterval(updateStats, 1000);
 
-        // Dinamik Iframe Yükleyici (Hangi IP'den girildiyse o IP'yi kullanır)
+        // Dinamik IP Çözücü
         window.onload = function() {
             var host = window.location.hostname;
             console.log("Detected Host: " + host);
@@ -108,23 +192,52 @@ HTML_PAGE = """
     </script>
 </head>
 <body>
-    <h1>🚀 ÇELEBİLER USV - YER İSTASYONU</h1>
-    <div class="grid-container">
-        <div class="video-box">
-            <h2>📷 KAMERA (Port 5000)</h2>
-            <iframe id="cam_frame" src=""></iframe>
+    <header>
+        <h1><span class="status-dot status-online"></span> ÇELEBİLER USV <span style="font-weight:400; font-size:0.9rem; color:var(--text-secondary)">// MISSION CONTROL</span></h1>
+        <div style="font-family: var(--font-mono); font-size: 0.9rem;" id="ts">--:--:--</div>
+    </header>
+
+    <div class="dashboard-grid">
+        <!-- KAMERA -->
+        <div class="card">
+            <div class="card-header">
+                <span>FRONT CAMERA</span>
+                <span class="status-dot status-online"></span>
+            </div>
+            <div class="video-container">
+                <iframe id="cam_frame" src=""></iframe>
+            </div>
         </div>
-        <div class="video-box">
-            <h2>📡 LIDAR HARİTA (Port 5001)</h2>
-            <iframe id="map_frame" src=""></iframe>
+
+        <!-- LIDAR -->
+        <div class="card">
+            <div class="card-header">
+                <span>LIDAR MAPPING</span>
+                <span class="status-dot status-online"></span>
+            </div>
+            <div class="video-container">
+                <iframe id="map_frame" src=""></iframe>
+            </div>
         </div>
-        <div class="stats-box">
-            <h2>📊 CANLI TELEMETRİ</h2>
-            <table>
-                <tr><th>Zaman</th><td id="ts">--</td><th>Mod</th><td id="mode">--</td></tr>
-                <tr><th>Batarya</th><td id="bat">--</td><th>Konum</th><td id="gps">--</td></tr>
-                <tr><th>Pusula</th><td id="hdg">--</td><th>Hız</th><td id="spd">--</td></tr>
-            </table>
+
+        <!-- İSTATİSTİKLER -->
+        <div class="stats-area">
+            <div class="stat-card">
+                <div class="stat-label">BATTERY</div>
+                <div class="stat-value val-accent" id="bat">-- V</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">SYSTEM MODE</div>
+                <div class="stat-value" id="mode">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">GPS POSITION</div>
+                <div class="stat-value" id="gps" style="font-size: 1.1rem;">--.----, --.----</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">SPEED / HEADING</div>
+                <div class="stat-value"><span id="spd">--</span> <span style="font-size:1rem; color:#555">|</span> <span id="hdg">--</span></div>
+            </div>
         </div>
     </div>
 </body>

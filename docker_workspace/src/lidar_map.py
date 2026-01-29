@@ -45,47 +45,60 @@ class LidarMapper(Node):
     def scan_callback(self, msg):
         global output_frame, SIMULATION_MODE
         self.last_msg_time = time.time()
-        SIMULATION_MODE = False # Veri geliyorsa simülasyonu kapat
+        SIMULATION_MODE = False
         
-        # Haritayı Temizle (Siyah)
+        # Haritayı Temizle
         img = self.blank_image.copy()
         
-        # Merkez Noktası (USV)
-        center_x, center_y = MAP_SIZE // 2, MAP_SIZE // 2
+        # Merkez
+        cx, cy = MAP_SIZE // 2, MAP_SIZE // 2
         
-        # Tekneyi Çiz (Yeşil Ok)
-        cv2.arrowedLine(img, (center_x, center_y + 10), (center_x, center_y - 20), (0, 255, 0), 2)
-        cv2.circle(img, (center_x, center_y), 5, (0, 0, 255), -1)
+        # Tekneyi Çiz
+        cv2.arrowedLine(img, (cx, cy + 10), (cx, cy - 20), (0, 255, 0), 2)
+        cv2.circle(img, (cx, cy), 5, (0, 0, 255), -1)
 
-        # Lidar Noktalarını Çiz
-        angle = msg.angle_min
-        for r in msg.ranges:
-            # Sadece geçerli mesafeler
-            if 0.1 < r < MAX_RANGE_M:
-                # Polar -> Kartezyen Dönüşümü
-                # Lidar'da açı saat yönünün tersinedir, görselleştirmede düzeltiyoruz
-                x = r * math.cos(angle)
-                y = r * math.sin(angle)
-                
-                # Koordinat Dönüşümü (Ekran Koordinatları)
-                # X ekseni -> Ekranın Y'si (İleri), Y ekseni -> Ekranın X'i (Yan)
-                px = int(center_x - (y * SCALE))  # Y ekseni ters (sol/sağ)
-                py = int(center_y - (x * SCALE))  # X ekseni ters (yukarı/aşağı)
-                
-                # Nokta Koy (Beyaz)
-                cv2.circle(img, (px, py), 1, (255, 255, 255), -1)
+        # --- VECTORIZED PROCESSING (Optimize Edilmiş) ---
+        ranges = np.array(msg.ranges)
+        
+        # Geçersiz verileri filtrele
+        valid_indices = (ranges > 0.1) & (ranges < MAX_RANGE_M)
+        ranges = ranges[valid_indices]
+        
+        if len(ranges) > 0:
+            # Açıları hesapla
+            angles = msg.angle_min + np.arange(len(msg.ranges))[valid_indices] * msg.angle_increment
             
-            angle += msg.angle_increment
+            # Polar -> Cartesian (Vektörel)
+            x = ranges * np.cos(angles)
+            y = ranges * np.sin(angles)
+            
+            # Koordinat Dönüşümü (Ekran)
+            # px = cx - (y * SCALE)
+            # py = cy - (x * SCALE)
+            # Float -> Int
+            px = (cx - (y * SCALE)).astype(int)
+            py = (cy - (x * SCALE)).astype(int)
+            
+            # Sınır Kontrolü (Harita dışına taşmayı önle)
+            mask = (px >= 0) & (px < MAP_SIZE) & (py >= 0) & (py < MAP_SIZE)
+            px = px[mask]
+            py = py[mask]
+            
+            # Hızlı Çizim (Piksel Atama)
+            # cv2.circle yerine direkt matris ataması çok daha hızlıdır
+            img[py, px] = (255, 255, 255)
+            
+            # Görünürlüğü artırmak için biraz kalınlaştır (Opsiyonel, CPU yerse kapatılabilir)
+            # cv2.dilate(img, kernel, ...) yapılabilir ama şimdilik gerek yok.
 
-        # Engel Mesafesi Uyarısı (Çember)
-        # 1.5 Metre Çemberi (Kırmızı)
+        # Engel Mesafesi Uyarısı (1.5m)
         r_px = int(1.5 * SCALE)
-        cv2.circle(img, (center_x, center_y), r_px, (0, 0, 100), 1)
+        cv2.circle(img, (cx, cy), r_px, (0, 0, 100), 1)
         
         # Bilgi
-        cv2.putText(img, "LIVE LIDAR DATA", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(img, f"LIVE LIDAR | PTS: {len(ranges)}", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        # Web Yayını İçin Kopyala
         with lock:
             output_frame = img
 
