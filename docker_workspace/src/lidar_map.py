@@ -18,7 +18,8 @@ SCALE = (MAP_SIZE // 2) / MAX_RANGE_M
 
 # Flask Sunucusu
 app = Flask(__name__)
-output_frame = None
+output_frame = np.zeros((MAP_SIZE, MAP_SIZE, 3), dtype=np.uint8)
+cv2.putText(output_frame, "MAP LOADING...", (180, 300), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 lock = threading.Lock()
 SIMULATION_MODE = False
 
