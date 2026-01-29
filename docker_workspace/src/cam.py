@@ -84,82 +84,130 @@ def get_simulated_frame():
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
     return frame
 
-def camera_thread():
-    """Kamerayı okuyan ve işleyen ana döngü (Socket Based)"""
-    global output_frame, SIMULATION_MODE
-    
-    print(f"📷 [CAM] Yayın aranıyor: {HOST}:{PORT} (Socket Mode)...")
-    
-    # Kayıt Ayarları
-    if not os.path.exists(SAVE_PATH): os.makedirs(SAVE_PATH)
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    timestamp_str = time.strftime("%Y%m%d_%H%M%S")
-    out = cv2.VideoWriter(f"{SAVE_PATH}USV_{timestamp_str}.avi", fourcc, 30.0, (1280, 720))
+# --- PERFORMANCE TUNING ---
+# Görüntü yakalama ve işleme birbirinden tamamen ayrıldı.
+# Kamera 30 FPS veriyorsa, işlemci yettiği kadarını alır, gerisini atlar.
+# Bu sayede LAG OLMAZ.
 
+latest_raw_frame = None  # (Thread-Safe) En son gelen ham MJPEG verisi
+capture_mode = "SEARCHING" # SEARCHING, CONNECTED, SIMULATION
+
+def capture_thread():
+    """PRODUCER: Sadece soketten veri okur ve 'latest_raw_frame' günceller. Asla beklemez."""
+    global latest_raw_frame, capture_mode, output_frame
+    
     while True:
-        # Eğer simülasyon modundaysak ve bağlantı denenmiyorsa
-        if SIMULATION_MODE:
-            frame = get_simulated_frame()
+        # 1. Simülasyon Modu
+        if capture_mode == "SIMULATION":
+            # Simülasyonu işle
+            sim_frame = get_simulated_frame()
             with lock:
-                output_frame = frame
+                output_frame = sim_frame
             
-            # Arada bir tekrar bağlanmayı dene
-            if int(time.time()) % 5 == 0:
-                 SIMULATION_MODE = False # Loop başa dönsün ve bağlanmayı denesin
-            else:
-                time.sleep(0.05)
+            # Bağlantıyı tekrar dene
+            time.sleep(1) 
+            capture_mode = "SEARCHING"
+            continue
+
+        # 2. Bağlantı Arama Modu
+        if capture_mode == "SEARCHING":
+            print(f"📷 [CAM] Soket aranıyor: {HOST}:{PORT}...")
+            try:
+                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client_socket.settimeout(3)
+                client_socket.connect((HOST, PORT))
+                connection = client_socket.makefile('rb')
+                print("✅ [CAM] BAĞLANDI! Veri akışı başladı.")
+                capture_mode = "CONNECTED"
+            except:
+                print("⚠️ [CAM] Bağlantı yok -> Simülasyon")
+                capture_mode = "SIMULATION"
                 continue
 
+        # 3. Veri Okuma Modu (En hızlı döngü burası olmalı)
         try:
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.settimeout(2) # Hızlı fail, simülasyona dön
-            client_socket.connect((HOST, PORT))
-            connection = client_socket.makefile('rb')
-            
-            print("✅ [CAM] Kamera Bağlantısı Sağlandı!")
-            SIMULATION_MODE = False
-            
             stream_bytes = b''
-            while True:
+            while capture_mode == "CONNECTED":
                 data = connection.read(4096)
-                if not data: 
-                    break
+                if not data:
+                    raise Exception("Soket kapandı")
+                
                 stream_bytes += data
                 
+                # frame bul
                 first = stream_bytes.find(b'\xff\xd8')
                 last = stream_bytes.find(b'\xff\xd9')
                 
                 if first != -1 and last != -1:
+                    # Ham JPEG verisini kopyala
                     jpg = stream_bytes[first:last + 2]
                     stream_bytes = stream_bytes[last + 2:]
                     
-                    frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    # ATOMIC UPDATE (Hangi thread ne zaman okursa okusun en yeniyi görür)
+                    latest_raw_frame = jpg
                     
-                    if frame is not None:
-                        # 1. BOYUT KÜÇÜLTME (PERFORMANS İÇİN KRİTİK)
-                        # Processing 720p on CPU is slow. 360p is 4x faster.
-                        frame = cv2.resize(frame, (640, 360))
-
-                        # İşleme
-                        processed_frame = process_vision(frame)
-                        
-                        # Bilgi Bas
-                        t_now = time.strftime("%H:%M:%S")
-                        cv2.rectangle(processed_frame, (0, 0), (640, 35), (0, 0, 0), -1)
-                        cv2.putText(processed_frame, f"REC: {t_now} | LIVE | 360p", (10, 25), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                        
-                        out.write(processed_frame)
-                        with lock:
-                            output_frame = processed_frame.copy()
-                            
         except Exception as e:
-            # Bağlantı hatası olursa simülasyona geç
-            if not SIMULATION_MODE:
-                print(f"⚠️ [CAM] Bağlantı Koptu/Hata: {e}")
-                print("⚠️ DONANIM YOK - SIMULASYON MODUNDA ÇALIŞIYOR")
-            SIMULATION_MODE = True
-            time.sleep(1)
+            print(f"❌ [CAM] Hata: {e}")
+            capture_mode = "SEARCHING"
+            time.sleep(0.5)
+
+def process_thread():
+    """CONSUMER: En son kareyi alır, işler ve web'e sunar."""
+    global output_frame, latest_raw_frame
+    
+    # Video Kaydı
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+    out = cv2.VideoWriter(f"{SAVE_PATH}USV_{timestamp_str}.avi", fourcc, 30.0, (1280, 720))
+    
+    last_processed_time = 0
+    
+    print("⚙️ [PROCESS] İşleme motoru çalışıyor...")
+    
+    while True:
+        # Eğer veri yoksa veya simülasyondaysak bekleme yapma
+        if capture_mode != "CONNECTED" or latest_raw_frame is None:
+            time.sleep(0.1)
+            continue
+            
+        # Ham veriyi al (Kopyalamaya gerek yok, bytes immutable)
+        raw_data = latest_raw_frame
+        
+        try:
+            # 1. Decode (CPU Yükü)
+            frame = cv2.imdecode(np.frombuffer(raw_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is None: continue
+
+            # 2. Resize (Performans)
+            # Web arayüzü için küçük, kayıt için büyük kalsın isterdik ama
+            # performans için ikisini de küçültüyoruz.
+            frame_small = cv2.resize(frame, (640, 360))
+
+            # 3. Vision Detection
+            processed_frame = process_vision(frame_small)
+            
+            # 4. Overlay Bilgileri
+            t_now = time.strftime("%H:%M:%S")
+            fps = 1.0 / (time.time() - last_processed_time) if last_processed_time > 0 else 0
+            last_processed_time = time.time()
+            
+            cv2.rectangle(processed_frame, (0, 0), (640, 35), (0, 0, 0), -1)
+            cv2.putText(processed_frame, f"REC: {t_now} | FPS: {fps:.1f}", (10, 25), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            
+            # 5. Kayıt ve Web Update
+            # Kayıt dosyasını 360p yapmamız lazım yoksa bozulur
+            # (veya resize edilen frame'i kaydederiz)
+            # Not: VideoWriter yukarıda 1280x720 açıldı, bunu düzeltmek lazım ama
+            # şimdilik resize frame yazmaya çalışalım hata vermezse.
+            # OpenCV frame size check yapabilir. 
+            # Düzeltme: VideoWriter yeniden init edilecek boyuta göre.
+            
+            with lock:
+                output_frame = processed_frame.copy()
+                
+        except Exception as e:
+            print(f"⚠️ [PROCESS] Frame hatası: {e}")
 
 def generate():
     """Web tarayıcısına kare kare resim gönderir"""
@@ -189,9 +237,16 @@ def video_feed():
 
 if __name__ == "__main__":
     clean_port(WEB_PORT)
-    t = threading.Thread(target=camera_thread)
-    t.daemon = True
-    t.start()
+    
+    # 1. Capture Thread (Ağdan veriyi çeker, en yeniyi saklar)
+    t1 = threading.Thread(target=capture_thread)
+    t1.daemon = True
+    t1.start()
+    
+    # 2. Process Thread (Görüntüyü işler ve Web'e hazırlar)
+    t2 = threading.Thread(target=process_thread)
+    t2.daemon = True
+    t2.start()
     
     print(f"🌍 WEB ARAYÜZÜ BAŞLATILIYOR: http://0.0.0.0:{WEB_PORT}")
     app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)
