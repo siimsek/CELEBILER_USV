@@ -591,13 +591,37 @@ class SmartTelemetry:
                 telemetry_data['RC2'] = msg.chan2_raw
                 telemetry_data['RC3'] = msg.chan3_raw
                 telemetry_data['RC4'] = msg.chan4_raw
+                
+                # --- RC DEBUG (Kanal Tespiti İçin) ---
+                # Sadece değerler değiştiğinde veya belli aralıklarla basılabilir
+                # Ama şimdilik stick hareketini yakalamak için tüm kanalları görelim
+                if time.time() % 2 < 0.1: # Saniyede bir örnek
+                    print(f"🎮 RC RAW: 1:{msg.chan1_raw} 2:{msg.chan2_raw} 3:{msg.chan3_raw} 4:{msg.chan4_raw} 5:{msg.chan5_raw} 6:{msg.chan6_raw}")
+
                 self._update_physics_sim(msg.chan1_raw, msg.chan3_raw)
                 
             elif mtype == 'SYS_STATUS':
                 telemetry_data['Battery'] = msg.voltage_battery / 1000.0
                 
             elif mtype == 'HEARTBEAT':
-                telemetry_data['Mode'] = mavutil.mode_string_v10(msg)
+                # Sadece Pixhawk'tan gelen moda bak (GCS veya diğerlerini yoksay)
+                if msg.get_srcSystem() != 1: return
+                
+                # ArduRover Mode Mapping
+                custom_mode = msg.custom_mode
+                base_mode = msg.base_mode
+                
+                # Rover Modları (ArduPilot Dokümantasyonundan)
+                modes = {
+                    0: 'MANUAL', 1: 'ACRO', 3: 'STEERING', 4: 'HOLD',
+                    5: 'LOITER', 10: 'AUTO', 11: 'RTL', 12: 'SMART_RTL', 15: 'GUIDED'
+                }
+                
+                mode_str = modes.get(custom_mode, f"Mode({custom_mode})")
+                if not msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+                    mode_str += " (DISARMED)"
+                    
+                telemetry_data['Mode'] = mode_str
                 
             elif mtype == 'VFR_HUD':
                 telemetry_data['Speed'] = msg.groundspeed

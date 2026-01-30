@@ -77,6 +77,7 @@ Kod üretirken bu portlara sadık kal:
   - Commit mesajı, sadece bu sohbette konuşulan/uygulanan değişikliklere dayanır; varsayım yapılmaz.
 
 * **Format (kısa ve net):**
+KESİNLİKLE KOD BLOĞU ŞEKLİNDE VERECEKSİN.***
   1) İlk satır: 1 cümlelik özet (Türkçe, mümkünse emir kipi, kısa)
   2) Alt satırlar:
      - `Degisiklikler:` altında 1-5 madde
