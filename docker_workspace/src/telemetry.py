@@ -538,8 +538,49 @@ class SmartTelemetry:
                 # print(f"STM32 Okuma Hatası: {e}") 
                 pass
 
+    def connection_manager(self):
+        """Bağlantıları yöneten arka plan thread'i"""
+        print("🕵️ [SYSTEM] Bağlantı Yöneticisi Devrede...")
+        first_scan = True
+        
+        while self.running:
+            # Eksik cihaz varsa tara
+            if not self.pixhawk or not self.stm32:
+                if not first_scan:
+                    print("🔍 [SCAN] Eksik cihazlar aranıyor...")
+                    
+                new_pix, new_stm = self.scan_ports()
+                
+                with self.lock:
+                    if new_pix: 
+                        self.pixhawk = new_pix
+                        print(f"✅ [PIXHAWK] Bağlantı Onaylandı! (Port: {new_pix.address})")
+                    if new_stm: 
+                        self.stm32 = new_stm
+                        print(f"✅ [STM32] Sensör Kartı Onaylandı! (Port: {new_stm.port})")
+            
+            first_scan = False
+
+            # Simülasyon Durumu Kontrolü
+            if not self.pixhawk and not self.stm32:
+                global SIMULATION_MODE
+                if not SIMULATION_MODE:
+                    print("⚠️ [SYSTEM] Hiçbir cihaz yok -> SİMÜLASYON MODU AKTİF")
+                    SIMULATION_MODE = True
+                self.update_simulation()
+            else:
+                if SIMULATION_MODE:
+                    print("🌊 [SYSTEM] Gerçek Veri Akışı Başladı -> Simülasyon Kapatıldı")
+                    SIMULATION_MODE = False
+                
+            time.sleep(3) # 3 saniyede bir kontrol et
+
     def read_pixhawk(self):
         """Pixhawk'tan veri okuyan thread (Sadece okur, bağlanmaz)"""
+        print("📡 [MAV] Pixhawk Dinleme Servisi Başladı")
+        last_heartbeat_log = 0
+        rc_logged = False
+        
         while self.running:
             if self.pixhawk:
                 try:
@@ -557,6 +598,10 @@ class SmartTelemetry:
                                 rc2 = msg.chan2_raw
                                 rc3 = msg.chan3_raw
                                 rc4 = msg.chan4_raw
+                                
+                                if not rc_logged and rc3 is not None:
+                                    print(f"🎮 [RC] Kumanda Sinyali TESPİT EDİLDİ! (CH3: {rc3})")
+                                    rc_logged = True
                                 
                                 telemetry_data['RC1'] = rc1
                                 telemetry_data['RC2'] = rc2
@@ -586,7 +631,6 @@ class SmartTelemetry:
                                         telemetry_data['Heading'] = self.sim_heading
                                         telemetry_data['Speed'] = abs(throttle_norm) * 5.0
                                 except: pass
-
                             elif msg.get_type() == 'SERVO_OUTPUT_RAW':
                                 telemetry_data['Out1'] = msg.servo1_raw
                                 telemetry_data['Out3'] = msg.servo3_raw
