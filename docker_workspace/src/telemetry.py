@@ -628,7 +628,10 @@ class SmartTelemetry:
                                 # Motor Çıkışları (ESC PWM)
                                 telemetry_data['Out1'] = msg.servo1_raw
                                 telemetry_data['Out3'] = msg.servo3_raw
-                except:
+                except Exception as e:
+                    print(f"❌ [MAV] Hata Oluştu: {e}")
+                    import traceback
+                    traceback.print_exc()
                     self.pixhawk = None # Hata varsa bağlantıyı kopar ve tekrar tara
 
     def request_data_stream(self, master):
