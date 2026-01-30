@@ -245,6 +245,13 @@ HTML_PAGE = """
                     rainEl.style.color = data.Rain_Status === "RAIN" ? "var(--warning)" : "var(--success)";
                     document.getElementById('rain_val').innerText = "VAL: " + data.Rain_Val;
 
+                    // RC & Motors
+                    document.getElementById('rc1').innerText = data.RC1 || "--";
+                    document.getElementById('rc3').innerText = data.RC3 || "--";
+                    document.getElementById('out1').innerText = data.Out1 || "--";
+                    document.getElementById('out3').innerText = data.Out3 || "--";
+                    document.getElementById('rc_mode').innerText = "MODE: " + data.Mode;
+
                     // Mode Color
                     const modeEl = document.getElementById('mode');
                     modeEl.style.color = data.Mode === "DISCONNECTED" ? "var(--danger)" : "var(--success)";
@@ -348,12 +355,19 @@ HTML_PAGE = """
                 </div>
             </div>
 
-            <!-- 5. RAIN SENSOR -->
+            <!-- 5. RC / MOTORS -->
             <div class="stat-card">
-                <div class="stat-label">PRECIPITATION</div>
+                <div class="stat-label">CONTROLLER (RC)</div>
                 <div>
-                    <div class="stat-value" id="rain">--</div>
-                    <div class="sub-val" id="rain_val">VAL: --</div>
+                    <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-secondary);">
+                        <span>CH1: <strong id="rc1" style="color:var(--text-primary)">--</strong></span>
+                        <span>CH3: <strong id="rc3" style="color:var(--text-primary)">--</strong></span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-secondary);">
+                        <span>MOT1: <strong id="out1" style="color:var(--accent)">--</strong></span>
+                        <span>MOT3: <strong id="out3" style="color:var(--accent)">--</strong></span>
+                    </div>
+                    <div class="sub-val" id="rc_mode" style="margin-top:5px; font-size:0.7rem; text-align:right;">--</div>
                 </div>
             </div>
         </div>
@@ -564,10 +578,56 @@ class SmartTelemetry:
                             elif msg.get_type() == 'ATTITUDE':
                                 telemetry_data['Roll'] = msg.roll * 57.2958
                                 telemetry_data['Pitch'] = msg.pitch * 57.2958
+                            elif msg.get_type() == 'RC_CHANNELS':
+                                # Kumanda Girişleri (Stickler)
+                                telemetry_data['RC1'] = msg.chan1_raw
+                                telemetry_data['RC2'] = msg.chan2_raw
+                                telemetry_data['RC3'] = msg.chan3_raw
+                                telemetry_data['RC4'] = msg.chan4_raw
+                            elif msg.get_type() == 'SERVO_OUTPUT_RAW':
+                                # Motor Çıkışları (ESC PWM)
+                                telemetry_data['Out1'] = msg.servo1_raw
+                                telemetry_data['Out3'] = msg.servo3_raw
                 except:
                     self.pixhawk = None # Hata varsa bağlantıyı kopar ve tekrar tara
 
-    def start(self):
+    def request_data_stream(self, master):
+        """Veri akışını başlat (Özellikle RC kanalları için gerekli)"""
+        if not master: return
+        # Tüm akışları iste (RC_CHANNELS dahil)
+        master.mav.request_data_stream_send(
+            master.target_system, master.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1 # 4 Hz
+        )
+
+    def scan_ports(self):
+        """Tüm portları tara ve cihazları ayırt et"""
+        ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
+        print(f"🔍 Taranan Portlar: {ports}")
+        
+        found_pix = None
+        found_stm = None
+        
+        # 1. Tur: STM32 Bul (JSON verisinden tanı)
+        # ... (STM32 kodu aynı) ...
+
+        # 2. Tur: Pixhawk Bul (MAVLink heartbeat)
+        for port in ports:
+            if found_stm and found_stm.port == port: continue
+            
+            try:
+                master = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
+                if master.wait_heartbeat(timeout=1):
+                    print(f"✅ Pixhawk Bulundu: {port}")
+                    # VERİ AKIŞINI BAŞLAT
+                    self.request_data_stream(master)
+                    found_pix = master
+                    break
+                else:
+                    master.close()
+            except: pass
+            
+        return found_pix, found_stm
         # CSV Başlat
         if not os.path.isfile(CSV_FILE):
              pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
