@@ -27,11 +27,12 @@ else
 fi
 
 # C) KAMERA KONTROLÜ
-cam_status=$(vcgencmd get_camera)
-if [[ $cam_status == *"detected=1"* ]]; then
+# C) KAMERA KONTROLÜ
+# libcamera stack kullandığımız için rpicam-vid ile kontrol ediyoruz
+if rpicam-vid --list-cameras > /dev/null 2>&1; then
     echo "   ✅ Kamera Modülü - BAĞLI"
 else
-    echo -e "   ❌ [HATA] Kamera Algılanmadı! ($cam_status)"
+    echo -e "   ❌ [HATA] Kamera Algılanmadı! (rpicam-vid listeleme başarısız)"
     echo "      -> Şerit kabloyu (csi/dsi) kontrol et."
     exit 1
 fi
