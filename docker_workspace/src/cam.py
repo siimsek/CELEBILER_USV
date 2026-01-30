@@ -57,6 +57,7 @@ class VideoCamera:
         while not self.stopped:
             try:
                 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 client_socket.settimeout(5)
                 client_socket.connect((HOST, PORT))
                 connection = client_socket.makefile('rb')

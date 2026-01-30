@@ -41,7 +41,7 @@ sudo fuser -k 8888/tcp > /dev/null 2>&1
 # Sert temizlik
 sudo pkill -9 rpicam-vid || true
 # Host logu ana log klasörüne
-sudo nice -n -20 rpicam-vid -t 0 --codec mjpeg --inline --listen -o tcp://0.0.0.0:8888 --width 1280 --height 720 --framerate 30 --quality 25 > "$LOG_DIR/cam_host.log" 2>&1 &
+sudo nice -n -20 rpicam-vid -t 0 --codec mjpeg --inline --listen -o tcp://0.0.0.0:8888 --width 1280 --height 720 --framerate 25 --quality 95 > "$LOG_DIR/cam_host.log" 2>&1 &
 sleep 2
 
 # 3. IP YAPILANDIRMASI (ZORUNLU 192.168.11.5 EKLEME)
