@@ -392,6 +392,7 @@ class SmartTelemetry:
         
         self.sim_lat = 38.4192
         self.sim_lon = 27.1287
+        self.sim_heading = 0
         
         # Log klasörü kontrolü
         if not os.path.exists("/root/workspace/logs"):
@@ -579,11 +580,50 @@ class SmartTelemetry:
                                 telemetry_data['Roll'] = msg.roll * 57.2958
                                 telemetry_data['Pitch'] = msg.pitch * 57.2958
                             elif msg.get_type() == 'RC_CHANNELS':
-                                # Kumanda Girişleri (Stickler)
-                                telemetry_data['RC1'] = msg.chan1_raw
-                                telemetry_data['RC2'] = msg.chan2_raw
-                                telemetry_data['RC3'] = msg.chan3_raw
-                                telemetry_data['RC4'] = msg.chan4_raw
+                                # Kumanda Girişleri
+                                rc1 = msg.chan1_raw
+                                rc2 = msg.chan2_raw
+                                rc3 = msg.chan3_raw
+                                rc4 = msg.chan4_raw
+                                
+                                telemetry_data['RC1'] = rc1
+                                telemetry_data['RC2'] = rc2
+                                telemetry_data['RC3'] = rc3
+                                telemetry_data['RC4'] = rc4
+
+                                # --- SANAL FİZİK MOTORU (VIRTUAL PHYSICS) ---
+                                try:
+                                    if rc1 is not None and rc3 is not None:
+                                        # 1. Hız Hesabı (-1.0 ile +1.0 arası)
+                                        throttle_norm = (rc3 - 1500) / 500.0
+                                        if abs(throttle_norm) < 0.1: throttle_norm = 0 # Deadzone
+                                        
+                                        # 2. Dönüş Hesabı
+                                        steer_norm = (rc1 - 1500) / 500.0
+                                        if abs(steer_norm) < 0.1: steer_norm = 0 # Deadzone
+
+                                        # 3. Fizik Güncelleme
+                                        self.sim_heading += steer_norm * 5.0 
+                                        self.sim_heading %= 360
+                                        
+                                        # İlerleme (Coğrafi Hesap)
+                                        speed_coef = 0.00001
+                                        rad = math.radians(self.sim_heading)
+                                        d_lat = math.cos(rad) * throttle_norm * speed_coef
+                                        d_lon = math.sin(rad) * throttle_norm * speed_coef
+                                        
+                                        self.sim_lat += d_lat
+                                        self.sim_lon += d_lon
+
+                                        # 4. Telemetriyi Sanal Veriyle Ez (Test İçin)
+                                        with self.lock:
+                                            telemetry_data['Lat'] = self.sim_lat
+                                            telemetry_data['Lon'] = self.sim_lon
+                                            telemetry_data['Heading'] = self.sim_heading
+                                            telemetry_data['Speed'] = abs(throttle_norm) * 5.0 
+                                except Exception as e:
+                                    print(f"Bugs Bunny Error: {e}")
+
                             elif msg.get_type() == 'SERVO_OUTPUT_RAW':
                                 # Motor Çıkışları (ESC PWM)
                                 telemetry_data['Out1'] = msg.servo1_raw
