@@ -2,7 +2,44 @@
 # Dosya Yeri: CELEBILER_USV/host_scripts/system_start.sh
 
 CONTAINER_NAME="ege_ros"
-# --- LOG YÖNETİMİ ---
+# --- 0. DONANIM ÖN KONTROLÜ (Pre-Flight Check) ---
+echo -e "\n🛡️  [GÜVENLİK] Donanım Bağlantıları Kontrol Ediliyor..."
+
+# A) LIDAR KONTROLÜ
+if ping -c 1 -W 1 192.168.11.2 > /dev/null; then
+    echo "   ✅ Lidar (192.168.11.2) - BAĞLI"
+else
+    echo -e "   ❌ [HATA] Lidar Bulunamadı! (IP: 192.168.11.2 Erişim Yok)"
+    echo "      -> Ethernet kablosunu ve statik IP ayarlarını kontrol et."
+    exit 1
+fi
+
+# B) SERİ PORT KONTROLÜ (Pixhawk + STM32)
+# Min 2 cihaz bekliyoruz (ACM veya USB)
+port_count=$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | wc -l)
+if [ "$port_count" -ge 2 ]; then
+    echo "   ✅ Seri Portlar ($port_count Aygıt) - TAMAM"
+else
+    echo -e "   ❌ [HATA] Eksik Seri Cihaz! (Bulunan: $port_count, Beklenen: 2+)"
+    echo "      -> Pixhawk ve STM32 USB kablolarını kontrol et."
+    echo "      -> Bulunanlar: $(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null)"
+    exit 1
+fi
+
+# C) KAMERA KONTROLÜ
+cam_status=$(vcgencmd get_camera)
+if [[ $cam_status == *"detected=1"* ]]; then
+    echo "   ✅ Kamera Modülü - BAĞLI"
+else
+    echo -e "   ❌ [HATA] Kamera Algılanmadı! ($cam_status)"
+    echo "      -> Şerit kabloyu (csi/dsi) kontrol et."
+    exit 1
+fi
+
+echo "   🚀 Tüm Sistemler Hazır. Başlatılıyor..."
+echo "-----------------------------------------------------------"
+
+# --- 1. NETWORK AYARLARI ---
 # 1. Ana Log Klasörü
 LOG_DIR="$HOME/CELEBILER_USV/logs"
 mkdir -p "$LOG_DIR"

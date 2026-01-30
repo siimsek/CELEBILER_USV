@@ -398,48 +398,77 @@ class SmartTelemetry:
         if not os.path.exists("/root/workspace/logs"):
             os.makedirs("/root/workspace/logs")
 
+    def request_data_stream(self, master):
+        """Veri akışını başlat (Özellikle RC kanalları için gerekli)"""
+        if not master: return
+        # Tüm akışları iste
+        master.mav.request_data_stream_send(
+            master.target_system, master.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1
+        )
+        # RC Kanallarını ÖZEL OLARAK İste (Bazı firmwareler için şart)
+        master.mav.request_data_stream_send(
+            master.target_system, master.target_component,
+            mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 5, 1
+        )
+        print("📨 [MAV] RC Kanal Verisi İsteği Gönderildi (5 Hz)")
+
     def scan_ports(self):
-        """Tüm portları tara ve cihazları ayırt et"""
-        ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
-        print(f"🔍 Taranan Portlar: {ports}")
+        """Akıllı Port Tarama: Bağlı olanı elleme, boşta olanı tara"""
+        all_ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
+        
+        # Aktif portları listele (bunları tarama)
+        active_ports = []
+        if self.pixhawk and hasattr(self.pixhawk, 'address'):
+            active_ports.append(self.pixhawk.address)
+        if self.stm32 and hasattr(self.stm32, 'port'):
+            active_ports.append(self.stm32.port)
+            
+        print(f"🔍 Taranacak Portlar: {[p for p in all_ports if p not in active_ports]}")
         
         found_pix = None
         found_stm = None
         
-        # 1. Tur: STM32 Bul (JSON verisinden tanı)
-        for port in ports:
-            if found_stm: break
-            try:
-                # STM32 Genelde 115200 baud ile konuşur
-                s = serial.Serial(port, BAUD_RATE_STM32, timeout=2)
-                time.sleep(1.5) # Reset sonrası bekleme
-                
-                # 3 satır oku, JSON var mı bak
-                for _ in range(3):
-                    line = s.readline().decode('utf-8', errors='ignore').strip()
-                    if line.startswith("{") and "temp" in line:
-                        print(f"✅ STM32 Sensör Kartı Bulundu: {port}")
-                        found_stm = s
-                        break
-                
-                if not found_stm: s.close()
-            except: pass
+        # 1. STM32 Tara (Eğer bağlı değilse)
+        if not self.stm32:
+            for port in all_ports:
+                if port in active_ports: continue
+                try:
+                    print(f"👉 STM32 Aranıyor: {port} ...")
+                    s = serial.Serial(port, BAUD_RATE_STM32, timeout=2)
+                    time.sleep(1.5)
+                    stm_found = False
+                    for _ in range(3):
+                        line = s.readline().decode('utf-8', errors='ignore').strip()
+                        if line: print(f"   📄 Veri: {line}") # Gelen veriyi gör
+                        
+                        if line.startswith("{") and "temp" in line:
+                            print(f"✅ STM32 Bulundu: {port}")
+                            found_stm = s
+                            active_ports.append(port) 
+                            stm_found = True
+                            break
+                    if not stm_found: 
+                        s.close()
+                        print(f"   ❌ STM32 Değil: {port} (Format uymadı)")
+                except Exception as e:
+                    print(f"   ⚠️ Port Hatası {port}: {e}")
 
-        # 2. Tur: Pixhawk Bul (MAVLink heartbeat)
-        for port in ports:
-            # STM32 olan portu atla
-            if found_stm and found_stm.port == port: continue
-            
-            try:
-                master = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
-                if master.wait_heartbeat(timeout=1):
-                    print(f"✅ Pixhawk Bulundu: {port}")
-                    found_pix = master
-                    break
-                else:
-                    master.close()
-            except: pass
-            
+        # 2. Pixhawk Tara (Eğer bağlı değilse)
+        if not self.pixhawk:
+            for port in all_ports:
+                if port in active_ports: continue
+                try:
+                    master = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
+                    if master.wait_heartbeat(timeout=1):
+                        print(f"✅ Pixhawk Bulundu: {port}")
+                        self.request_data_stream(master)
+                        found_pix = master
+                        break
+                    else:
+                        master.close()
+                except: pass
+                
         return found_pix, found_stm
 
     def update_simulation(self):
