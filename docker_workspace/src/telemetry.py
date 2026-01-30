@@ -8,28 +8,32 @@ import glob
 import json
 import random
 import serial
+import math
 from flask import Flask, jsonify, render_template_string
 
-# --- AYARLAR ---
+# --- YAPILANDIRMA VE SABİTLER ---
 BAUD_RATE_PIXHAWK = 115200
-BAUD_RATE_STM32 = 115200
-CSV_FILE = "/root/workspace/logs/telemetri_verisi.csv"
+BAUD_RATES_STM32 = [9600, 115200] # Otomatik denenir
 WEB_PORT = 8080
+LOG_DIR = "/root/workspace/logs"
+CSV_FILE = f"{LOG_DIR}/telemetri_verisi.csv"
 
-# Flask Uygulaması
-app = Flask(__name__)
-
-# Küresel Veri
+# --- GLOBAL DURUM ---
 telemetry_data = {
     "Timestamp": "--", "Lat": 0, "Lon": 0, "Heading": 0,
-    "Battery": 0, "Mode": "DISCONNECTED", "Speed": 0, 
+    "Battery": 0, "Mode": "DISCONNECTED", "Speed": 0, "Roll": 0, "Pitch": 0,
     "STM_Date": "--:--:--", "Env_Temp": 0, "Env_Hum": 0, "Rain_Val": 0, "Rain_Status": "DRY",
-    "Sys_CPU": 0, "Sys_RAM": 0, "Sys_Temp": 0
+    "Sys_CPU": 0, "Sys_RAM": 0, "Sys_Temp": 0,
+    "RC1": 0, "RC2": 0, "RC3": 0, "RC4": 0,
+    "Out1": 0, "Out3": 0
 }
 COLUMNS = list(telemetry_data.keys())
 SIMULATION_MODE = False
 
-# --- HTML ARAYÜZ (GÜNCELLENMİŞ) ---
+# Flask Uygulaması
+app = Flask(__name__)
+
+# --- DASHBOARD ARAYÜZÜ (HTML/CSS/JS) ---
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -352,6 +356,7 @@ HTML_PAGE = """
                 <div>
                     <div class="stat-value" id="temp">--°C</div>
                     <div class="sub-val">HUMIDITY: <span id="hum">--%</span></div>
+                    <div class="sub-val" style="margin-top:2px;">RAIN: <span id="rain">--</span> <span id="rain_val" style="font-size:0.7em; opacity:0.7"></span></div>
                 </div>
             </div>
 
@@ -377,186 +382,162 @@ HTML_PAGE = """
 """
 
 def clean_port(port):
-    """Sadece belirtilen portu kullanan işlemi öldürür."""
+    """Belirtilen portu kullanan işlemleri temizler."""
     print(f"🧹 Port {port} temizleniyor...")
     os.system(f"fuser -k {port}/tcp > /dev/null 2>&1")
-    os.system(f"lsof -t -i:{port} | xargs kill -9 > /dev/null 2>&1")
-    time.sleep(0.5)
 
 class SmartTelemetry:
     def __init__(self):
         self.pixhawk = None
         self.stm32 = None
-        self.pixhawk_port = None # Hangi portta olduğunu tutar (/dev/ttyACM0 vb)
-        self.stm32_port = None # STM32 Bağlantısı
+        self.pixhawk_port = None
+        self.stm32_port = None
+        
         self.running = True
         self.lock = threading.Lock()
         
+        # Simülasyon Değişkenleri
         self.sim_lat = 38.4192
         self.sim_lon = 27.1287
         self.sim_heading = 0
         
-        # Log klasörü kontrolü
-        if not os.path.exists("/root/workspace/logs"):
-            os.makedirs("/root/workspace/logs")
+        # Log Klasörü
+        if not os.path.exists(LOG_DIR):
+            os.makedirs(LOG_DIR)
+            
+        # CSV init
+        if not os.path.isfile(CSV_FILE):
+             pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
 
-    def request_data_stream(self, master):
-        """Veri akışını başlat (Özellikle RC kanalları için gerekli)"""
+    def start(self):
+        """Tüm threadleri başlatır."""
+        threads = [
+            threading.Thread(target=self.read_pixhawk, daemon=True),
+            threading.Thread(target=self.read_stm32, daemon=True),
+            threading.Thread(target=self.connection_manager, daemon=True)
+        ]
+        
+        for t in threads:
+            t.start()
+        
+        print(f"🌍 WEB SERVER BAŞLATILIYOR: Port {WEB_PORT}")
+        app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)
+
+    # --- BAĞLANTI YÖNETİMİ ---
+    def connection_manager(self):
+        """Cihaz bağlantılarını periyodik olarak kontrol eder."""
+        print("🕵️ [SYSTEM] Bağlantı Yöneticisi Devrede...")
+        first_scan = True
+        
+        while self.running:
+            if not self.pixhawk or not self.stm32:
+                if not first_scan:
+                    print("🔍 [SCAN] Eksik cihazlar taranıyor...")
+                self.scan_ports()
+            
+            # Simülasyon Kontrolü
+            global SIMULATION_MODE
+            if not self.pixhawk and not self.stm32:
+                if not SIMULATION_MODE:
+                    print("⚠️ [SYSTEM] Donanım Yok -> SİMÜLASYON MODU AKTİF")
+                    SIMULATION_MODE = True
+                self.update_simulation()
+            else:
+                if SIMULATION_MODE:
+                    print("🌊 [SYSTEM] Donanım Bulundu -> SİMÜLASYON KAPATILDI")
+                    SIMULATION_MODE = False
+            
+            first_scan = False
+            time.sleep(3)
+
+    def scan_ports(self):
+        """Boştaki portları tarar ve uygun cihazları eşleştirir."""
+        all_ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
+        active_ports = [self.pixhawk_port, self.stm32_port]
+        active_ports = [p for p in active_ports if p] # None'ları temizle
+        
+        scan_list = [p for p in all_ports if p not in active_ports]
+        if not scan_list and (not self.pixhawk or not self.stm32):
+             return # Taranacak port yok
+
+        print(f"🔍 [SCAN] Hedef Portlar: {scan_list}")
+
+        # STM32 Tara
+        if not self.stm32:
+            for port in scan_list:
+                if self._probe_stm32(port):
+                    active_ports.append(port)
+                    break # Bulduysam döngüyü kır (diğer cihazlara şans ver)
+
+        # Pixhawk Tara
+        if not self.pixhawk:
+            for port in scan_list:
+                if port in active_ports: continue
+                if self._probe_pixhawk(port):
+                    active_ports.append(port)
+                    break
+
+    def _probe_stm32(self, port):
+        """Belirtilen portta STM32 var mı bakar (Otomatik Baud)."""
+        for baud in BAUD_RATES_STM32:
+            try:
+                s = serial.Serial(port, baud, timeout=2)
+                time.sleep(2.0)
+                s.reset_input_buffer()
+                
+                detected = False
+                for _ in range(5):
+                    try:
+                        line = s.readline().decode('utf-8', errors='ignore').strip()
+                        if "tarih" in line and "temp" in line:
+                            print(f"✅ STM32 Bulundu: {port} @ {baud}")
+                            with self.lock:
+                                self.stm32 = s
+                                self.stm32_port = port
+                            detected = True
+                            break
+                    except: pass
+                
+                if detected: return True
+                s.close()
+            except: pass
+        return False
+
+    def _probe_pixhawk(self, port):
+        """Belirtilen portta Pixhawk var mı bakar."""
+        try:
+            master = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
+            if master.wait_heartbeat(timeout=1):
+                print(f"✅ Pixhawk Bulundu: {port}")
+                self._request_mavlink_streams(master)
+                with self.lock:
+                    self.pixhawk = master
+                    self.pixhawk_port = port
+                return True
+            master.close()
+        except: pass
+        return False
+
+    def _request_mavlink_streams(self, master):
+        """Pixhawk'tan gerekli veri akışlarını ister."""
         if not master: return
-        # Tüm akışları iste
+        # Genel Veriler (4 Hz)
         master.mav.request_data_stream_send(
             master.target_system, master.target_component,
             mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1
         )
-        # RC Kanallarını ÖZEL OLARAK İste (Bazı firmwareler için şart)
+        # RC Kanalları (5 Hz) - Özel İstek
         master.mav.request_data_stream_send(
             master.target_system, master.target_component,
             mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 5, 1
         )
-        print("📨 [MAV] RC Kanal Verisi İsteği Gönderildi (5 Hz)")
+        print("📨 [MAV] Veri Akış İsteği Gönderildi")
 
-    def scan_ports(self):
-        """Akıllı Port Tarama: Bağlı olanı elleme, boşta olanı tara"""
-        all_ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
-        
-        # Aktif portları listele (bunları tarama)
-        active_ports = []
-        if self.pixhawk and self.pixhawk_port:
-            active_ports.append(self.pixhawk_port)
-        if self.stm32 and self.stm32_port:
-            active_ports.append(self.stm32_port)
-            
-        print(f"🔍 [SCAN] Taranacaklar: {[p for p in all_ports if p not in active_ports]} (Aktif: {active_ports})")
-        
-        found_pix = None
-        found_stm = None
-        
-        # 1. STM32 Tara (Eğer bağlı değilse)
-        if not self.stm32:
-            for port in all_ports:
-                if port in active_ports: continue
-                # Baud rate otomatik dene
-                for baud in [9600, 115200]:
-                    try:
-                        print(f"👉 STM32 Aranıyor: {port} (Baud: {baud}) ...")
-                        s = serial.Serial(port, baud, timeout=2)
-                        time.sleep(2.0) # Reset ve veri akışı için bekle
-                        stm_found = False
-                        
-                        # Veri tamponunu temizle
-                        s.reset_input_buffer()
-                        
-                        for _ in range(5): # 5 satır oku
-                            try:
-                                line = s.readline().decode('utf-8', errors='ignore').strip()
-                            except: continue
-                            
-                            if line: print(f"   📄 Veri: {line}") 
-                            
-                            if "tarih" in line and "temp" in line: # JSON kontrolünü esnettim
-                                print(f"✅ STM32 Bulundu: {port} @ {baud}")
-                                found_stm = s
-                                self.stm32_port = port 
-                                active_ports.append(port) 
-                                stm_found = True
-                                break
-                        
-                        if stm_found: break # Baud loop kır
-                        else: s.close()
-                        
-                    except Exception as e:
-                        print(f"   ⚠️ Port Hatası {port}: {e}")
-
-        # 2. Pixhawk Tara (Eğer bağlı değilse)
-        if not self.pixhawk:
-            for port in all_ports:
-                if port in active_ports: continue
-                try:
-                    master = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
-                    if master.wait_heartbeat(timeout=1):
-                        print(f"✅ Pixhawk Bulundu: {port}")
-                        self.request_data_stream(master)
-                        found_pix = master
-                        self.pixhawk_port = port # KAYDET
-                        break
-                    else:
-                        master.close()
-                except: pass
-                
-        return found_pix, found_stm
-
-    def update_simulation(self):
-        """Donanım yoksa rastgele veriler üret"""
-        global telemetry_data
-        with self.lock:
-            # GPS Drift
-            self.sim_lat += random.uniform(-0.0001, 0.0001)
-            self.sim_lon += random.uniform(-0.0001, 0.0001)
-            
-            telemetry_data["Timestamp"] = time.strftime("%H:%M:%S")
-            telemetry_data["Lat"] = self.sim_lat
-            telemetry_data["Lon"] = self.sim_lon
-            telemetry_data["Heading"] = (telemetry_data["Heading"] + 1) % 360
-            telemetry_data["Battery"] = 12.0 + random.uniform(0, 0.5)
-            telemetry_data["Speed"] = random.uniform(0, 3.0)
-            telemetry_data["Mode"] = "SIMULATION"
-            
-            # STM32 Simülasyonu
-            telemetry_data["STM_Date"] = time.strftime("%H:%M:%S")
-            telemetry_data["Env_Temp"] = 24.5 + random.uniform(-0.5, 0.5)
-            telemetry_data["Env_Hum"] = 45.0 + random.uniform(-2, 2)
-            telemetry_data["Rain_Val"] = int(random.uniform(4000, 4095))
-            telemetry_data["Rain_Status"] = "DRY"
-            
-            # RPI Simülasyonu (Docker içinde /sys okuyamezsa diye)
-            telemetry_data["Sys_CPU"] = int(random.uniform(10, 30))
-            telemetry_data["Sys_RAM"] = int(random.uniform(40, 60))
-            telemetry_data["Sys_Temp"] = int(random.uniform(45, 55))
-
-    def get_system_metrics(self):
-        """Raspberry Pi Sistem Verilerini Okur"""
-        cpu_usage = 0
-        ram_usage = 0
-        temp = 0
-        
-        try:
-            # CPU Load (Basic) - psutil yoksa loadavg kullan
-            # loadavg 1 dakikalık ortalamayı CPU sayısına bölebiliriz ama 
-            # basitçe 100 ile çarpıp normalize edelim (RPi 4 çekirdek).
-            load1, _, _ = os.getloadavg()
-            cpu_usage = int((load1 / 4.0) * 100)
-            if cpu_usage > 100: cpu_usage = 100
-            
-            # RAM Usage (Free komutu parsing veya /proc/meminfo)
-            # /proc/meminfo okuyalım
-            with open('/proc/meminfo', 'r') as f:
-                lines = f.readlines()
-                mem_total = int(lines[0].split()[1])
-                mem_available = int(lines[2].split()[1])
-                ram_usage = int(100 * (1 - (mem_available / mem_total)))
-                
-            # CPU Temp
-            # RPi genelde bu dosyada tutar
-            if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
-                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-                    temp = int(int(f.read()) / 1000)
-            else:
-                temp = 0 # Okuyamazsa 0
-                
-        except: pass
-        
-        return cpu_usage, ram_usage, temp
-
+    # --- VERİ OKUMA THREADLERİ ---
     def read_stm32(self):
-        """STM32'den JSON okuyan thread"""
         while self.running:
-            # Sistem metriklerini güncelle (Her turda yapalım, hızlıdır)
-            c, r, t = self.get_system_metrics()
-            with self.lock:
-                telemetry_data["Sys_CPU"] = c
-                telemetry_data["Sys_RAM"] = r
-                telemetry_data["Sys_Temp"] = t
-
+            self.update_system_metrics() # Her turda sistem yükünü güncelle
+            
             if not self.stm32:
                 time.sleep(1); continue
                 
@@ -570,185 +551,141 @@ class SmartTelemetry:
                             telemetry_data["Env_Temp"] = float(data.get("temp", 0))
                             telemetry_data["Env_Hum"] = float(data.get("hum", 0))
                             telemetry_data["Rain_Val"] = int(data.get("rain", 4095))
-                            
-                            # Yağmur Durumu (Sensör mantığı: Düşük değer = Islak)
-                            # Genelde analog okuma 4095 (kuru) -> 0 (ıslak)
-                            if telemetry_data["Rain_Val"] < 3000:
-                                telemetry_data["Rain_Status"] = "RAIN"
-                            else:
-                                telemetry_data["Rain_Status"] = "DRY"
-            except Exception as e:
-                # print(f"STM32 Okuma Hatası: {e}") 
-                pass
-
-    def connection_manager(self):
-        """Bağlantıları yöneten arka plan thread'i"""
-        print("🕵️ [SYSTEM] Bağlantı Yöneticisi Devrede...")
-        first_scan = True
-        
-        while self.running:
-            # Eksik cihaz varsa tara
-            if not self.pixhawk or not self.stm32:
-                if not first_scan:
-                    print("🔍 [SCAN] Eksik cihazlar aranıyor...")
-                    
-                new_pix, new_stm = self.scan_ports()
-                
-                with self.lock:
-                    if new_pix: 
-                        self.pixhawk = new_pix
-                        print(f"✅ [PIXHAWK] Bağlantı Onaylandı! (Port: {new_pix.address})")
-                    if new_stm: 
-                        self.stm32 = new_stm
-                        print(f"✅ [STM32] Sensör Kartı Onaylandı! (Port: {new_stm.port})")
-            
-            first_scan = False
-
-            # Simülasyon Durumu Kontrolü
-            if not self.pixhawk and not self.stm32:
-                global SIMULATION_MODE
-                if not SIMULATION_MODE:
-                    print("⚠️ [SYSTEM] Hiçbir cihaz yok -> SİMÜLASYON MODU AKTİF")
-                    SIMULATION_MODE = True
-                self.update_simulation()
-            else:
-                if SIMULATION_MODE:
-                    print("🌊 [SYSTEM] Gerçek Veri Akışı Başladı -> Simülasyon Kapatıldı")
-                    SIMULATION_MODE = False
-                
-            time.sleep(3) # 3 saniyede bir kontrol et
+                            telemetry_data["Rain_Status"] = "RAIN" if telemetry_data["Rain_Val"] < 3000 else "DRY"
+            except: pass
 
     def read_pixhawk(self):
-        """Pixhawk'tan veri okuyan thread (Sadece okur, bağlanmaz)"""
-        print("📡 [MAV] Pixhawk Dinleme Servisi Başladı")
-        last_heartbeat_log = 0
+        print("📡 [MAV] Pixhawk Dinleme Servisi Aktif")
         rc_logged = False
         
         while self.running:
-            if self.pixhawk:
-                try:
-                    msg = self.pixhawk.recv_match(blocking=True, timeout=1.0)
-                    if msg:
-                        with self.lock:
-                            telemetry_data["Timestamp"] = time.strftime("%H:%M:%S")
-                            if msg.get_type() == 'GLOBAL_POSITION_INT':
-                                telemetry_data['Lat'] = msg.lat / 1e7
-                                telemetry_data['Lon'] = msg.lon / 1e7
-                                telemetry_data['Heading'] = msg.hdg / 100.0
-                            elif msg.get_type() == 'RC_CHANNELS':
-                                # Kumanda Girişleri
-                                rc1 = msg.chan1_raw
-                                rc2 = msg.chan2_raw
-                                rc3 = msg.chan3_raw
-                                rc4 = msg.chan4_raw
-                                
-                                if not rc_logged and rc3 is not None:
-                                    print(f"🎮 [RC] Kumanda Sinyali TESPİT EDİLDİ! (CH3: {rc3})")
-                                    rc_logged = True
-                                
-                                telemetry_data['RC1'] = rc1
-                                telemetry_data['RC2'] = rc2
-                                telemetry_data['RC3'] = rc3
-                                telemetry_data['RC4'] = rc4
-
-                                # --- SANAL FİZİK MOTORU ---
-                                try:
-                                    if rc1 is not None and rc3 is not None:
-                                        throttle_norm = (rc3 - 1500) / 500.0
-                                        if abs(throttle_norm) < 0.1: throttle_norm = 0
-                                        steer_norm = (rc1 - 1500) / 500.0
-                                        if abs(steer_norm) < 0.1: steer_norm = 0
-                                        
-                                        self.sim_heading += steer_norm * 5.0 
-                                        self.sim_heading %= 360
-                                        
-                                        # Simülasyon Hareketi
-                                        speed_coef = 0.00001
-                                        rad = math.radians(self.sim_heading)
-                                        self.sim_lat += math.cos(rad) * throttle_norm * speed_coef
-                                        self.sim_lon += math.sin(rad) * throttle_norm * speed_coef
-
-                                        # Telemetriye Yaz
-                                        telemetry_data['Lat'] = self.sim_lat
-                                        telemetry_data['Lon'] = self.sim_lon
-                                        telemetry_data['Heading'] = self.sim_heading
-                                        telemetry_data['Speed'] = abs(throttle_norm) * 5.0
-                                except: pass
-                            elif msg.get_type() == 'SERVO_OUTPUT_RAW':
-                                telemetry_data['Out1'] = msg.servo1_raw
-                                telemetry_data['Out3'] = msg.servo3_raw
-                                
-                            elif msg.get_type() == 'SYS_STATUS':
-                                telemetry_data['Battery'] = msg.voltage_battery / 1000.0
-                            elif msg.get_type() == 'HEARTBEAT':
-                                telemetry_data['Mode'] = mavutil.mode_string_v10(msg)
-                            elif msg.get_type() == 'VFR_HUD':
-                                telemetry_data['Speed'] = msg.groundspeed
-                            elif msg.get_type() == 'ATTITUDE':
-                                telemetry_data['Roll'] = msg.roll * 57.2958
-                                telemetry_data['Pitch'] = msg.pitch * 57.2958
-                except Exception as e:
-                    print(f"❌ [MAV] Hata Oluştu: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # self.pixhawk = None # HEMEN KOPARMA! Belki anlık hatadır.
-                    pass
-
-    def request_data_stream(self, master):
-        """Veri akışını başlat (Özellikle RC kanalları için gerekli)"""
-        if not master: return
-        # Tüm akışları iste (RC_CHANNELS dahil)
-        master.mav.request_data_stream_send(
-            master.target_system, master.target_component,
-            mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1 # 4 Hz
-        )
-
-    def scan_ports(self):
-        """Tüm portları tara ve cihazları ayırt et"""
-        ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
-        print(f"🔍 Taranan Portlar: {ports}")
-        
-        found_pix = None
-        found_stm = None
-        
-        # 1. Tur: STM32 Bul (JSON verisinden tanı)
-        # ... (STM32 kodu aynı) ...
-
-        # 2. Tur: Pixhawk Bul (MAVLink heartbeat)
-        for port in ports:
-            if found_stm and found_stm.port == port: continue
-            
+            if not self.pixhawk:
+                time.sleep(0.1); continue
+                
             try:
-                master = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
-                if master.wait_heartbeat(timeout=1):
-                    print(f"✅ Pixhawk Bulundu: {port}")
-                    # VERİ AKIŞINI BAŞLAT
-                    self.request_data_stream(master)
-                    found_pix = master
-                    break
-                else:
-                    master.close()
-            except: pass
-            
-        return found_pix, found_stm
+                msg = self.pixhawk.recv_match(blocking=True, timeout=1.0)
+                if msg:
+                    self._process_mavlink_msg(msg, rc_logged)
+                    if msg.get_type() == 'RC_CHANNELS' and not rc_logged:
+                        if msg.chan3_raw > 0:
+                            print(f"🎮 [RC] Sinyal Tespit Edildi: CH3={msg.chan3_raw}")
+                            rc_logged = True
+            except Exception as e:
+                # print(f"❌ MAV Error: {e}")
+                pass
 
-    def start(self):
-        # CSV Başlat
-        if not os.path.isfile(CSV_FILE):
-             pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
-             
-        # Threadleri Başlat
-        t1 = threading.Thread(target=self.read_pixhawk, daemon=True) # Pixhawk verisi
-        t2 = threading.Thread(target=self.read_stm32, daemon=True)   # STM32 verisi
-        t3 = threading.Thread(target=self.connection_manager, daemon=True) # BAĞLANTI YÖNETİCİSİ
-        t1.start()
-        t2.start()
-        t3.start()
+    def _process_mavlink_msg(self, msg, rc_logged):
+        """MAVLink mesajlarını işleyen yardımcı metot."""
+        mtype = msg.get_type()
         
-        print(f"🌍 WEB SERVER BAŞLATILIYOR: Port {WEB_PORT}")
-        app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)
+        with self.lock:
+            telemetry_data["Timestamp"] = time.strftime("%H:%M:%S")
+            
+            if mtype == 'GLOBAL_POSITION_INT':
+                telemetry_data['Lat'] = msg.lat / 1e7
+                telemetry_data['Lon'] = msg.lon / 1e7
+                telemetry_data['Heading'] = msg.hdg / 100.0
+                
+            elif mtype == 'RC_CHANNELS':
+                telemetry_data['RC1'] = msg.chan1_raw
+                telemetry_data['RC2'] = msg.chan2_raw
+                telemetry_data['RC3'] = msg.chan3_raw
+                telemetry_data['RC4'] = msg.chan4_raw
+                self._update_physics_sim(msg.chan1_raw, msg.chan3_raw)
+                
+            elif mtype == 'SYS_STATUS':
+                telemetry_data['Battery'] = msg.voltage_battery / 1000.0
+                
+            elif mtype == 'HEARTBEAT':
+                telemetry_data['Mode'] = mavutil.mode_string_v10(msg)
+                
+            elif mtype == 'VFR_HUD':
+                telemetry_data['Speed'] = msg.groundspeed
+                
+            elif mtype == 'ATTITUDE':
+                telemetry_data['Roll'] = msg.roll * 57.2958
+                telemetry_data['Pitch'] = msg.pitch * 57.2958
 
-# Flask Rotaları
+    def _update_physics_sim(self, rc1, rc3):
+        """RC girdilerine göre sanal fizik motorunu çalıştırır."""
+        try:
+            if rc1 is None or rc3 is None: return
+            
+            # Normalize (-1.0 to 1.0)
+            throttle = (rc3 - 1500) / 500.0
+            steer = (rc1 - 1500) / 500.0
+            
+            # Deadzone
+            if abs(throttle) < 0.1: throttle = 0
+            if abs(steer) < 0.1: steer = 0
+            
+            # Dönüş
+            self.sim_heading += steer * 5.0
+            self.sim_heading %= 360
+            
+            # İlerleme
+            rad = math.radians(self.sim_heading)
+            speed_coef = 0.00001 * 5.0 # Hız çarpanı
+            self.sim_lat += math.cos(rad) * throttle * speed_coef
+            self.sim_lon += math.sin(rad) * throttle * speed_coef
+            
+            # Telemetriyi Ez (Görsel Test İçin)
+            # Not: Gerçek GPS varsa bunu kapatmak isteyebiliriz ama şimdilik hibrit.
+            # telemetry_data['Lat'] = self.sim_lat
+            # telemetry_data['Lon'] = self.sim_lon
+        except: pass
+
+    # --- SİSTEM & SİMÜLASYON ---
+    def update_system_metrics(self):
+        """RPi Kaynak Tüketimi (CPU/RAM/Temp)."""
+        try:
+            # CPU
+            load1, _, _ = os.getloadavg()
+            cpu = int((load1 / 4.0) * 100)
+            
+            # RAM
+            with open('/proc/meminfo', 'r') as f:
+                lines = f.readlines()
+                total = int(lines[0].split()[1])
+                avail = int(lines[2].split()[1])
+                ram = int(100 * (1 - (avail/total)))
+            
+            # Temp
+            temp = 0
+            if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
+                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                    temp = int(int(f.read()) / 1000)
+                    
+            with self.lock:
+                telemetry_data["Sys_CPU"] = min(cpu, 100)
+                telemetry_data["Sys_RAM"] = ram
+                telemetry_data["Sys_Temp"] = temp
+        except: pass
+
+    def update_simulation(self):
+        """Donanım yoksa rastgele veriler üretir."""
+        with self.lock:
+            # Rastgele Drift
+            self.sim_lat += random.uniform(-0.00005, 0.00005)
+            self.sim_lon += random.uniform(-0.00005, 0.00005)
+            
+            telemetry_data.update({
+                "Timestamp": time.strftime("%H:%M:%S"),
+                "Lat": self.sim_lat,
+                "Lon": self.sim_lon,
+                "Heading": (telemetry_data["Heading"] + 1) % 360,
+                "Battery": 12.0 + random.uniform(0, 0.5),
+                "Speed": random.uniform(0, 3.0),
+                "Mode": "SIMULATION",
+                # STM32 Mock
+                "STM_Date": time.strftime("%H:%M:%S"),
+                "Env_Temp": 24.5 + random.uniform(-0.5, 0.5),
+                "Env_Hum": 45.0 + random.uniform(-2, 2),
+                "Rain_Val": int(random.uniform(4000, 4095)),
+                "Rain_Status": "DRY"
+            })
+
+# --- FLASK ROUTES ---
 @app.route('/')
 def index(): return render_template_string(HTML_PAGE)
 

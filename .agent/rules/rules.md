@@ -2,7 +2,7 @@
 trigger: always_on
 ---
 
-# 🤖 AI AGENT RULES & BEHAVIOR PROTOCOL
+# AI AGENT RULES & BEHAVIOR PROTOCOL
 
 BU DOSYA, PROJE ÜZERİNDE ÇALIŞAN YAPAY ZEKA ASİSTANI İÇİN BAĞLAYICI KURALLAR İÇERİR.
 BURADAKİ KURALLARIN DIŞINA ÇIKMAK, DOĞRULANMAMIŞ KOD ÜRETMEK VEYA VAR OLAN YAPIYI BOZMAK YASAKTIR.
@@ -66,5 +66,30 @@ Kod üretirken bu portlara sadık kal:
 * **5000:** Kamera Yayını (İşlenmiş)
 * **5001:** Lidar Haritası
 * **8888:** Ham Kamera Stream (Host -> Docker)
+
+## 6. COMMIT MESAJI KURALI (CHAT TETİKLEYİCİSİ)
+
+* **Tetikleyici:** Kullanıcı sohbet içinde tek başına `commit` yazarsa (küçük/büyük harf fark etmez),
+  asistan **yalnızca** Türkçe bir commit mesajı üretir (ek açıklama, analiz, başlık vs yok).
+
+* **Kapsam:** Commit içeriği, **en son üretilen commit mesajından sonra** bu sohbette yapılan değişiklikleri kapsar.
+  - “En son commit”, sohbet içinde asistanın en son commit mesajı ürettiği andır.
+  - Commit mesajı, sadece bu sohbette konuşulan/uygulanan değişikliklere dayanır; varsayım yapılmaz.
+
+* **Format (kısa ve net):**
+  1) İlk satır: 1 cümlelik özet (Türkçe, mümkünse emir kipi, kısa)
+  2) Alt satırlar:
+     - `Degisiklikler:` altında 1-5 madde
+     - `Amac:` tek satır
+
+* **Örnek şablon:**
+  <Kisa ozet>
+  
+  Degisiklikler:
+  - ...
+  - ...
+  
+  Amac: ...
+
 
 BU KURALLARA UYMAYAN KOD TEKLİFLERİ GEÇERSİZDİR.
