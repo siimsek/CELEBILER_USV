@@ -2,9 +2,23 @@
 # Dosya Yeri: CELEBILER_USV/host_scripts/system_start.sh
 
 CONTAINER_NAME="ege_ros"
-LOG_FILE="/home/admin/CELEBILER_USV/system_boot.log"
+# --- LOG YÖNETİMİ ---
+# 1. Ana Log Klasörü
+LOG_DIR="$HOME/CELEBILER_USV/logs"
+mkdir -p "$LOG_DIR"
 
-# Renk Kodları (Terminalde havalı dursun diye)
+# 2. Docker Loglarını Buraya Bağla (Symlink)
+# Docker içindeki /root/workspace/logs -> Host'ta ./docker_workspace/logs dizinine düşer (Bind Mount varsayımıyla)
+DOCKER_LOG_SOURCE="$HOME/CELEBILER_USV/docker_workspace/logs"
+if [ -d "$DOCKER_LOG_SOURCE" ]; then
+    # Eğer link yoksa veya yanlışsa düzelt (-sfn zorlar)
+    ln -sfn "$DOCKER_LOG_SOURCE" "$LOG_DIR/docker"
+fi
+
+# 3. Host Log Dosyaları
+LOG_FILE="$LOG_DIR/system_boot.log"
+
+# Renk Kodları
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
@@ -15,18 +29,19 @@ clear
 echo -e "${CYAN}=================================================${NC}"
 echo -e "${CYAN}   🚀 ÇELEBİLER USV - YER İSTASYONU BAŞLATICI   ${NC}"
 echo -e "${CYAN}=================================================${NC}"
-echo "Log Dosyası: $LOG_FILE"
+echo "Log Merkezi: $LOG_DIR"
 echo "Başlatılıyor..."
 
 # 1. TEMİZLİK
 sudo fuser -k 8888/tcp > /dev/null 2>&1
 
-
-# 2. KAMERA BAŞLATMA (HOST) (Sıra değişti, IP ayarı aşağıda)
+# 2. KAMERA BAŞLATMA (HOST)
 echo -e "${GREEN}[KAMERA]${NC} Port 8888 temizleniyor ve yayın başlatılıyor..."
 sudo fuser -k 8888/tcp > /dev/null 2>&1
-pkill rpicam-vid || true
-rpicam-vid -t 0 --codec mjpeg --inline --listen -o tcp://0.0.0.0:8888 --width 1280 --height 720 --framerate 30 > /dev/null 2>&1 &
+# Sert temizlik
+sudo pkill -9 rpicam-vid || true
+# Host logu ana log klasörüne
+rpicam-vid -t 0 --codec mjpeg --inline --listen -o tcp://0.0.0.0:8888 --width 1280 --height 720 --framerate 30 > "$LOG_DIR/cam_host.log" 2>&1 &
 sleep 2
 
 # 3. IP YAPILANDIRMASI (ZORUNLU 192.168.11.5 EKLEME)

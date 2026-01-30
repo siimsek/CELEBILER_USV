@@ -8,6 +8,7 @@ old/
 *.log
 system_boot.log
 logs/
+*.log
 *.csv
 __pycache__/
 *.pyc

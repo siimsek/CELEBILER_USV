@@ -33,7 +33,7 @@ python3 -u /root/workspace/src/telemetry.py > /root/workspace/logs/telemetry.log
 # autonomous_main.py sadece pusula kullanır, fusion_main.py lidar kullanır.
 # Hangisini kullanmak istiyorsan onu aç. Tavsiyem fusion_main.py
 echo "🧠 [MAIN] Otonom Pilot (fusion_main.py) Başlatılıyor..."
-python3 /root/workspace/src/fusion_main.py
+python3 /root/workspace/src/fusion_main.py > /root/workspace/logs/fusion.log 2>&1 &
 
 # Çıkışta Temizlik
 pkill -f python3
