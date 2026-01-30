@@ -35,5 +35,5 @@ python3 -u /root/workspace/src/telemetry.py > /root/workspace/logs/telemetry.log
 echo "🧠 [MAIN] Otonom Pilot (fusion_main.py) Başlatılıyor..."
 python3 /root/workspace/src/fusion_main.py > /root/workspace/logs/fusion.log 2>&1 &
 
-# Çıkışta Temizlik
-pkill -f python3
+# Arka plandaki süreçlerin çalışmaya devam etmesi için bekle
+wait
