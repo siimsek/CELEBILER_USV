@@ -90,7 +90,11 @@ class VideoCamera:
 
     def process_frame(self, frame):
         """Görüntü İşleme (Renk Tespiti)"""
-        blurred = cv2.GaussianBlur(frame, (9, 9), 0)
+        if self.frame is None: return frame
+
+        # OPTIMIZASYON: İşleme (Renk Tespiti) küçük resimde yapılır (0.5x)
+        small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+        blurred = cv2.GaussianBlur(small_frame, (5, 5), 0)
         hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
         for name, params in COLOR_RANGES.items():
@@ -99,7 +103,8 @@ class VideoCamera:
                 mask2 = cv2.inRange(hsv, params["lower2"], params["upper2"])
                 mask = cv2.bitwise_or(mask, mask2)
 
-            kernel = np.ones((5,5), np.uint8)
+            # Morfolojik işlemler (daha küçük kernel)
+            kernel = np.ones((3,3), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
@@ -107,8 +112,12 @@ class VideoCamera:
 
             for cnt in contours:
                 area = cv2.contourArea(cnt)
-                if area > 1000:
+                # Küçük resimde 1000/4 = 250 alan eşiği
+                if area > 250:
                     x, y, w, h = cv2.boundingRect(cnt)
+                    # Koordinatları orijinal boyuta (2x) çevir
+                    x, y, w, h = x*2, y*2, w*2, h*2
+                    
                     cv2.rectangle(frame, (x, y), (x + w, y + h), params["color"], 2)
                     cv2.putText(frame, name, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, params["color"], 2)
 
