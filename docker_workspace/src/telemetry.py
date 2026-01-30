@@ -668,6 +668,8 @@ class SmartTelemetry:
             except: pass
             
         return found_pix, found_stm
+
+    def start(self):
         # CSV Başlat
         if not os.path.isfile(CSV_FILE):
              pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
