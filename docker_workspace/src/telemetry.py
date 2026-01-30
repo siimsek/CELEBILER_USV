@@ -592,11 +592,11 @@ class SmartTelemetry:
                 telemetry_data['RC3'] = msg.chan3_raw
                 telemetry_data['RC4'] = msg.chan4_raw
                 
-                # --- RC DEBUG (Kanal Tespiti İçin) ---
-                # Sadece değerler değiştiğinde veya belli aralıklarla basılabilir
-                # Ama şimdilik stick hareketini yakalamak için tüm kanalları görelim
-                if time.time() % 2 < 0.1: # Saniyede bir örnek
-                    print(f"🎮 RC RAW: 1:{msg.chan1_raw} 2:{msg.chan2_raw} 3:{msg.chan3_raw} 4:{msg.chan4_raw} 5:{msg.chan5_raw} 6:{msg.chan6_raw}")
+                # --- RC DEBUG (Kanal Tespiti) ---
+                # Her 5 mesajda bir (yaklaşık saniyede 1) loga bas
+                self.rc_debug_counter = getattr(self, 'rc_debug_counter', 0) + 1
+                if self.rc_debug_counter % 5 == 0:
+                    print(f"🎮 RC RAW: 1:{msg.chan1_raw} 2:{msg.chan2_raw} 3:{msg.chan3_raw} 4:{msg.chan4_raw} 5:{msg.chan5_raw} Mode:{telemetry_data.get('Mode')}")
 
                 self._update_physics_sim(msg.chan1_raw, msg.chan3_raw)
                 
