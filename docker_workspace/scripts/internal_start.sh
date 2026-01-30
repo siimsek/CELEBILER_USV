@@ -5,6 +5,7 @@
 source /opt/ros/humble/setup.bash
 source /root/ros2_ws/install/setup.bash
 export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+export TZ=Europe/Istanbul
 
 mkdir -p /root/workspace/logs
 
@@ -23,7 +24,7 @@ python3 -u /root/workspace/src/lidar_map.py > /root/workspace/logs/map.log 2>&1 
 
 # 3. KAMERA SUNUCUSU (Port 5000)
 echo "📷 [WEB] Kamera Sunucusu (cam.py) Başlatılıyor..."
-python3 -u /root/workspace/src/cam.py > /root/workspace/logs/cam.log 2>&1 &
+nice -n -10 python3 -u /root/workspace/src/cam.py > /root/workspace/logs/cam.log 2>&1 &
 
 # 4. DASHBOARD (Port 8080)
 echo "🌍 [WEB] Ana Dashboard (telemetry.py) Başlatılıyor..."
