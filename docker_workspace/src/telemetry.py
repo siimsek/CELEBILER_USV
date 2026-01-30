@@ -386,7 +386,9 @@ def clean_port(port):
 class SmartTelemetry:
     def __init__(self):
         self.pixhawk = None
-        self.stm32 = None # STM32 Bağlantısı
+        self.stm32 = None
+        self.pixhawk_port = None # Hangi portta olduğunu tutar (/dev/ttyACM0 vb)
+        self.stm32_port = None # STM32 Bağlantısı
         self.running = True
         self.lock = threading.Lock()
         
@@ -419,12 +421,12 @@ class SmartTelemetry:
         
         # Aktif portları listele (bunları tarama)
         active_ports = []
-        if self.pixhawk and hasattr(self.pixhawk, 'address'):
-            active_ports.append(self.pixhawk.address)
-        if self.stm32 and hasattr(self.stm32, 'port'):
-            active_ports.append(self.stm32.port)
+        if self.pixhawk and self.pixhawk_port:
+            active_ports.append(self.pixhawk_port)
+        if self.stm32 and self.stm32_port:
+            active_ports.append(self.stm32_port)
             
-        print(f"🔍 Taranacak Portlar: {[p for p in all_ports if p not in active_ports]}")
+        print(f"🔍 [SCAN] Taranacaklar: {[p for p in all_ports if p not in active_ports]} (Aktif: {active_ports})")
         
         found_pix = None
         found_stm = None
@@ -433,26 +435,37 @@ class SmartTelemetry:
         if not self.stm32:
             for port in all_ports:
                 if port in active_ports: continue
-                try:
-                    print(f"👉 STM32 Aranıyor: {port} ...")
-                    s = serial.Serial(port, BAUD_RATE_STM32, timeout=2)
-                    time.sleep(1.5)
-                    stm_found = False
-                    for _ in range(3):
-                        line = s.readline().decode('utf-8', errors='ignore').strip()
-                        if line: print(f"   📄 Veri: {line}") # Gelen veriyi gör
+                # Baud rate otomatik dene
+                for baud in [9600, 115200]:
+                    try:
+                        print(f"👉 STM32 Aranıyor: {port} (Baud: {baud}) ...")
+                        s = serial.Serial(port, baud, timeout=2)
+                        time.sleep(2.0) # Reset ve veri akışı için bekle
+                        stm_found = False
                         
-                        if line.startswith("{") and "temp" in line:
-                            print(f"✅ STM32 Bulundu: {port}")
-                            found_stm = s
-                            active_ports.append(port) 
-                            stm_found = True
-                            break
-                    if not stm_found: 
-                        s.close()
-                        print(f"   ❌ STM32 Değil: {port} (Format uymadı)")
-                except Exception as e:
-                    print(f"   ⚠️ Port Hatası {port}: {e}")
+                        # Veri tamponunu temizle
+                        s.reset_input_buffer()
+                        
+                        for _ in range(5): # 5 satır oku
+                            try:
+                                line = s.readline().decode('utf-8', errors='ignore').strip()
+                            except: continue
+                            
+                            if line: print(f"   📄 Veri: {line}") 
+                            
+                            if "tarih" in line and "temp" in line: # JSON kontrolünü esnettim
+                                print(f"✅ STM32 Bulundu: {port} @ {baud}")
+                                found_stm = s
+                                self.stm32_port = port 
+                                active_ports.append(port) 
+                                stm_found = True
+                                break
+                        
+                        if stm_found: break # Baud loop kır
+                        else: s.close()
+                        
+                    except Exception as e:
+                        print(f"   ⚠️ Port Hatası {port}: {e}")
 
         # 2. Pixhawk Tara (Eğer bağlı değilse)
         if not self.pixhawk:
@@ -464,6 +477,7 @@ class SmartTelemetry:
                         print(f"✅ Pixhawk Bulundu: {port}")
                         self.request_data_stream(master)
                         found_pix = master
+                        self.pixhawk_port = port # KAYDET
                         break
                     else:
                         master.close()
