@@ -149,6 +149,16 @@ def ros_thread():
                 print("⚠️ [LIDAR] Veri akışı yok -> Simülasyon Modu")
             
             if SIMULATION_MODE:
+                # Debug: Topic List
+                if int(time.time()) % 5 == 0:
+                    topics = node.get_topic_names_and_types()
+                    topic_names = [t[0] for t in topics]
+                    print(f"⚠️ [DIAGNOSTIC] Mevcut Topicler: {topic_names}")
+                    if '/scan' in topic_names:
+                         print("✅ /scan topici mevcut, ancak veri gelmiyor (QoS veya Ağ sorunu?)")
+                    else:
+                         print("❌ /scan topici LİSTEDE YOK! Driver çökmüş olabilir.")
+
                 with lock:
                     output_frame = get_simulated_map()
                 time.sleep(0.1)

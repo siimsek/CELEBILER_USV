@@ -13,7 +13,7 @@ echo "--- [DOCKER] USV SİSTEMLERİ BAŞLATILIYOR ---"
 # 1. LIDAR BAŞLAT
 echo "🚀 [LIDAR] Başlatılıyor..."
 # S2E / UDP Modu için genelde 'ip' parametresi kullanılır, tcp_ip eski olabilir.
-ros2 launch rplidar_ros rplidar_s2e_launch.py channel_type:=udp ip:=192.168.11.2 tcp_port:=20108 frame_id:=laser_frame > /root/workspace/logs/lidar.log 2>&1 &
+ros2 launch rplidar_ros rplidar_s2e_launch.py channel_type:=udp ip:=192.168.11.2 tcp_port:=20108 frame_id:=laser_frame scan_mode:=Standard > /root/workspace/logs/lidar.log 2>&1 &
 # Lidar'ın ısınması için bekle
 sleep 5
 
