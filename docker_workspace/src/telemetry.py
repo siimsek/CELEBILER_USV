@@ -539,27 +539,8 @@ class SmartTelemetry:
                 pass
 
     def read_pixhawk(self):
-        """Pixhawk'tan veri okuyan thread"""
-        global SIMULATION_MODE
-        
+        """Pixhawk'tan veri okuyan thread (Sadece okur, bağlanmaz)"""
         while self.running:
-            # Bağlantı Yönetimi
-            if not self.pixhawk or not self.stm32:
-                self.pixhawk, self.stm32 = self.scan_ports()
-                
-                # Eğer hala cihaz yoksa simülasyona düş
-                if not self.pixhawk and not self.stm32:
-                    if not SIMULATION_MODE:
-                        print("⚠️ Cihazlar bulunamadı -> Simülasyon Modu")
-                        SIMULATION_MODE = True
-                    
-                    self.update_simulation()
-                    time.sleep(1)
-                    continue
-                else:
-                    SIMULATION_MODE = False
-                    
-            # PIXHAWK OKUMA
             if self.pixhawk:
                 try:
                     msg = self.pixhawk.recv_match(blocking=True, timeout=1.0)
@@ -570,15 +551,47 @@ class SmartTelemetry:
                                 telemetry_data['Lat'] = msg.lat / 1e7
                                 telemetry_data['Lon'] = msg.lon / 1e7
                                 telemetry_data['Heading'] = msg.hdg / 100.0
-                    else:
-                        # Mesaj gelmedi (Timeout)
-                        # Bağlantıyı hemen koparma, belki sadece sessizdir.
-                        # Ancak Heartbeat gelmezse kopar.
-                        pass
-                            
-                    if msg: # Tekrar kontrol (Logic split)
-                        with self.lock:
-                            if msg.get_type() == 'SYS_STATUS':
+                            elif msg.get_type() == 'RC_CHANNELS':
+                                # Kumanda Girişleri
+                                rc1 = msg.chan1_raw
+                                rc2 = msg.chan2_raw
+                                rc3 = msg.chan3_raw
+                                rc4 = msg.chan4_raw
+                                
+                                telemetry_data['RC1'] = rc1
+                                telemetry_data['RC2'] = rc2
+                                telemetry_data['RC3'] = rc3
+                                telemetry_data['RC4'] = rc4
+
+                                # --- SANAL FİZİK MOTORU ---
+                                try:
+                                    if rc1 is not None and rc3 is not None:
+                                        throttle_norm = (rc3 - 1500) / 500.0
+                                        if abs(throttle_norm) < 0.1: throttle_norm = 0
+                                        steer_norm = (rc1 - 1500) / 500.0
+                                        if abs(steer_norm) < 0.1: steer_norm = 0
+                                        
+                                        self.sim_heading += steer_norm * 5.0 
+                                        self.sim_heading %= 360
+                                        
+                                        # Simülasyon Hareketi
+                                        speed_coef = 0.00001
+                                        rad = math.radians(self.sim_heading)
+                                        self.sim_lat += math.cos(rad) * throttle_norm * speed_coef
+                                        self.sim_lon += math.sin(rad) * throttle_norm * speed_coef
+
+                                        # Telemetriye Yaz
+                                        telemetry_data['Lat'] = self.sim_lat
+                                        telemetry_data['Lon'] = self.sim_lon
+                                        telemetry_data['Heading'] = self.sim_heading
+                                        telemetry_data['Speed'] = abs(throttle_norm) * 5.0
+                                except: pass
+
+                            elif msg.get_type() == 'SERVO_OUTPUT_RAW':
+                                telemetry_data['Out1'] = msg.servo1_raw
+                                telemetry_data['Out3'] = msg.servo3_raw
+                                
+                            elif msg.get_type() == 'SYS_STATUS':
                                 telemetry_data['Battery'] = msg.voltage_battery / 1000.0
                             elif msg.get_type() == 'HEARTBEAT':
                                 telemetry_data['Mode'] = mavutil.mode_string_v10(msg)
@@ -587,11 +600,6 @@ class SmartTelemetry:
                             elif msg.get_type() == 'ATTITUDE':
                                 telemetry_data['Roll'] = msg.roll * 57.2958
                                 telemetry_data['Pitch'] = msg.pitch * 57.2958
-                            # elif msg.get_type() == 'RC_CHANNELS':
-                            #     # GEÇİCİ OLARAK DEVRE DIŞI (DEBUG İÇİN)
-                            #     pass
-
-                            elif msg.get_type() == 'SERVO_OUTPUT_RAW':
                                 # Motor Çıkışları (ESC PWM)
                                 telemetry_data['Out1'] = msg.servo1_raw
                                 telemetry_data['Out3'] = msg.servo3_raw
@@ -646,10 +654,12 @@ class SmartTelemetry:
              pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
              
         # Threadleri Başlat
-        t1 = threading.Thread(target=self.read_pixhawk, daemon=True) # Pixhawk + Auto Scan + Sim
-        t2 = threading.Thread(target=self.read_stm32, daemon=True)   # STM32 Sadece okuma
+        t1 = threading.Thread(target=self.read_pixhawk, daemon=True) # Pixhawk verisi
+        t2 = threading.Thread(target=self.read_stm32, daemon=True)   # STM32 verisi
+        t3 = threading.Thread(target=self.connection_manager, daemon=True) # BAĞLANTI YÖNETİCİSİ
         t1.start()
         t2.start()
+        t3.start()
         
         print(f"🌍 WEB SERVER BAŞLATILIYOR: Port {WEB_PORT}")
         app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)
