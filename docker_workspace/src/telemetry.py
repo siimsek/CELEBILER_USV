@@ -570,7 +570,15 @@ class SmartTelemetry:
                                 telemetry_data['Lat'] = msg.lat / 1e7
                                 telemetry_data['Lon'] = msg.lon / 1e7
                                 telemetry_data['Heading'] = msg.hdg / 100.0
-                            elif msg.get_type() == 'SYS_STATUS':
+                    else:
+                        # Mesaj gelmedi (Timeout)
+                        # Bağlantıyı hemen koparma, belki sadece sessizdir.
+                        # Ancak Heartbeat gelmezse kopar.
+                        pass
+                            
+                    if msg: # Tekrar kontrol (Logic split)
+                        with self.lock:
+                            if msg.get_type() == 'SYS_STATUS':
                                 telemetry_data['Battery'] = msg.voltage_battery / 1000.0
                             elif msg.get_type() == 'HEARTBEAT':
                                 telemetry_data['Mode'] = mavutil.mode_string_v10(msg)
@@ -632,7 +640,8 @@ class SmartTelemetry:
                     print(f"❌ [MAV] Hata Oluştu: {e}")
                     import traceback
                     traceback.print_exc()
-                    self.pixhawk = None # Hata varsa bağlantıyı kopar ve tekrar tara
+                    # self.pixhawk = None # HEMEN KOPARMA! Belki anlık hatadır.
+                    pass
 
     def request_data_stream(self, master):
         """Veri akışını başlat (Özellikle RC kanalları için gerekli)"""
