@@ -82,6 +82,19 @@ fi
 echo -e "${GREEN}[SİSTEM]${NC} Otonom Pilot ve Web Sunucular Başlatılıyor..."
 docker exec -d $CONTAINER_NAME /bin/bash -c "/root/workspace/scripts/internal_start.sh"
 
+# --- YENİ EKLENTİ: BAĞLANTI KONTROLÜ (12 Saniye İzle) ---
+echo -e "\n🔎 [KONTROL] Donanım Bağlantıları Bekleniyor (12sn)..."
+end=$((SECONDS+12))
+tail -n 0 -f "$LOG_DIR/docker/telemetry.log" | while read line; do
+    if [[ "$line" == *"✅"* ]] || [[ "$line" == *"🎮"* ]] || [[ "$line" == *"💓"* ]]; then
+        echo "   -> $line"
+    fi
+    if [ $SECONDS -ge $end ]; then
+        pkill -P $$ tail
+        break
+    fi
+done || true
+
 # 6. FİNAL BİLGİ TABLOSU
 sleep 3
 echo ""

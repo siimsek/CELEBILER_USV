@@ -644,9 +644,6 @@ class SmartTelemetry:
                             elif msg.get_type() == 'ATTITUDE':
                                 telemetry_data['Roll'] = msg.roll * 57.2958
                                 telemetry_data['Pitch'] = msg.pitch * 57.2958
-                                # Motor Çıkışları (ESC PWM)
-                                telemetry_data['Out1'] = msg.servo1_raw
-                                telemetry_data['Out3'] = msg.servo3_raw
                 except Exception as e:
                     print(f"❌ [MAV] Hata Oluştu: {e}")
                     import traceback
