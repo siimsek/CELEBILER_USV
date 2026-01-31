@@ -31,6 +31,9 @@ COLUMNS = list(telemetry_data.keys())
 SIMULATION_MODE = False
 
 # Flask Uygulaması
+import logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR) # Gereksiz logları kapat
 app = Flask(__name__)
 
 # --- DASHBOARD ARAYÜZÜ (HTML/CSS/JS) ---
@@ -784,6 +787,57 @@ class SmartTelemetry:
             # telemetry_data['Lon'] = self.sim_lon
         except: pass
 
+    # --- EKLENEN EKSİK METOTLAR (Move from bottom) ---
+    def update_system_metrics(self):
+        """RPi Kaynak Tüketimi (CPU/RAM/Temp)."""
+        try:
+            # CPU
+            load1, _, _ = os.getloadavg()
+            cpu = int((load1 / 4.0) * 100)
+            
+            # RAM
+            with open('/proc/meminfo', 'r') as f:
+                lines = f.readlines()
+                total = int(lines[0].split()[1])
+                avail = int(lines[2].split()[1])
+                ram = int(100 * (1 - (avail/total)))
+            
+            # Temp
+            temp = 0
+            if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
+                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                    temp = int(int(f.read()) / 1000)
+                    
+            with self.lock:
+                telemetry_data["Sys_CPU"] = min(cpu, 100)
+                telemetry_data["Sys_RAM"] = ram
+                telemetry_data["Sys_Temp"] = temp
+        except: pass
+
+    def update_simulation(self):
+        """Donanım yoksa rastgele veriler üretir."""
+        with self.lock:
+            # Rastgele Drift
+            self.sim_lat += random.uniform(-0.00005, 0.00005)
+            self.sim_lon += random.uniform(-0.00005, 0.00005)
+            
+            telemetry_data.update({
+                "Timestamp": time.strftime("%H:%M:%S"),
+                "Lat": self.sim_lat,
+                "Lon": self.sim_lon,
+                "Heading": (telemetry_data["Heading"] + 1) % 360,
+                "Battery": 12.0 + random.uniform(0, 0.5),
+                "Speed": random.uniform(0, 3.0),
+                "Mode": "SIMULATION",
+                "Gear": "NEUTRAL",
+                # STM32 Mock
+                "STM_Date": time.strftime("%H:%M:%S"),
+                "Env_Temp": 24.5 + random.uniform(-0.5, 0.5),
+                "Env_Hum": 45.0 + random.uniform(-2, 2),
+                "Rain_Val": int(random.uniform(4000, 4095)),
+                "Rain_Status": "DRY"
+            })
+
 # --- MOTOR KONTROL (CRUISE CONTROL & SOFT START) ---
 class MotorController:
     def __init__(self, parent):
@@ -808,12 +862,12 @@ class MotorController:
         self.MAX_FWD = 1900
         self.MAX_REV = 1100
         
-        self.RAMP_STEP = 3.0       # Hızlanma yumuşaklığı (2.0 -> 3.0)
-        self.CRUISE_STEP = 5.0     # Gaz tepkisi (Atiklik)
+        self.RAMP_STEP = 1.0       # Çok yumuşak hızlanma (2.0 -> 1.0)
+        self.CRUISE_STEP = 1.0     # Hassas hız kontrolü (5.0 -> 1.0)
         
-        # YÖN ÇEVİRME (INVERT)
-        self.INV_THROTTLE = True   
-        self.INV_STEER = True      
+        # YÖN ÇEVİRME (INVERT) - Varsayılan False (Standart)
+        self.INV_THROTTLE = False   
+        self.INV_STEER = False      
         
         # Thread
         self.thread = threading.Thread(target=self.control_loop, daemon=True)
@@ -919,56 +973,7 @@ class MotorController:
                 except Exception as e:
                     pass
 
-    # --- SİSTEM & SİMÜLASYON ---
-    def update_system_metrics(self):
-        """RPi Kaynak Tüketimi (CPU/RAM/Temp)."""
-        try:
-            # CPU
-            load1, _, _ = os.getloadavg()
-            cpu = int((load1 / 4.0) * 100)
-            
-            # RAM
-            with open('/proc/meminfo', 'r') as f:
-                lines = f.readlines()
-                total = int(lines[0].split()[1])
-                avail = int(lines[2].split()[1])
-                ram = int(100 * (1 - (avail/total)))
-            
-            # Temp
-            temp = 0
-            if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
-                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-                    temp = int(int(f.read()) / 1000)
-                    
-            with self.lock:
-                telemetry_data["Sys_CPU"] = min(cpu, 100)
-                telemetry_data["Sys_RAM"] = ram
-                telemetry_data["Sys_Temp"] = temp
-        except: pass
 
-    def update_simulation(self):
-        """Donanım yoksa rastgele veriler üretir."""
-        with self.lock:
-            # Rastgele Drift
-            self.sim_lat += random.uniform(-0.00005, 0.00005)
-            self.sim_lon += random.uniform(-0.00005, 0.00005)
-            
-            telemetry_data.update({
-                "Timestamp": time.strftime("%H:%M:%S"),
-                "Lat": self.sim_lat,
-                "Lon": self.sim_lon,
-                "Heading": (telemetry_data["Heading"] + 1) % 360,
-                "Battery": 12.0 + random.uniform(0, 0.5),
-                "Speed": random.uniform(0, 3.0),
-                "Mode": "SIMULATION",
-                "Gear": "NEUTRAL",
-                # STM32 Mock
-                "STM_Date": time.strftime("%H:%M:%S"),
-                "Env_Temp": 24.5 + random.uniform(-0.5, 0.5),
-                "Env_Hum": 45.0 + random.uniform(-2, 2),
-                "Rain_Val": int(random.uniform(4000, 4095)),
-                "Rain_Status": "DRY"
-            })
 
 # --- FLASK ROUTES ---
 @app.route('/')
