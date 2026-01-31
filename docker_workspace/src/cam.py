@@ -34,8 +34,12 @@ COLOR_RANGES = {
 }
 
 def clean_port(port):
+    """Portu kullanan süreci (PID) bulur ve öldürür."""
+    import os
     print(f"🧹 Port {port} temizleniyor...")
-    os.system(f"fuser -k {port}/tcp > /dev/null 2>&1")
+    # Fuser ile zorla (-k -9) öldür
+    os.system(f"fuser -k -9 {port}/tcp > /dev/null 2>&1")
+    time.sleep(1) # Portun boşa düşmesi için bekle
 
 class VideoCamera:
     """Basit, Kanıtlanmış Kamera Okuyucu"""

@@ -664,38 +664,55 @@ class SmartTelemetry:
                 
             elif mtype == 'HEARTBEAT':
                 # --- HEARTBEAT DEBUG ---
-                # Mod değişimini yakalamak için geçici log
-                if getattr(self, 'last_mode_debug', None) != msg.custom_mode or time.time() % 5 < 0.1:
-                    print(f"💓 [HEARTBEAT] Src: {msg.get_srcSystem()} Mode: {msg.custom_mode} Base: {msg.base_mode}")
-                    self.last_mode_debug = msg.custom_mode
-
-                # Sadece Pixhawk'tan gelen moda bak (Auto-Discovery)
                 src_sys = msg.get_srcSystem()
                 
-                # Eğer henüz sistem ID'sini bilmiyorsak, ilk gelen OTOPİLOT mesajını sistemimiz kabul edelim
+                # 1. AUTO-DISCOVERY (Önceki mantığın aynısı, loglu)
                 if getattr(self, 'target_system_id', None) is None:
-                    # MAV_TYPE_GENERIC=0 ... MAV_TYPE_HELICOPTER=4 arası genelde araçtır
-                    if msg.type <= 20: 
-                         print(f"🎯 [MAV] Hedef Sistem Tanımlandı: ID {src_sys} (Type: {msg.type})")
+                    # GCS ve diğerlerini ele
+                    ignore_types = [
+                        mavutil.mavlink.MAV_TYPE_GCS,
+                        mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
+                        mavutil.mavlink.MAV_TYPE_GIMBAL,
+                        mavutil.mavlink.MAV_TYPE_ADSB
+                    ]
+                    
+                    if msg.type not in ignore_types and msg.type <= 30: 
+                         print(f"🎯 [SYSTEM LOCKED] Kilitlenen Sistem ID: {src_sys} (Type: {msg.type})")
                          self.target_system_id = src_sys
+                    else:
+                        # GCS'i sessizce geç veya çok nadir bas
+                        pass
                 
-                # Sadece hedef sistemden gelenleri işle
+                # 2. FİLTRE (Sadece hedef sistem)
                 if getattr(self, 'target_system_id', None) != src_sys:
                     return
-                
-                # ArduRover Mode Mapping
+
+                # 3. MOD DEĞİŞİM LOGU
                 custom_mode = msg.custom_mode
-                base_mode = msg.base_mode
+                previous_mode = getattr(self, 'last_mode_debug', None)
                 
-                # Rover Modları (ArduPilot Dokümantasyonundan)
+                if previous_mode != custom_mode:
+                     print(f"🔄 [MODE CHANGE] Yeni Mod: {custom_mode} (Eski: {previous_mode}) - Base: {msg.base_mode}")
+                     self.last_mode_debug = custom_mode
+                elif time.time() % 10 < 0.1: # Arada sırada heartbeat olduğunu hatırlat
+                     print(f"💓 [ALIVE] SysID: {src_sys} Mode: {custom_mode}")
+
+                # ArduRover Mode Mapping (Tam Liste)
+                # Kaynak: https://ardupilot.org/rover/docs/parameters.html#mode1
                 modes = {
                     0: 'MANUAL', 1: 'ACRO', 3: 'STEERING', 4: 'HOLD',
-                    5: 'LOITER', 10: 'AUTO', 11: 'RTL', 12: 'SMART_RTL', 15: 'GUIDED'
+                    5: 'LOITER', 6: 'FOLLOW', 7: 'SIMPLE', 10: 'AUTO',
+                    11: 'RTL', 12: 'SMART_RTL', 15: 'GUIDED', 16: 'INITIALISING'
                 }
                 
-                mode_str = modes.get(custom_mode, f"Mode({custom_mode})")
+                mode_name = modes.get(custom_mode, f"UNKNOWN({custom_mode})")
+                
+                # Ekranda "AUTO (ARMED)" şeklinde görünsün
+                mode_str = mode_name
                 if not msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
                     mode_str += " (DISARMED)"
+                else:
+                    mode_str += " (ARMED)"
                     
                 telemetry_data['Mode'] = mode_str
                 
