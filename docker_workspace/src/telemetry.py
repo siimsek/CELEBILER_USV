@@ -674,14 +674,16 @@ class SmartTelemetry:
                 # Motor Kontrolcüsüne Veri Gönder
                 # CH1: Direksiyon, CH3: Gaz Artır/Azalt, CH6: Vites
                 rc6 = msg.chan6_raw
-                self.motor_ctrl.update_inputs(msg.chan1_raw, msg.chan3_raw, rc6)
+                # YENİ: Tüm kanalları gönderiyoruz (CH1, CH2, CH3, CH4, CH6)
+                self.motor_ctrl.update_inputs(msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw, rc6)
                 
                 # --- RC DEBUG (Kanal Tespiti) ---
                 # Her 5 mesajda bir (yaklaşık saniyede 1) loga bas
                 self.rc_debug_counter = getattr(self, 'rc_debug_counter', 0) + 1
                 if self.rc_debug_counter % 5 == 0:
                     gear_stat = telemetry_data.get('Gear', 'N')
-                    print(f"🎮 RC: 1:{msg.chan1_raw} 3:{msg.chan3_raw} 6:{rc6} -> Gear:{gear_stat}")
+                    # Hangi kanalın ne yaptığını görmek için hepsini yazdır
+                    print(f"🎮 RC RAW: 1:{msg.chan1_raw} 2:{msg.chan2_raw} 3:{msg.chan3_raw} 4:{msg.chan4_raw} -> Gear:{gear_stat}")
 
                 self._update_physics_sim(msg.chan1_raw, msg.chan3_raw)
                 
@@ -809,39 +811,41 @@ class MotorController:
         self.thread = threading.Thread(target=self.control_loop, daemon=True)
         self.thread.start()
 
-    def update_inputs(self, rc1, rc3, rc6):
+    def update_inputs(self, rc1, rc2, rc3, rc4, rc6):
         """RC verilerini güncelle"""
-        if rc1: self.input_steer = rc1
-        if rc3: self.input_throttle = rc3
+        # KULLANICI İSTEĞİNE GÖRE YENİDEN HARİTALAMA (REMAPPING)
+        # Önceki Durum: Sol L/R -> Cruise (CH3), Sağ U/D -> Steer (CH1)
+        # İstenen: Sol U/D -> Cruise, Sağ L/R -> Steer
+        
+        # Deneme 1: Eksik olan diğer eksenleri atayalım.
+        # Sol Stick Dikey (U/D) genelde CH2 veya CH3 olur. CH3 yataysa CH2 dikey olabilir.
+        # Sağ Stick Yatay (L/R) genelde CH1 veya CH4 olur. CH1 dikeyse CH4 yatay olabilir.
+        
+        self.input_throttle = rc2  # Sol Stick Dikey (Tahmini)
+        self.input_steer = rc4     # Sağ Stick Yatay (Tahmini)
+        
         if rc6: self.input_gear = rc6
 
     def control_loop(self):
         print("⚙️ [MOTOR] Cruise Control & Soft-Start Devrede")
         while self.active:
-            time.sleep(0.05) # 20Hz Döngü
+            # ... (Loop devam ediyor)
+            time.sleep(0.05)
             
             # --- 1. VİTES MANTIĞI (CH6) ---
-            # Switch Aşağı (<1300): GERİ
-            # Switch Orta (1300-1700): BOŞ
-            # Switch Yukarı (>1700): İLERİ
+            # ... (Vites mantığı aynı)
             
             new_gear = "NEUTRAL"
             if self.input_gear > 1700: new_gear = "FORWARD"
             elif self.input_gear < 1300: new_gear = "REVERSE"
             
-            # Güvenli Geçiş Kontrolü (Hareket halindeyken ters vitese takma)
             if new_gear != self.gear:
-                if self.gear == "FORWARD" and new_gear == "REVERSE":
-                    # Önce durmalı
-                    if abs(self.current_pwm - 1500) > 10: new_gear = "NEUTRAL"
-                elif self.gear == "REVERSE" and new_gear == "FORWARD":
-                    if abs(self.current_pwm - 1500) > 10: new_gear = "NEUTRAL"
-                
-                self.gear = new_gear
-                
-                # Vites Boşa alındıysa hedefi sıfırla
-                if self.gear == "NEUTRAL":
-                    self.target_pwm = 1500
+                 if self.gear == "FORWARD" and new_gear == "REVERSE":
+                     if abs(self.current_pwm - 1500) > 10: new_gear = "NEUTRAL"
+                 elif self.gear == "REVERSE" and new_gear == "FORWARD":
+                     if abs(self.current_pwm - 1500) > 10: new_gear = "NEUTRAL"
+                 self.gear = new_gear
+                 if self.gear == "NEUTRAL": self.target_pwm = 1500
 
             # --- 2. CRUISE CONTROL GİRDİSİ (SOL STICK - CH3) ---
             # Kullanıcı İsteği: Stick ne kadar itilirse o kadar hızlı ivmelensin
