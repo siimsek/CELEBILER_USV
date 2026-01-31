@@ -668,9 +668,19 @@ class SmartTelemetry:
                     print(f"💓 [HEARTBEAT] Src: {msg.get_srcSystem()} Mode: {msg.custom_mode} Base: {msg.base_mode}")
                     self.last_mode_debug = msg.custom_mode
 
-                # Sadece Pixhawk'tan gelen moda bak (GCS veya diğerlerini yoksay)
-                # DİKKAT: Eğer Pixhawk ID'si 1 değilse burası patlar. Loglardan ID'yi göreceğiz.
-                if msg.get_srcSystem() != 1: return
+                # Sadece Pixhawk'tan gelen moda bak (Auto-Discovery)
+                src_sys = msg.get_srcSystem()
+                
+                # Eğer henüz sistem ID'sini bilmiyorsak, ilk gelen OTOPİLOT mesajını sistemimiz kabul edelim
+                if getattr(self, 'target_system_id', None) is None:
+                    # MAV_TYPE_GENERIC=0 ... MAV_TYPE_HELICOPTER=4 arası genelde araçtır
+                    if msg.type <= 20: 
+                         print(f"🎯 [MAV] Hedef Sistem Tanımlandı: ID {src_sys} (Type: {msg.type})")
+                         self.target_system_id = src_sys
+                
+                # Sadece hedef sistemden gelenleri işle
+                if getattr(self, 'target_system_id', None) != src_sys:
+                    return
                 
                 # ArduRover Mode Mapping
                 custom_mode = msg.custom_mode
