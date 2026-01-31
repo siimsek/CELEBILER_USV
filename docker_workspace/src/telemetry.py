@@ -623,15 +623,17 @@ class SmartTelemetry:
             try:
                 if self.stm32.in_waiting > 0:
                     line = self.stm32.readline().decode('utf-8', errors='ignore').strip()
-                    if line.startswith("{") and line.endswith("}"):
+                    if line.startswith("{"):
+                        import json
                         data = json.loads(line)
                         with self.lock:
                             telemetry_data["STM_Date"] = data.get("tarih", "--:--:--")
                             telemetry_data["Env_Temp"] = float(data.get("temp", 0))
                             telemetry_data["Env_Hum"] = float(data.get("hum", 0))
                             telemetry_data["Rain_Val"] = int(data.get("rain", 4095))
-                            telemetry_data["Rain_Status"] = "RAIN" if telemetry_data["Rain_Val"] < 3000 else "DRY"
-            except: pass
+                            telemetry_data["Rain_Status"] = "WET" if telemetry_data["Rain_Val"] < 2000 else "DRY"
+            except Exception as e:
+                print(f"❌ STM32 Error: {e}")
 
     def read_pixhawk(self):
         print("📡 [MAV] Pixhawk Dinleme Servisi Aktif")
@@ -813,23 +815,23 @@ class MotorController:
 
     def update_inputs(self, rc1, rc2, rc3, rc4, rc6):
         """RC verilerini güncelle"""
-        # KULLANICI İSTEĞİNE GÖRE YENİDEN HARİTALAMA (REMAPPING)
-        # Önceki Durum: Sol L/R -> Cruise (CH3), Sağ U/D -> Steer (CH1)
-        # İstenen: Sol U/D -> Cruise, Sağ L/R -> Steer
+        # STANDART MODE 2 HARİTALAMASI (EN GÜVENLİSİ)
+        # Sol Stick Dikey (CH3) -> Cruise Control (Hız/Gaz)
+        # Sağ Stick Yatay (CH1) -> Steering (Direksiyon)
         
-        # Deneme 1: Eksik olan diğer eksenleri atayalım.
-        # Sol Stick Dikey (U/D) genelde CH2 veya CH3 olur. CH3 yataysa CH2 dikey olabilir.
-        # Sağ Stick Yatay (L/R) genelde CH1 veya CH4 olur. CH1 dikeyse CH4 yatay olabilir.
+        # Eğer kumandada mikser (V-Tail vs) açıksa CH1 ve CH2 birlikte oynar.
+        # Bunu çözmenin en iyi yolu kumandadan mikseri kapatmaktır.
+        # Biz burada temiz sinyal bekliyoruz.
         
-        self.input_throttle = rc2  # Sol Stick Dikey (Tahmini)
-        self.input_steer = rc4     # Sağ Stick Yatay (Tahmini)
+        self.input_throttle = rc3 
+        self.input_steer = rc1
         
         if rc6: self.input_gear = rc6
 
     def control_loop(self):
         print("⚙️ [MOTOR] Cruise Control & Soft-Start Devrede")
         while self.active:
-            # ... (Loop devam ediyor)
+            # ... Loop devam ediyor ...
             time.sleep(0.05)
             
             # --- 1. VİTES MANTIĞI (CH6) ---
