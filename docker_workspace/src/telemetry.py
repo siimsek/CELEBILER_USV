@@ -844,20 +844,34 @@ class MotorController:
                     self.target_pwm = 1500
 
             # --- 2. CRUISE CONTROL GİRDİSİ (SOL STICK - CH3) ---
-            # Stick Yukarıda: Hızı artır
-            if self.input_throttle > (1500 + self.PWM_DEADZONE):
-                if self.gear == "FORWARD":
-                    self.target_pwm = min(self.target_pwm + self.CRUISE_STEP, self.MAX_FWD)
-                elif self.gear == "REVERSE":
-                    self.target_pwm = max(self.target_pwm - self.CRUISE_STEP, self.MAX_REV)
+            # Kullanıcı İsteği: Stick ne kadar itilirse o kadar hızlı ivmelensin
+            # Merkez (1500) = Hız değişimi yok.
             
-            # Stick Aşağıda: Hızı azalt (Frene basmak gibi)
-            elif self.input_throttle < (1500 - self.PWM_DEADZONE):
-                 # Forward modundaysak 1500'e yaklaş, Reverse ise 1500'e yaklaş
-                 if self.target_pwm > 1500:
-                     self.target_pwm = max(self.target_pwm - self.CRUISE_STEP, 1500)
-                 elif self.target_pwm < 1500:
-                     self.target_pwm = min(self.target_pwm + self.CRUISE_STEP, 1500)
+            throttle_diff = self.input_throttle - 1500
+            
+            if abs(throttle_diff) > self.PWM_DEADZONE:
+                # Normalizasyon: 0.0 ile 1.0 arası güç çarpanı
+                # 500 = Stick yarıçapı
+                power_factor = (abs(throttle_diff) - self.PWM_DEADZONE) / (500.0 - self.PWM_DEADZONE)
+                
+                # CRUISE_STEP artık dinamik: Max 5 PWM/döngü
+                step_val = self.CRUISE_STEP * power_factor * 2.0 
+                
+                if throttle_diff > 0:
+                    # Hızlan (İleri viteste Max'a, Geri viteste MaxRev'e doğru değil, HIZ büyüklüğünü artır)
+                    if self.gear == "FORWARD":
+                        self.target_pwm = min(self.target_pwm + step_val, self.MAX_FWD)
+                    elif self.gear == "REVERSE":
+                        # Geri viteste hedef azaldıkça hız artar (1500 -> 1100)
+                        self.target_pwm = max(self.target_pwm - step_val, self.MAX_REV)
+                        
+                else: 
+                    # Yavaşla (Frene bas veya elini çek)
+                    # 1500'e doğru yaklaş
+                    if self.target_pwm > 1500:
+                        self.target_pwm = max(self.target_pwm - step_val, 1500)
+                    elif self.target_pwm < 1500:
+                        self.target_pwm = min(self.target_pwm + step_val, 1500)
 
             # --- 3. RAMPING (YUMUŞAK GEÇİŞ) ---
             # current_pwm'i target_pwm'e yavaşça yaklaştır
@@ -867,71 +881,29 @@ class MotorController:
             else:
                 self.current_pwm += self.RAMP_STEP if diff > 0 else -self.RAMP_STEP
 
+            # --- DEBUG LOG (Sadece değişim varsa) ---
+            # CH6 Sorunu için özel takip
+            if abs(self.input_gear - 1500) > 100:
+                 # Vites eylemi var
+                 pass
+
             # --- 4. DIFFERENTIAL STEERING (SAĞ STICK - CH1) ---
             # Dönüş faktörü (-1.0 ile 1.0 arası)
             steering = (self.input_steer - 1500) / 500.0
             
-            # Mikser
-            # Base hızımız current_pwm. Dönüşü buna ekle/çıkar.
-            # 1500 merkez kabul edilir.
-            base_power = self.current_pwm - 1500
-            
-            left_motor = 1500 + base_power + (steering * 200) # Dönüş yetkisi +/- 200 PWM
-            right_motor = 1500 + base_power - (steering * 200)
-            
-            # Sınırla (Clamping)
-            left_motor = max(1100, min(1900, left_motor))
-            right_motor = max(1100, min(1900, right_motor))
-            
             # --- 5. ÇIKISH (MAVLINK OVERRIDE) ---
-            # Sadece donanım varsa ve MANUAL moddaysak gönder
-            # Güvenlik: Stickler merkezde değilse ve ilk başlangıçsa kaza önlemi eklenebilir
             
             if self.parent.pixhawk:
                 try:
-                    # RC Override: Motor 1 (Left) ve Motor 3 (Right)
-                    # ArduRover Skid Steer için genelde CH1 ve CH3 kullanılır ama biz direkt servo output sürüyoruz
-                    # RC_CHANNELS_OVERRIDE 1-8 kanalları ezer. 
-                    # Pixhawk'ta Servo1 ve Servo3'ü sürmek için RC Overriden ziyade 
-                    # Input kanallarını (Throttle/Steering) manipüle etmek daha güvenli olabilir.
-                    # ANCAK: Kullanıcı "Gemi Kontrolcüsü" istediği için Mikseri biz yapıyoruz.
-                    # Bu yüzden Pixhawk'ı "MANUAL" modda tutup, Direkt Servo çıkışlarına etki etmeye çalışacağız.
-                    # AMA RC Override sadece Griş kanallarını (RCIN) ezer. Pixhawk yine kendi mikserini uygular.
-                    # BU KRİTİK: Eğer Pixhawk'ta Skid Steer mikseri açıksa, bizim burada mikser yapmamız ÇİFT MİKSER olur.
-                    # ÇÖZÜM: Biz sadece "Sanal Gaz" ve "Sanal Direksiyon" üretip Pixhawk'a yollayalım.
-                    # Pixhawk zaten Skid Steer yapıyor.
-                    
-                    # DÜZELTME: Kullanıcı "Differential Sürüş (Sağ Stick)" maddesinde kendi mikserimizi yazmamızı istedi.
-                    # Demek ki Pixhawk'ı "Passthrough" gibi kullanmak veya Pixhawk'a Throttle/Roll göndermek lazım.
-                    # Bizim hesapladığımız "left_motor" ve "right_motor" PWM değerleri.
-                    # Bunları Pixhawk'ın RC1 (Roll) ve RC3 (Throttle) girişlerine "tersine mühendislik" ile mi versek?
-                    # HAYIR. En temizi: Pixhawk'a "Throttle" (CH3) ve "Steering" (CH1) override göndermek.
-                    # Ama kullanıcının istediği Cruise Control.
-                    # Yani biz calculated_throttle ve calculated_steering göndermeliyiz.
-                    
-                    # YENİ PLAN (MIXER İPTAL, SADECE CRUISE CONTROL):
-                    # Pixhawk Skid Steer'i daha iyi yapar. Biz sadece "Throttle" ve "Steering" komutlarını üretelim.
-                    
-                    # 4. REVİZE: CRUISE CONTROL ONLY
-                    # current_pwm bizim "Throttle" komutumuzdur (1100-1900).
-                    # input_steer bizim "Steering" komutumuzdur.
-                    
                     CMD_THROTTLE = int(self.current_pwm)
-                    CMD_STEERING = int(self.input_steer) # Direksiyonu olduğu gibi ilet
+                    CMD_STEERING = int(self.input_steer)
                     
-                    # Vites Boştaysa Gaz 1500
                     if self.gear == "NEUTRAL": CMD_THROTTLE = 1500
                     
-                    rc_override = [0]*8
-                    rc_override[0] = CMD_STEERING     # CH1: Roll/Steering - Olduğu gibi
-                    rc_override[2] = CMD_THROTTLE     # CH3: Throttle - Bizim hesapladığımız Ramped değer
-                    
-                    # Diğer kanalları 0 (No Change) veya 65535 yap
-                    # PyMavlink: 0 veya 65535 release demek değildir, 0=MinPWM olabilir.
-                    # 65535 = Ignore.
+                    # Kanal listesi (1-8 arası, diğerleri ignore)
                     rc_override = [65535]*8
-                    rc_override[0] = CMD_STEERING
-                    rc_override[2] = CMD_THROTTLE
+                    rc_override[0] = CMD_STEERING     # CH1: Roll
+                    rc_override[2] = CMD_THROTTLE     # CH3: Throttle
                     
                     self.parent.pixhawk.mav.rc_channels_override_send(
                         self.parent.target_system_id if self.parent.target_system_id else 1,
@@ -939,20 +911,17 @@ class MotorController:
                         *rc_override
                     )
                     
-                    # Web Arayüzü İçin Veri Güncelleme
                     with self.parent.lock:
-                        # OUT1 ve OUT3 yerine bizim gönderdiğimiz komutları gösterelim
-                        # Veya Pixhawk'tan dönen SERVO_OUTPUT'u zaten okuyoruz, o daha gerçekçi.
                         telemetry_data["Gear"] = self.gear
-                        # Debug için hedef hızı biyere yazabiliriz
-                        # telemetry_data["TargetSpeed"] = self.target_pwm
+                        # Debug: Hedef hızı UI'da görmek için Out1/3'e yazalım (Geçici)
+                        telemetry_data["Out1"] = int(self.input_gear) # DEBUG: CH6 RAW Değerini buraya yazalım
+                        telemetry_data["Out3"] = int(self.target_pwm)
                         
                 except Exception as e:
-                    # print(f"Motor Error: {e}")
                     pass
 
     # --- SİSTEM & SİMÜLASYON ---
-    def update_system_metrics(self):
+
         """RPi Kaynak Tüketimi (CPU/RAM/Temp)."""
         try:
             # CPU
