@@ -853,49 +853,40 @@ class MotorController:
             # Kullanıcı İsteği: Stick ne kadar itilirse o kadar hızlı ivmelensin
             # Merkez (1500) = Hız değişimi yok.
             
-            throttle_diff = self.input_throttle - 1500
+            # 2. CRUISE CONTROL (HIZ)
+            throttle_raw_diff = self.input_throttle - 1500
             
-            if abs(throttle_diff) > self.PWM_DEADZONE:
-                # Normalizasyon: 0.0 ile 1.0 arası güç çarpanı
-                # 500 = Stick yarıçapı
-                power_factor = (abs(throttle_diff) - self.PWM_DEADZONE) / (500.0 - self.PWM_DEADZONE)
-                
-                # CRUISE_STEP artık dinamik: Max 5 PWM/döngü
+            # Yön Çevirme
+            if self.INV_THROTTLE: throttle_raw_diff *= -1
+            
+            if abs(throttle_raw_diff) > self.PWM_DEADZONE:
+                power_factor = (abs(throttle_raw_diff) - self.PWM_DEADZONE) / (500.0 - self.PWM_DEADZONE)
                 step_val = self.CRUISE_STEP * power_factor * 2.0 
                 
-                if throttle_diff > 0:
-                    # Hızlan (İleri viteste Max'a, Geri viteste MaxRev'e doğru değil, HIZ büyüklüğünü artır)
+                if throttle_raw_diff > 0:
+                    # HIZ ARTIR
                     if self.gear == "FORWARD":
                         self.target_pwm = min(self.target_pwm + step_val, self.MAX_FWD)
                     elif self.gear == "REVERSE":
-                        # Geri viteste hedef azaldıkça hız artar (1500 -> 1100)
                         self.target_pwm = max(self.target_pwm - step_val, self.MAX_REV)
-                        
                 else: 
-                    # Yavaşla (Frene bas veya elini çek)
-                    # 1500'e doğru yaklaş
+                    # HIZ AZALT
                     if self.target_pwm > 1500:
                         self.target_pwm = max(self.target_pwm - step_val, 1500)
                     elif self.target_pwm < 1500:
                         self.target_pwm = min(self.target_pwm + step_val, 1500)
 
-            # --- 3. RAMPING (YUMUŞAK GEÇİŞ) ---
-            # current_pwm'i target_pwm'e yavaşça yaklaştır
+            # 3. RAMPING (YUMUŞAK GEÇİŞ)
             diff = self.target_pwm - self.current_pwm
             if abs(diff) < self.RAMP_STEP:
                 self.current_pwm = self.target_pwm
             else:
                 self.current_pwm += self.RAMP_STEP if diff > 0 else -self.RAMP_STEP
 
-            # --- DEBUG LOG (Sadece değişim varsa) ---
-            # CH6 Sorunu için özel takip
-            if abs(self.input_gear - 1500) > 100:
-                 # Vites eylemi var
-                 pass
-
-            # --- 4. DIFFERENTIAL STEERING (SAĞ STICK - CH1) ---
-            # Dönüş faktörü (-1.0 ile 1.0 arası)
-            steering = (self.input_steer - 1500) / 500.0
+            # 4. STEERING
+            steer_val = (self.input_steer - 1500)
+            if self.INV_STEER: steer_val *= -1
+            steering = steer_val / 500.0
             
             # --- 5. ÇIKISH (MAVLINK OVERRIDE) ---
             
