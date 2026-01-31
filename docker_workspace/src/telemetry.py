@@ -250,11 +250,43 @@ HTML_PAGE = """
                     document.getElementById('rain_val').innerText = "VAL: " + data.Rain_Val;
 
                     // RC & Motors
-                    document.getElementById('rc1').innerText = data.RC1 || "--";
-                    document.getElementById('rc3').innerText = data.RC3 || "--";
+                    // Stick Animasyonu (1000-2000 aralığını -24px ile +24px arasına map et)
+                    const mapStick = (val) => {
+                         if (!val) return 0;
+                         let norm = (val - 1500) / 500.0; // -1 to 1
+                         if (norm > 1) norm = 1; 
+                         if (norm < -1) norm = -1;
+                         return norm * 24; // Yarıçap
+                    };
+
+                    // Sol Stick (CH4=X, CH3=Y)
+                    const s1_x = mapStick(data.RC4); 
+                    const s1_y = -mapStick(data.RC3); // Y ekseni ters
+                    document.getElementById('stick_left').style.transform = `translate(${s1_x}px, ${s1_y}px)`;
+                    
+                    // Sağ Stick (CH1=X, CH2=Y)
+                    const s2_x = mapStick(data.RC1);
+                    const s2_y = -mapStick(data.RC2);
+                    document.getElementById('stick_right').style.transform = `translate(${s2_x}px, ${s2_y}px)`;
+
+                    // Değerler
+                    document.getElementById('rc1_val').innerText = data.RC1 || "--";
+                    document.getElementById('rc3_val').innerText = data.RC3 || "--";
+
+                    // Motor Barları (PWM 1000-2000 -> %0-%100)
+                    const mapPWM = (val) => {
+                        if (!val) return 0;
+                        let p = (val - 1000) / 10.0;
+                        if (p < 0) p = 0; if (p > 100) p = 100;
+                        return p;
+                    }
                     document.getElementById('out1').innerText = data.Out1 || "--";
+                    document.getElementById('mot1_bar').style.width = mapPWM(data.Out1) + "%";
+                    
                     document.getElementById('out3').innerText = data.Out3 || "--";
-                    document.getElementById('rc_mode').innerText = "MODE: " + data.Mode;
+                    document.getElementById('mot3_bar').style.width = mapPWM(data.Out3) + "%";
+
+                    // Mode Renkleri
 
                     // Mode Color
                     const modeEl = document.getElementById('mode');
@@ -360,21 +392,47 @@ HTML_PAGE = """
                 </div>
             </div>
 
-            <!-- 5. RC / MOTORS -->
-            <div class="stat-card">
-                <div class="stat-label">CONTROLLER (RC)</div>
-                <div>
-                    <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-secondary);">
-                        <span>CH1: <strong id="rc1" style="color:var(--text-primary)">--</strong></span>
-                        <span>CH3: <strong id="rc3" style="color:var(--text-primary)">--</strong></span>
+            <!-- 5. RC / MOTORS (Görsel Simülasyon) -->
+            <div class="stat-card" style="grid-column: span 1;">
+                <div class="stat-label">CONTROLLER INPUT</div>
+                <div style="display:flex; justify-content:space-around; align-items:center; padding:10px 0;">
+                    <!-- Sol Stick (Throttle/Yaw) -->
+                    <div style="position:relative; width:60px; height:60px; border:2px solid rgba(255,255,255,0.1); border-radius:50%; background:rgba(0,0,0,0.2);">
+                        <div id="stick_left" style="position:absolute; width:12px; height:12px; background:var(--accent); border-radius:50%; top:24px; left:24px; transition:all 0.05s;"></div>
+                        <span style="position:absolute; bottom:-20px; width:100%; text-align:center; font-size:0.7rem; color:var(--text-secondary);">MO3/4</span>
                     </div>
-                    <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-secondary);">
-                        <span>MOT1: <strong id="out1" style="color:var(--accent)">--</strong></span>
-                        <span>MOT3: <strong id="out3" style="color:var(--accent)">--</strong></span>
+
+                    <!-- Sağ Stick (Pitch/Roll) -->
+                    <div style="position:relative; width:60px; height:60px; border:2px solid rgba(255,255,255,0.1); border-radius:50%; background:rgba(0,0,0,0.2);">
+                        <div id="stick_right" style="position:absolute; width:12px; height:12px; background:var(--accent); border-radius:50%; top:24px; left:24px; transition:all 0.05s;"></div>
+                        <span style="position:absolute; bottom:-20px; width:100%; text-align:center; font-size:0.7rem; color:var(--text-secondary);">CH1/2</span>
                     </div>
-                    <div class="sub-val" id="rc_mode" style="margin-top:5px; font-size:0.7rem; text-align:right;">--</div>
+                </div>
+                <div style="text-align:center; margin-top:15px; font-size:0.7rem; color:var(--text-secondary);">
+                    CH1: <span id="rc1_val" style="color:white">--</span> | CH3: <span id="rc3_val" style="color:white">--</span>
                 </div>
             </div>
+
+            <!-- MOTOR DURUMU -->
+             <div class="stat-card" style="grid-column: span 1;">
+                 <div class="stat-label">MOTORS (PWM)</div>
+                 <div style="display:flex; flex-direction:column; gap:8px;">
+                     <div style="display:flex; justify-content:space-between; align-items:center;">
+                         <span style="font-size:0.8rem; color:var(--text-secondary);">MOT 1</span>
+                         <div style="flex:1; height:6px; background:rgba(255,255,255,0.1); margin:0 10px; border-radius:3px; overflow:hidden;">
+                             <div id="mot1_bar" style="width:0%; height:100%; background:var(--accent); transition:width 0.1s;"></div>
+                         </div>
+                         <strong id="out1" style="font-size:0.9rem;">--</strong>
+                     </div>
+                     <div style="display:flex; justify-content:space-between; align-items:center;">
+                         <span style="font-size:0.8rem; color:var(--text-secondary);">MOT 3</span>
+                         <div style="flex:1; height:6px; background:rgba(255,255,255,0.1); margin:0 10px; border-radius:3px; overflow:hidden;">
+                             <div id="mot3_bar" style="width:0%; height:100%; background:var(--accent); transition:width 0.1s;"></div>
+                         </div>
+                         <strong id="out3" style="font-size:0.9rem;">--</strong>
+                     </div>
+                 </div>
+             </div>
         </div>
     </div>
 </body>
@@ -604,7 +662,14 @@ class SmartTelemetry:
                 telemetry_data['Battery'] = msg.voltage_battery / 1000.0
                 
             elif mtype == 'HEARTBEAT':
+                # --- HEARTBEAT DEBUG ---
+                # Mod değişimini yakalamak için geçici log
+                if getattr(self, 'last_mode_debug', None) != msg.custom_mode or time.time() % 5 < 0.1:
+                    print(f"💓 [HEARTBEAT] Src: {msg.get_srcSystem()} Mode: {msg.custom_mode} Base: {msg.base_mode}")
+                    self.last_mode_debug = msg.custom_mode
+
                 # Sadece Pixhawk'tan gelen moda bak (GCS veya diğerlerini yoksay)
+                # DİKKAT: Eğer Pixhawk ID'si 1 değilse burası patlar. Loglardan ID'yi göreceğiz.
                 if msg.get_srcSystem() != 1: return
                 
                 # ArduRover Mode Mapping
