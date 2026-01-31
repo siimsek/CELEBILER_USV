@@ -254,17 +254,18 @@ HTML_PAGE = """
                     const mapStick = (val) => {
                          if (!val) return 0;
                          let norm = (val - 1500) / 500.0; // -1 to 1
+                         if (Math.abs(norm) < 0.1) norm = 0; // Deadzone
                          if (norm > 1) norm = 1; 
                          if (norm < -1) norm = -1;
                          return norm * 24; // Yarıçap
                     };
 
-                    // Sol Stick (CH4=X, CH3=Y)
+                    // Sol Stick (CH4=X, CH3=Y) -> İleri/Geri (CH3) ve Dönüş (CH4)
                     const s1_x = mapStick(data.RC4); 
-                    const s1_y = -mapStick(data.RC3); // Y ekseni ters
+                    const s1_y = -mapStick(data.RC3); // Y ekseni ters (Yukarı = Düşük Y)
                     document.getElementById('stick_left').style.transform = `translate(${s1_x}px, ${s1_y}px)`;
                     
-                    // Sağ Stick (CH1=X, CH2=Y)
+                    // Sağ Stick (CH1=X, CH2=Y) -> Sağ/Sol (CH1) ve İleri/Geri (CH2)
                     const s2_x = mapStick(data.RC1);
                     const s2_y = -mapStick(data.RC2);
                     document.getElementById('stick_right').style.transform = `translate(${s2_x}px, ${s2_y}px)`;
