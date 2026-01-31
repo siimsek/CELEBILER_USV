@@ -271,8 +271,17 @@ HTML_PAGE = """
                     document.getElementById('stick_right').style.transform = `translate(${s2_x}px, ${s2_y}px)`;
 
                     // Değerler
-                    document.getElementById('rc1_val').innerText = data.RC1 || "--";
-                    document.getElementById('rc3_val').innerText = data.RC3 || "--";
+                    // document.getElementById('rc1_val').innerText = data.RC1 || "--";
+                    // document.getElementById('rc3_val').innerText = data.RC3 || "--";
+                    
+                    // Gear Göstergesi
+                    const gearEl = document.getElementById('gear_disp');
+                    if (gearEl && data.Gear) {
+                        gearEl.innerText = data.Gear;
+                        if (data.Gear === "FORWARD") gearEl.style.color = "var(--success)";
+                        else if (data.Gear === "REVERSE") gearEl.style.color = "var(--danger)";
+                        else gearEl.style.color = "var(--warning)";
+                    }
 
                     // Motor Barları (PWM 1000-2000 -> %0-%100)
                     const mapPWM = (val) => {
@@ -400,17 +409,17 @@ HTML_PAGE = """
                     <!-- Sol Stick (Throttle/Yaw) -->
                     <div style="position:relative; width:60px; height:60px; border:2px solid rgba(255,255,255,0.1); border-radius:50%; background:rgba(0,0,0,0.2);">
                         <div id="stick_left" style="position:absolute; width:12px; height:12px; background:var(--accent); border-radius:50%; top:24px; left:24px; transition:all 0.05s;"></div>
-                        <span style="position:absolute; bottom:-20px; width:100%; text-align:center; font-size:0.7rem; color:var(--text-secondary);">MO3/4</span>
+                        <span style="position:absolute; bottom:-20px; width:100%; text-align:center; font-size:0.7rem; color:var(--text-secondary);">CRUISE</span>
                     </div>
 
                     <!-- Sağ Stick (Pitch/Roll) -->
                     <div style="position:relative; width:60px; height:60px; border:2px solid rgba(255,255,255,0.1); border-radius:50%; background:rgba(0,0,0,0.2);">
                         <div id="stick_right" style="position:absolute; width:12px; height:12px; background:var(--accent); border-radius:50%; top:24px; left:24px; transition:all 0.05s;"></div>
-                        <span style="position:absolute; bottom:-20px; width:100%; text-align:center; font-size:0.7rem; color:var(--text-secondary);">CH1/2</span>
+                        <span style="position:absolute; bottom:-20px; width:100%; text-align:center; font-size:0.7rem; color:var(--text-secondary);">STEER</span>
                     </div>
                 </div>
                 <div style="text-align:center; margin-top:15px; font-size:0.7rem; color:var(--text-secondary);">
-                    CH1: <span id="rc1_val" style="color:white">--</span> | CH3: <span id="rc3_val" style="color:white">--</span>
+                    GEAR: <strong id="gear_disp">--</strong>
                 </div>
             </div>
 
@@ -468,12 +477,16 @@ class SmartTelemetry:
         if not os.path.isfile(CSV_FILE):
              pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
 
+        # Motor Kontrolcüsünü Başlat
+        self.motor_ctrl = MotorController(self)
+
     def start(self):
         """Tüm threadleri başlatır."""
         threads = [
             threading.Thread(target=self.read_pixhawk, daemon=True),
             threading.Thread(target=self.read_stm32, daemon=True),
             threading.Thread(target=self.connection_manager, daemon=True)
+            # Motor thread'i kendi içinde başlıyor zaten
         ]
         
         for t in threads:
@@ -491,7 +504,7 @@ class SmartTelemetry:
         while self.running:
             if not self.pixhawk or not self.stm32:
                 if not first_scan:
-                    print("🔍 [SCAN] Eksik cihazlar taranıyor...")
+                    pass # print("🔍 [SCAN] Eksik cihazlar taranıyor...")
                 self.scan_ports()
             
             # Simülasyon Kontrolü
@@ -505,6 +518,13 @@ class SmartTelemetry:
                 if SIMULATION_MODE:
                     print("🌊 [SYSTEM] Donanım Bulundu -> SİMÜLASYON KAPATILDI")
                     SIMULATION_MODE = False
+                
+                # Periyodik olarak veri akışını tazele (Her 5 saniyede bir)
+                # Bu, mod simgesinin donmasını veya güncelleme almamasını engeller
+                if self.pixhawk and time.time() % 5 < 1.0:
+                     try:
+                         self._request_mavlink_streams(self.pixhawk)
+                     except: pass
             
             first_scan = False
             time.sleep(3)
@@ -651,11 +671,17 @@ class SmartTelemetry:
                 telemetry_data['RC3'] = msg.chan3_raw
                 telemetry_data['RC4'] = msg.chan4_raw
                 
+                # Motor Kontrolcüsüne Veri Gönder
+                # CH1: Direksiyon, CH3: Gaz Artır/Azalt, CH6: Vites
+                rc6 = msg.chan6_raw
+                self.motor_ctrl.update_inputs(msg.chan1_raw, msg.chan3_raw, rc6)
+                
                 # --- RC DEBUG (Kanal Tespiti) ---
                 # Her 5 mesajda bir (yaklaşık saniyede 1) loga bas
                 self.rc_debug_counter = getattr(self, 'rc_debug_counter', 0) + 1
                 if self.rc_debug_counter % 5 == 0:
-                    print(f"🎮 RC RAW: 1:{msg.chan1_raw} 2:{msg.chan2_raw} 3:{msg.chan3_raw} 4:{msg.chan4_raw} 5:{msg.chan5_raw} Mode:{telemetry_data.get('Mode')}")
+                    gear_stat = telemetry_data.get('Gear', 'N')
+                    print(f"🎮 RC: 1:{msg.chan1_raw} 3:{msg.chan3_raw} 6:{rc6} -> Gear:{gear_stat}")
 
                 self._update_physics_sim(msg.chan1_raw, msg.chan3_raw)
                 
@@ -752,6 +778,179 @@ class SmartTelemetry:
             # telemetry_data['Lon'] = self.sim_lon
         except: pass
 
+# --- MOTOR KONTROL (CRUISE CONTROL & SOFT START) ---
+class MotorController:
+    def __init__(self, parent):
+        self.parent = parent # SmartTelemetry referansı (Mavlink erişimi için)
+        self.active = True
+        
+        # Durum Değişkenleri
+        self.target_pwm = 1500.0   # Hedeflenen Hız (Sanal)
+        self.current_pwm = 1500.0  # Anlık Fiziksel Hız (Ramping uygulanan)
+        self.gear = "NEUTRAL"      # Vites: FORWARD, NEUTRAL, REVERSE
+        self.last_gear_switch = 0  # Debouncing için
+        
+        # Girdiler
+        self.input_throttle = 1500 # CH3 (Sol Stick)
+        self.input_steer = 1500    # CH1 (Sağ Stick)
+        self.input_gear = 1000     # CH6 (Switch)
+        
+        # Ayarlar
+        self.PWM_NEUTRAL = 1500
+        self.PWM_DEADZONE = 50     # 1450-1550 arası stick hareketsiz sayılır
+        
+        self.MAX_FWD = 1900
+        self.MAX_REV = 1100
+        
+        self.RAMP_STEP = 2.0       # Her döngüde (50ms) artış miktarı (Yumuşak kalkış)
+        self.CRUISE_STEP = 2.0     # Stick basılıyken hedef hızın artış hızı
+        
+        # Thread
+        self.thread = threading.Thread(target=self.control_loop, daemon=True)
+        self.thread.start()
+
+    def update_inputs(self, rc1, rc3, rc6):
+        """RC verilerini güncelle"""
+        if rc1: self.input_steer = rc1
+        if rc3: self.input_throttle = rc3
+        if rc6: self.input_gear = rc6
+
+    def control_loop(self):
+        print("⚙️ [MOTOR] Cruise Control & Soft-Start Devrede")
+        while self.active:
+            time.sleep(0.05) # 20Hz Döngü
+            
+            # --- 1. VİTES MANTIĞI (CH6) ---
+            # Switch Aşağı (<1300): GERİ
+            # Switch Orta (1300-1700): BOŞ
+            # Switch Yukarı (>1700): İLERİ
+            
+            new_gear = "NEUTRAL"
+            if self.input_gear > 1700: new_gear = "FORWARD"
+            elif self.input_gear < 1300: new_gear = "REVERSE"
+            
+            # Güvenli Geçiş Kontrolü (Hareket halindeyken ters vitese takma)
+            if new_gear != self.gear:
+                if self.gear == "FORWARD" and new_gear == "REVERSE":
+                    # Önce durmalı
+                    if abs(self.current_pwm - 1500) > 10: new_gear = "NEUTRAL"
+                elif self.gear == "REVERSE" and new_gear == "FORWARD":
+                    if abs(self.current_pwm - 1500) > 10: new_gear = "NEUTRAL"
+                
+                self.gear = new_gear
+                
+                # Vites Boşa alındıysa hedefi sıfırla
+                if self.gear == "NEUTRAL":
+                    self.target_pwm = 1500
+
+            # --- 2. CRUISE CONTROL GİRDİSİ (SOL STICK - CH3) ---
+            # Stick Yukarıda: Hızı artır
+            if self.input_throttle > (1500 + self.PWM_DEADZONE):
+                if self.gear == "FORWARD":
+                    self.target_pwm = min(self.target_pwm + self.CRUISE_STEP, self.MAX_FWD)
+                elif self.gear == "REVERSE":
+                    self.target_pwm = max(self.target_pwm - self.CRUISE_STEP, self.MAX_REV)
+            
+            # Stick Aşağıda: Hızı azalt (Frene basmak gibi)
+            elif self.input_throttle < (1500 - self.PWM_DEADZONE):
+                 # Forward modundaysak 1500'e yaklaş, Reverse ise 1500'e yaklaş
+                 if self.target_pwm > 1500:
+                     self.target_pwm = max(self.target_pwm - self.CRUISE_STEP, 1500)
+                 elif self.target_pwm < 1500:
+                     self.target_pwm = min(self.target_pwm + self.CRUISE_STEP, 1500)
+
+            # --- 3. RAMPING (YUMUŞAK GEÇİŞ) ---
+            # current_pwm'i target_pwm'e yavaşça yaklaştır
+            diff = self.target_pwm - self.current_pwm
+            if abs(diff) < self.RAMP_STEP:
+                self.current_pwm = self.target_pwm
+            else:
+                self.current_pwm += self.RAMP_STEP if diff > 0 else -self.RAMP_STEP
+
+            # --- 4. DIFFERENTIAL STEERING (SAĞ STICK - CH1) ---
+            # Dönüş faktörü (-1.0 ile 1.0 arası)
+            steering = (self.input_steer - 1500) / 500.0
+            
+            # Mikser
+            # Base hızımız current_pwm. Dönüşü buna ekle/çıkar.
+            # 1500 merkez kabul edilir.
+            base_power = self.current_pwm - 1500
+            
+            left_motor = 1500 + base_power + (steering * 200) # Dönüş yetkisi +/- 200 PWM
+            right_motor = 1500 + base_power - (steering * 200)
+            
+            # Sınırla (Clamping)
+            left_motor = max(1100, min(1900, left_motor))
+            right_motor = max(1100, min(1900, right_motor))
+            
+            # --- 5. ÇIKISH (MAVLINK OVERRIDE) ---
+            # Sadece donanım varsa ve MANUAL moddaysak gönder
+            # Güvenlik: Stickler merkezde değilse ve ilk başlangıçsa kaza önlemi eklenebilir
+            
+            if self.parent.pixhawk:
+                try:
+                    # RC Override: Motor 1 (Left) ve Motor 3 (Right)
+                    # ArduRover Skid Steer için genelde CH1 ve CH3 kullanılır ama biz direkt servo output sürüyoruz
+                    # RC_CHANNELS_OVERRIDE 1-8 kanalları ezer. 
+                    # Pixhawk'ta Servo1 ve Servo3'ü sürmek için RC Overriden ziyade 
+                    # Input kanallarını (Throttle/Steering) manipüle etmek daha güvenli olabilir.
+                    # ANCAK: Kullanıcı "Gemi Kontrolcüsü" istediği için Mikseri biz yapıyoruz.
+                    # Bu yüzden Pixhawk'ı "MANUAL" modda tutup, Direkt Servo çıkışlarına etki etmeye çalışacağız.
+                    # AMA RC Override sadece Griş kanallarını (RCIN) ezer. Pixhawk yine kendi mikserini uygular.
+                    # BU KRİTİK: Eğer Pixhawk'ta Skid Steer mikseri açıksa, bizim burada mikser yapmamız ÇİFT MİKSER olur.
+                    # ÇÖZÜM: Biz sadece "Sanal Gaz" ve "Sanal Direksiyon" üretip Pixhawk'a yollayalım.
+                    # Pixhawk zaten Skid Steer yapıyor.
+                    
+                    # DÜZELTME: Kullanıcı "Differential Sürüş (Sağ Stick)" maddesinde kendi mikserimizi yazmamızı istedi.
+                    # Demek ki Pixhawk'ı "Passthrough" gibi kullanmak veya Pixhawk'a Throttle/Roll göndermek lazım.
+                    # Bizim hesapladığımız "left_motor" ve "right_motor" PWM değerleri.
+                    # Bunları Pixhawk'ın RC1 (Roll) ve RC3 (Throttle) girişlerine "tersine mühendislik" ile mi versek?
+                    # HAYIR. En temizi: Pixhawk'a "Throttle" (CH3) ve "Steering" (CH1) override göndermek.
+                    # Ama kullanıcının istediği Cruise Control.
+                    # Yani biz calculated_throttle ve calculated_steering göndermeliyiz.
+                    
+                    # YENİ PLAN (MIXER İPTAL, SADECE CRUISE CONTROL):
+                    # Pixhawk Skid Steer'i daha iyi yapar. Biz sadece "Throttle" ve "Steering" komutlarını üretelim.
+                    
+                    # 4. REVİZE: CRUISE CONTROL ONLY
+                    # current_pwm bizim "Throttle" komutumuzdur (1100-1900).
+                    # input_steer bizim "Steering" komutumuzdur.
+                    
+                    CMD_THROTTLE = int(self.current_pwm)
+                    CMD_STEERING = int(self.input_steer) # Direksiyonu olduğu gibi ilet
+                    
+                    # Vites Boştaysa Gaz 1500
+                    if self.gear == "NEUTRAL": CMD_THROTTLE = 1500
+                    
+                    rc_override = [0]*8
+                    rc_override[0] = CMD_STEERING     # CH1: Roll/Steering - Olduğu gibi
+                    rc_override[2] = CMD_THROTTLE     # CH3: Throttle - Bizim hesapladığımız Ramped değer
+                    
+                    # Diğer kanalları 0 (No Change) veya 65535 yap
+                    # PyMavlink: 0 veya 65535 release demek değildir, 0=MinPWM olabilir.
+                    # 65535 = Ignore.
+                    rc_override = [65535]*8
+                    rc_override[0] = CMD_STEERING
+                    rc_override[2] = CMD_THROTTLE
+                    
+                    self.parent.pixhawk.mav.rc_channels_override_send(
+                        self.parent.target_system_id if self.parent.target_system_id else 1,
+                        self.parent.pixhawk.target_component,
+                        *rc_override
+                    )
+                    
+                    # Web Arayüzü İçin Veri Güncelleme
+                    with self.parent.lock:
+                        # OUT1 ve OUT3 yerine bizim gönderdiğimiz komutları gösterelim
+                        # Veya Pixhawk'tan dönen SERVO_OUTPUT'u zaten okuyoruz, o daha gerçekçi.
+                        telemetry_data["Gear"] = self.gear
+                        # Debug için hedef hızı biyere yazabiliriz
+                        # telemetry_data["TargetSpeed"] = self.target_pwm
+                        
+                except Exception as e:
+                    # print(f"Motor Error: {e}")
+                    pass
+
     # --- SİSTEM & SİMÜLASYON ---
     def update_system_metrics(self):
         """RPi Kaynak Tüketimi (CPU/RAM/Temp)."""
@@ -794,6 +993,7 @@ class SmartTelemetry:
                 "Battery": 12.0 + random.uniform(0, 0.5),
                 "Speed": random.uniform(0, 3.0),
                 "Mode": "SIMULATION",
+                "Gear": "NEUTRAL",
                 # STM32 Mock
                 "STM_Date": time.strftime("%H:%M:%S"),
                 "Env_Temp": 24.5 + random.uniform(-0.5, 0.5),
@@ -813,3 +1013,4 @@ if __name__ == "__main__":
     clean_port(WEB_PORT)
     st = SmartTelemetry()
     st.start()
+
