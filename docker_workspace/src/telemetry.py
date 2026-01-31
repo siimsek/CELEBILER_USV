@@ -182,26 +182,26 @@ HTML_PAGE = """
 
         .stat-card {
             background: linear-gradient(145deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
-            border-radius: 10px;
-            padding: 15px; /* İç boşluk azaltıldı */
+            border-radius: 8px;
+            padding: 10px; /* Daha kompakt */
             display: flex;
             flex-direction: column;
-            justify-content: center; /* Ortalandı */
-            gap: 5px;
+            justify-content: center;
+            gap: 2px;
             border: 1px solid rgba(255,255,255,0.05);
         }
 
         .stat-label { 
-            font-size: 0.85rem; 
+            font-size: 0.75rem; /* Küçültüldü */
             color: var(--text-secondary); 
             text-transform: uppercase; 
             font-weight: 600;
-            margin-bottom: 4px;
+            margin-bottom: 2px;
         }
         
         .stat-value { 
             font-family: var(--font-mono); 
-            font-size: 1.8rem;
+            font-size: 1.4rem; /* Küçültüldü (1.8 -> 1.4) */
             font-weight: 700; 
             color: var(--text-primary); 
             white-space: nowrap;
@@ -808,8 +808,12 @@ class MotorController:
         self.MAX_FWD = 1900
         self.MAX_REV = 1100
         
-        self.RAMP_STEP = 2.0       # Her döngüde (50ms) artış miktarı (Yumuşak kalkış)
-        self.CRUISE_STEP = 2.0     # Stick basılıyken hedef hızın artış hızı
+        self.RAMP_STEP = 3.0       # Hızlanma yumuşaklığı (2.0 -> 3.0)
+        self.CRUISE_STEP = 5.0     # Gaz tepkisi (Atiklik)
+        
+        # YÖN ÇEVİRME (INVERT)
+        self.INV_THROTTLE = True   
+        self.INV_STEER = True      
         
         # Thread
         self.thread = threading.Thread(target=self.control_loop, daemon=True)
@@ -821,17 +825,13 @@ class MotorController:
         # Sol Stick Dikey (CH3) -> Cruise Control (Hız/Gaz)
         # Sağ Stick Yatay (CH1) -> Steering (Direksiyon)
         
-        # Eğer kumandada mikser (V-Tail vs) açıksa CH1 ve CH2 birlikte oynar.
-        # Bunu çözmenin en iyi yolu kumandadan mikseri kapatmaktır.
-        # Biz burada temiz sinyal bekliyoruz.
-        
         self.input_throttle = rc3 
         self.input_steer = rc1
         
         if rc6: self.input_gear = rc6
 
     def control_loop(self):
-        print("⚙️ [MOTOR] Cruise Control & Soft-Start Devrede")
+        print("⚙️ [MOTOR] Kontrolcü Aktif. Yönler: INV_THR={}, INV_STR={}".format(self.INV_THROTTLE, self.INV_STEER))
         while self.active:
             # ... Loop devam ediyor ...
             time.sleep(0.05)
@@ -920,7 +920,7 @@ class MotorController:
                     pass
 
     # --- SİSTEM & SİMÜLASYON ---
-
+    def update_system_metrics(self):
         """RPi Kaynak Tüketimi (CPU/RAM/Temp)."""
         try:
             # CPU
