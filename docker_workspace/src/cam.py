@@ -5,6 +5,9 @@ import numpy as np
 import threading
 import os
 from flask import Flask, Response
+import logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR) # Gereksiz logları kapat
 
 # --- AYARLAR ---
 HOST = '127.0.0.1'

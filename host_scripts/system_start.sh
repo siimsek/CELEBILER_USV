@@ -95,7 +95,7 @@ echo "Başlatılıyor..."
 sudo fuser -k 8888/tcp > /dev/null 2>&1
 echo -e "${GREEN}[KAMERA]${NC} Port 8888 temizleniyor ve yayın başlatılıyor..."
 sudo pkill -9 rpicam-vid || true
-sudo nice -n -20 rpicam-vid -t 0 --codec mjpeg --inline --listen -o tcp://0.0.0.0:8888 --width 1280 --height 720 --framerate 25 --quality 95 > "$LOG_DIR/cam_host.log" 2>&1 &
+sudo nice -n -20 rpicam-vid -t 0 --codec mjpeg --inline --listen -o tcp://0.0.0.0:8888 --width 1280 --height 720 --framerate 25 --quality 95 2>&1 | grep --line-buffered -vE "^#" > "$LOG_DIR/cam_host.log" &
 sleep 2
 
 # 4. DOCKER BAŞLATMA

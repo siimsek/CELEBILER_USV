@@ -9,6 +9,9 @@ import threading
 import time
 import os
 from flask import Flask, Response
+import logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR) # Gereksiz logları kapat
 
 # --- AYARLAR ---
 WEB_PORT = 5001

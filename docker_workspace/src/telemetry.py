@@ -875,12 +875,17 @@ class MotorController:
 
     def update_inputs(self, rc1, rc2, rc3, rc4, rc6):
         """RC verilerini güncelle"""
-        # STANDART MODE 2 HARİTALAMASI (EN GÜVENLİSİ)
-        # Sol Stick Dikey (CH3) -> Cruise Control (Hız/Gaz)
-        # Sağ Stick Yatay (CH1) -> Steering (Direksiyon)
+        # OTOMATİK ALGILAMA / DEBUG MANTIĞI
+        # Loglarda Görülen Aktivite: CH2 (Pitch) ve CH4 (Yaw) hareketli.
+        # Kullanıcı Sağ Stick Dikey (CH2) ile Hız, Sol Stick Yatay (CH4) ile Dönüş yapıyor olabilir.
         
-        self.input_throttle = rc3 
-        self.input_steer = rc1
+        # Varsayılan (Standart Mode 2):
+        # self.input_throttle = rc3 
+        # self.input_steer = rc1
+        
+        # LOGLARA GÖRE REVİZE EDİLEN (CH2/CH4 Aktif):
+        self.input_throttle = rc2 
+        self.input_steer = rc4
         
         if rc6: self.input_gear = rc6
 
