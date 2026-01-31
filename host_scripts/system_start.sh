@@ -15,6 +15,12 @@ echo -e "${CYAN}=================================================${NC}"
 echo -e "${CYAN}   🚀 ÇELEBİLER USV - YER İSTASYONU BAŞLATICI   ${NC}"
 echo -e "${CYAN}=================================================${NC}"
 
+LOG_DIR="$HOME/CELEBILER_USV/logs"
+echo "🧹 [HOST] Eski loglar temizleniyor..."
+rm -f "$LOG_DIR"/*.log
+rm -f "$LOG_DIR"/docker/*.log
+mkdir -p "$LOG_DIR/docker"
+
 # --- 0. AĞ YAPILANDIRMASI (ÖNCELİKLİ) ---
 # Modemin resetlenmesi durumunda Lidar IP'sini (192.168.11.5) kaybetmemek için en başta yapıyoruz.
 TARGET_IP="192.168.11.5"

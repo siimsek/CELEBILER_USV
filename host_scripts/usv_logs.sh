@@ -27,14 +27,23 @@ function view_all() {
     echo "------------------------------------------------"
     
     # Host logları ve Docker (symlink) loglarını izle
-    # docker klasörü varsa oradaki .log dosyalarını da dahil et
-    FILES="$LOG_DIR/*.log"
-    if [ -d "$LOG_DIR/docker" ]; then
-        FILES="$FILES $LOG_DIR/docker/*.log"
-    fi
+    # Kullanıcı isteği: Hepsini cat ile dök
     
-    # Hata bastırma (dosya yoksa) ve tail başlatma
-    tail -f $FILES 2>/dev/null
+    for logfile in $LOG_DIR/*.log; do
+        if [ -f "$logfile" ]; then
+            echo -e "\n${CYAN}==> $(basename "$logfile") <==${NC}"
+            cat "$logfile"
+        fi
+    done
+    
+    if [ -d "$LOG_DIR/docker" ]; then
+        for logfile in $LOG_DIR/docker/*.log; do
+            if [ -f "$logfile" ]; then
+                echo -e "\n${CYAN}==> docker/$(basename "$logfile") <==${NC}"
+                cat "$logfile"
+            fi
+        done
+    fi
 }
 
 case "$1" in
