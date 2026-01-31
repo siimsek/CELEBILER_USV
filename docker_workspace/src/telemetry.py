@@ -260,14 +260,16 @@ HTML_PAGE = """
                          return norm * 24; // Yarıçap
                     };
 
-                    // Sol Stick (CH4=X, CH3=Y) -> İleri/Geri (CH3) ve Dönüş (CH4)
-                    const s1_x = mapStick(data.RC4); 
-                    const s1_y = -mapStick(data.RC3); // Y ekseni ters (Yukarı = Düşük Y)
+                    // Sol Stick (Sadece HIZ - Dikey)
+                    // Kullanıcı isteği: Sadece ileri/geri oynasın, sağ/sol iptal.
+                    const s1_x = 0; 
+                    const s1_y = -mapStick(data.RC3); // Y ekseni (Cruise)
                     document.getElementById('stick_left').style.transform = `translate(${s1_x}px, ${s1_y}px)`;
                     
-                    // Sağ Stick (CH1=X, CH2=Y) -> Sağ/Sol (CH1) ve İleri/Geri (CH2)
-                    const s2_x = mapStick(data.RC1);
-                    const s2_y = -mapStick(data.RC2);
+                    // Sağ Stick (Sadece YÖN - Yatay)
+                    // Kullanıcı isteği: Sadece sağ/sol oynasın, yukarı/aşağı iptal.
+                    const s2_x = mapStick(data.RC1); // X ekseni (Steer)
+                    const s2_y = 0;
                     document.getElementById('stick_right').style.transform = `translate(${s2_x}px, ${s2_y}px)`;
 
                     // Değerler
@@ -404,7 +406,7 @@ HTML_PAGE = """
 
             <!-- 5. RC / MOTORS (Görsel Simülasyon) -->
             <div class="stat-card" style="grid-column: span 1;">
-                <div class="stat-label">CONTROLLER INPUT</div>
+                <div class="stat-label">PILOT DECK</div>
                 <div style="display:flex; justify-content:space-around; align-items:center; padding:10px 0;">
                     <!-- Sol Stick (Throttle/Yaw) -->
                     <div style="position:relative; width:60px; height:60px; border:2px solid rgba(255,255,255,0.1); border-radius:50%; background:rgba(0,0,0,0.2);">
@@ -418,8 +420,8 @@ HTML_PAGE = """
                         <span style="position:absolute; bottom:-20px; width:100%; text-align:center; font-size:0.7rem; color:var(--text-secondary);">STEER</span>
                     </div>
                 </div>
-                <div style="text-align:center; margin-top:15px; font-size:0.7rem; color:var(--text-secondary);">
-                    GEAR: <strong id="gear_disp">--</strong>
+                <div style="text-align:center; margin-top:15px; font-size:0.9rem; color:var(--text-secondary);">
+                    GEAR STATUS: <strong id="gear_disp" style="font-size:1.2rem; margin-left:5px;">--</strong>
                 </div>
             </div>
 

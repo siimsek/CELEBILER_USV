@@ -17,8 +17,8 @@ echo -e "${CYAN}=================================================${NC}"
 
 LOG_DIR="$HOME/CELEBILER_USV/logs"
 echo "🧹 [HOST] Eski loglar temizleniyor..."
-rm -f "$LOG_DIR"/*.log
-rm -f "$LOG_DIR"/docker/*.log
+sudo rm -f "$LOG_DIR"/*.log
+sudo rm -f "$LOG_DIR"/docker/*.log
 mkdir -p "$LOG_DIR/docker"
 
 # --- 0. AĞ YAPILANDIRMASI (ÖNCELİKLİ) ---
