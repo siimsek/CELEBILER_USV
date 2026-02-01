@@ -885,17 +885,12 @@ class MotorController:
 
     def update_inputs(self, rc1, rc2, rc3, rc4, rc6):
         """RC verilerini güncelle"""
-        # LOG ANALİZİ SONUCU (RC2 ve RC4 Aktif)
-        # Kullanıcının kumandasında aktif kanallar:
-        # RC2 (Pitch/Sağ Stick Dikey) -> Gaz/Hız Olarak Kullanılacak
-        # RC4 (Yaw/Sol Stick Yatay) -> Direksiyon Olarak Kullanılacak
+        # LOG ANALİZİ GÜNCELLEME (RC3 ve RC1 Aktif)
+        # Önceki analizde RC2 sanılmıştı ama loglarda RC2=1500 sabit, RC3 değişiyor.
+        # Standart Mode 2'ye geri dönüyoruz.
         
-        self.input_throttle = rc2 
-        self.input_steer = rc4
-        
-        # Debug için konsola bas (Sadece değişim varsa basılabilir ama şimdilik kalsın)
-        # if abs(rc2 - 1500) > 50 or abs(rc4 - 1500) > 50:
-        #    print(f"🔥 ACTIVE INPUT: Thr(RC2):{rc2} Str(RC4):{rc4}")
+        self.input_throttle = rc3 
+        self.input_steer = rc1
         
         if rc6: self.input_gear = rc6
 
@@ -977,10 +972,21 @@ class MotorController:
             left_motor_raw = cruise_pwm + turn_component
             right_motor_raw = cruise_pwm - turn_component
             
-            # --- 5. SAFETY CLAMP (1100 - 1900) ---
-            # Motorları asla güvenli aralık dışına çıkarma
-            self.left_motor_pwm = int(max(1100, min(left_motor_raw, 1900)))
-            self.right_motor_pwm = int(max(1100, min(right_motor_raw, 1900)))
+            # --- 5. SAFETY CLAMP & DYNAMIC LIMITS ---
+            
+            # DİNAMİK LİMİT: Hızlı giderken terse dönmeyi engelle (Güvenli Dönüş)
+            # Eğer ana hız (Cruise) 1550'den büyükse (İleri gidiyoruz),
+            # motorların altına düşebileceği en düşük değer 1450 (Hafif fren/boş) olsun.
+            # 1200 gibi sert geri değerlere inmesin.
+            
+            min_limit = 1100 # Varsayılan (Pivot dönüş serbest)
+            
+            if self.gear == "FORWARD" and cruise_pwm > 1550:
+                min_limit = 1450 # Sadece yavaşlayarak dön, geri takma
+            
+            # Motorları güvenli aralığa ve dinamik limite göre kırp
+            self.left_motor_pwm = int(max(min_limit, min(left_motor_raw, 1900)))
+            self.right_motor_pwm = int(max(min_limit, min(right_motor_raw, 1900)))
             
             # --- 6. ÇIKISH (MAVLINK OVERRIDE) ---
             if self.parent.pixhawk:

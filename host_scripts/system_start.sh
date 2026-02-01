@@ -118,13 +118,8 @@ docker exec -d $CONTAINER_NAME /bin/bash -c "/root/workspace/scripts/internal_st
 echo -e "\n🔎 [KONTROL] Donanım Bağlantıları Bekleniyor (5sn)..."
 end=$((SECONDS+5))
 
-# Log dosyasının oluşmasını bekle (Max 5sn)
-log_wait=0
-while [ ! -f "$LOG_DIR/docker/telemetry.log" ]; do
-    sleep 0.5
-    ((log_wait++))
-    if [ $log_wait -ge 10 ]; then break; fi
-done
+# Log dosyasını önceden oluştur (Hata vermemesi için)
+touch "$LOG_DIR/docker/telemetry.log"
 
 tail -n 0 -f "$LOG_DIR/docker/telemetry.log" | while read line; do
     if [[ "$line" == *"✅"* ]] || [[ "$line" == *"🎮"* ]] || [[ "$line" == *"💓"* ]]; then
