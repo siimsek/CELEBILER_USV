@@ -117,42 +117,42 @@ HTML_PAGE = """
 
         .metric-icon { opacity: 0.7; }
 
-        /* DASHBOARD GRID */
+        /* DASHBOARD GRID - COMPACT (ONE SCREEN) */
         .dashboard-grid {
             flex: 1;
             display: grid;
             grid-template-columns: 1fr 1fr;
-            grid-template-rows: 75% 25%; /* Video Alanı Artırıldı, İstatistik Azaltıldı */
-            gap: 15px; /* Boşluklar azaltıldı */
-            padding: 15px;
-            max-width: 1920px;
-            margin: 0 auto;
-            width: 100%;
+            grid-template-rows: 60vh 1fr; /* 60% Video, Kalan Stats */
+            gap: 10px;
+            padding: 10px;
+            max-width: 100%;
+            height: calc(100vh - 60px); /* Header hariç tüm alan */
             box-sizing: border-box;
+            overflow: hidden; /* Scroll Yasak */
         }
 
         /* CARDS */
         .card {
             background: var(--card-bg);
-            border-radius: 12px; /* Köşeler biraz daha keskin */
+            border-radius: 8px;
             border: 1px solid rgba(255,255,255,0.06);
             display: flex;
             flex-direction: column;
             overflow: hidden;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
-            position: relative;
         }
 
         .card-header {
-            padding: 8px 15px; /* Header küçültüldü */
-            background: rgba(15, 23, 42, 0.4);
-            font-size: 0.8rem;
+            padding: 6px 12px;
+            background: rgba(15, 23, 42, 0.6);
+            font-size: 0.75rem;
             font-weight: 700;
-            color: var(--text-secondary);
+            color: var(--accent);
             display: flex;
             justify-content: space-between;
             align-items: center;
             border-bottom: 1px solid rgba(255,255,255,0.03);
+            text-transform: uppercase;
             letter-spacing: 0.5px;
         }
 
@@ -168,43 +168,41 @@ HTML_PAGE = """
         }
 
         .stream-img {
-            max-width: 100%;
-            max-height: 100%;
-            width: auto;
-            height: auto;
-            object-fit: contain;
+            width: 100%;
+            height: 100%;
+            object-fit: contain; /* Görüntüyü sığdır */
         }
 
-        /* STATS GRID */
+        /* STATS GRID - BOTTOM PANEL */
         .stats-area {
             grid-column: span 2;
             display: grid;
-            grid-template-columns: repeat(5, 1fr);
-            gap: 15px;
+            grid-template-columns: repeat(6, 1fr); /* 5 yerine 6 bölme */
+            gap: 8px;
+            height: 100%;
         }
 
         .stat-card {
-            background: linear-gradient(145deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%);
-            border-radius: 8px;
-            padding: 10px; /* Daha kompakt */
+            background: linear-gradient(180deg, rgba(30,41,59,0.8) 0%, rgba(15,23,42,0.8) 100%);
+            border-radius: 6px;
+            padding: 8px;
             display: flex;
             flex-direction: column;
-            justify-content: center;
-            gap: 2px;
+            justify-content: space-between;
             border: 1px solid rgba(255,255,255,0.05);
         }
 
         .stat-label { 
-            font-size: 0.75rem; /* Küçültüldü */
+            font-size: 0.65rem; 
             color: var(--text-secondary); 
             text-transform: uppercase; 
             font-weight: 600;
-            margin-bottom: 2px;
+            letter-spacing: 0.5px;
         }
         
         .stat-value { 
             font-family: var(--font-mono); 
-            font-size: 1.4rem; /* Küçültüldü (1.8 -> 1.4) */
+            font-size: 1.1rem; /* Daha küçük font */
             font-weight: 700; 
             color: var(--text-primary); 
             white-space: nowrap;
@@ -862,7 +860,8 @@ class MotorController:
         self.MAX_FWD = 1900
         self.MAX_REV = 1100
         
-        self.RAMP_STEP = 1.0       # Çok yumuşak hızlanma (2.0 -> 1.0)
+        self.RAMP_STEP = 0.5       # Ultra yumuşak (1.0 -> 0.5)
+        self.CRUISE_STEP = 2.0     # Hız değişim hızı
         self.CRUISE_STEP = 1.0     # Hassas hız kontrolü (5.0 -> 1.0)
         
         # YÖN ÇEVİRME (INVERT) - Varsayılan False (Standart)
