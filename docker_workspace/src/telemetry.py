@@ -885,12 +885,12 @@ class MotorController:
 
     def update_inputs(self, rc1, rc2, rc3, rc4, rc6):
         """RC verilerini güncelle"""
-        # LOG ANALİZİ GÜNCELLEME (RC3 ve RC1 Aktif)
-        # Önceki analizde RC2 sanılmıştı ama loglarda RC2=1500 sabit, RC3 değişiyor.
-        # Standart Mode 2'ye geri dönüyoruz.
+        # HATA DÜZELTME: RC2/RC4 MANTIĞINA GERİ DÖNÜŞ
+        # Önceki loglarda RC2 ve RC4'ün aktif olduğu teyit edilmişti.
+        # Kullanıcı "kontrol komple gitti" dediği için, çalışan o konfigürasyona dönüyoruz.
         
-        self.input_throttle = rc3 
-        self.input_steer = rc1
+        self.input_throttle = rc2  # Sağ Stick Dikey (Gaz)
+        self.input_steer = rc4     # Sol Stick Yatay (Dümen)
         
         if rc6: self.input_gear = rc6
 
