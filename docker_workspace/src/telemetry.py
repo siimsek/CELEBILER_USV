@@ -875,12 +875,17 @@ class MotorController:
 
     def update_inputs(self, rc1, rc2, rc3, rc4, rc6):
         """RC verilerini güncelle"""
-        # STANDART MODE 2 HARİTALAMASI (Kullanıcı Teyitli: RC3=Throttle)
-        # Sol Stick Dikey (CH3) -> Cruise Control (Hız/Gaz)
-        # Sağ Stick Yatay (CH1) -> Steering (Direksiyon)
+        # LOG ANALİZİ SONUCU (RC2 ve RC4 Aktif)
+        # Kullanıcının kumandasında aktif kanallar:
+        # RC2 (Pitch/Sağ Stick Dikey) -> Gaz/Hız Olarak Kullanılacak
+        # RC4 (Yaw/Sol Stick Yatay) -> Direksiyon Olarak Kullanılacak
         
-        self.input_throttle = rc3 
-        self.input_steer = rc1
+        self.input_throttle = rc2 
+        self.input_steer = rc4
+        
+        # Debug için konsola bas (Sadece değişim varsa basılabilir ama şimdilik kalsın)
+        # if abs(rc2 - 1500) > 50 or abs(rc4 - 1500) > 50:
+        #    print(f"🔥 ACTIVE INPUT: Thr(RC2):{rc2} Str(RC4):{rc4}")
         
         if rc6: self.input_gear = rc6
 
