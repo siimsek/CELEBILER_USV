@@ -861,9 +861,19 @@ class MotorController:
         self.MAX_FWD = 1900
         self.MAX_REV = 1100
         
-        self.RAMP_STEP = 0.5       # Ultra yumuşak (1.0 -> 0.5)
-        self.CRUISE_STEP = 2.0     # Hız değişim hızı
-        self.CRUISE_STEP = 1.0     # Hassas hız kontrolü (5.0 -> 1.0)
+        self.MAX_FWD = 1900
+        self.MAX_REV = 1100
+        
+        # HIZLANMA / YAVAŞLAMA AYARLARI
+        # Kullanıcı İsteği: %15 İvmelenme (Hızlı tepki ama yine de rampalı)
+        self.RAMP_STEP = 15.0       # Gaz Rampa Hızı (0.5 -> 15.0 : Çok daha seri)
+        
+        # DÖNÜŞ YUMUŞATMA (Steering Ramping)
+        # Kullanıcı İsteği: "Step step olsun" (Ani dönüşleri engelle)
+        self.STEER_RAMP_STEP = 10.0 # Dönüş Rampa Hızı
+        self.current_turn = 0.0     # Şu anki dönüş değeri (Rampalanmış)
+        
+        self.CRUISE_STEP = 2.0     # Sol Stick Hız Değişim Hassasiyeti
         
         # YÖN ÇEVİRME (INVERT) - Varsayılan False (Standart)
         self.INV_THROTTLE = False   
@@ -892,8 +902,8 @@ class MotorController:
     def control_loop(self):
         print("⚙️ [MOTOR] Kontrolcü Aktif. Yönler: INV_THR={}, INV_STR={}".format(self.INV_THROTTLE, self.INV_STEER))
         while self.active:
-            # ... Loop devam ediyor ...
-            time.sleep(0.05)
+            # 50 Hz Döngü (Daha az lag için 0.05 -> 0.02)
+            time.sleep(0.02)
             
             # --- 1. VİTES MANTIĞI (CH6) ---
             # ... (Vites mantığı aynı)
@@ -946,12 +956,20 @@ class MotorController:
 
             # --- 4. STEERING MIXING (SKID STEER - DIFFERENTIAL DRIVE) ---
             # Sağ Stick (CH1): Dönüş
-            # +500 (Sağ) -> Sağ Motor Yavaşlar (-), Sol Motor Hızlanır (+) -> Sağa Dönüş
             
             steer_input = (self.input_steer - 1500) 
-            # Mix Gain: Dönüş hassasiyeti (0.5 = %50 etki)
+            # Mix Gain: Dönüş hassasiyeti (0.8 = Güçlü dönüş)
             mix_gain = 0.8
-            turn_component = steer_input * mix_gain
+            target_turn = steer_input * mix_gain
+            
+            # Steering Ramping (Dönüş Yumuşatma)
+            turn_diff = target_turn - self.current_turn
+            if abs(turn_diff) < self.STEER_RAMP_STEP:
+                self.current_turn = target_turn
+            else:
+                self.current_turn += self.STEER_RAMP_STEP if turn_diff > 0 else -self.STEER_RAMP_STEP
+            
+            turn_component = self.current_turn
             
             cruise_pwm = self.current_pwm
             
