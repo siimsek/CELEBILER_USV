@@ -261,17 +261,18 @@ HTML_PAGE = """
                          return norm * 24; // Yarıçap
                     };
 
-                    // Sol Stick (Sadece HIZ - Dikey)
-                    // Kullanıcı isteği: Sadece ileri/geri oynasın, sağ/sol iptal.
+                    // Sol Stick (Sadece HIZ - Dikey) - RC3
                     const s1_x = 0; 
                     const s1_y = -mapStick(data.RC3); // Y ekseni (Cruise)
                     document.getElementById('stick_left').style.transform = `translate(${s1_x}px, ${s1_y}px)`;
                     
-                    // Sağ Stick (Sadece YÖN - Yatay)
-                    // Kullanıcı isteği: Sadece sağ/sol oynasın, yukarı/aşağı iptal.
+                    // Sağ Stick (Sadece YÖN - Yatay) - RC1
                     const s2_x = mapStick(data.RC1); // X ekseni (Steer)
                     const s2_y = 0;
                     document.getElementById('stick_right').style.transform = `translate(${s2_x}px, ${s2_y}px)`;
+                    
+                    // Debug Text (Stick Altına)
+                    // document.getElementById('rc_debug').innerText = `T:${data.RC3} S:${data.RC1}`;
 
                     // Değerler
                     // document.getElementById('rc1_val').innerText = data.RC1 || "--";
@@ -431,14 +432,14 @@ HTML_PAGE = """
                  <div class="stat-label">MOTORS (PWM)</div>
                  <div style="display:flex; flex-direction:column; gap:8px;">
                      <div style="display:flex; justify-content:space-between; align-items:center;">
-                         <span style="font-size:0.8rem; color:var(--text-secondary);">MOT 1</span>
+                         <span style="font-size:0.8rem; color:var(--text-secondary);">L-MOT (CH1)</span>
                          <div style="flex:1; height:6px; background:rgba(255,255,255,0.1); margin:0 10px; border-radius:3px; overflow:hidden;">
                              <div id="mot1_bar" style="width:0%; height:100%; background:var(--accent); transition:width 0.1s;"></div>
                          </div>
                          <strong id="out1" style="font-size:0.9rem;">--</strong>
                      </div>
                      <div style="display:flex; justify-content:space-between; align-items:center;">
-                         <span style="font-size:0.8rem; color:var(--text-secondary);">MOT 3</span>
+                         <span style="font-size:0.8rem; color:var(--text-secondary);">R-MOT (CH3)</span>
                          <div style="flex:1; height:6px; background:rgba(255,255,255,0.1); margin:0 10px; border-radius:3px; overflow:hidden;">
                              <div id="mot3_bar" style="width:0%; height:100%; background:var(--accent); transition:width 0.1s;"></div>
                          </div>
@@ -938,24 +939,49 @@ class MotorController:
             else:
                 self.current_pwm += self.RAMP_STEP if diff > 0 else -self.RAMP_STEP
 
-            # 4. STEERING
-            steer_val = (self.input_steer - 1500)
-            if self.INV_STEER: steer_val *= -1
-            steering = steer_val / 500.0
+            # --- 4. STEERING MIXING (SKID STEER - DIFFERENTIAL DRIVE) ---
+            # Sağ Stick (CH1): Dönüş
+            # +500 (Sağ) -> Sağ Motor Yavaşlar (-), Sol Motor Hızlanır (+) -> Sağa Dönüş
             
-            # --- 5. ÇIKISH (MAVLINK OVERRIDE) ---
+            steer_input = (self.input_steer - 1500) 
+            # Mix Gain: Dönüş hassasiyeti (0.5 = %50 etki)
+            mix_gain = 0.8
+            turn_component = steer_input * mix_gain
             
+            cruise_pwm = self.current_pwm
+            
+            # Formül: Sol = Hız + Dönüş, Sağ = Hız - Dönüş
+            left_motor_raw = cruise_pwm + turn_component
+            right_motor_raw = cruise_pwm - turn_component
+            
+            # --- 5. SAFETY CLAMP (1100 - 1900) ---
+            # Motorları asla güvenli aralık dışına çıkarma
+            self.left_motor_pwm = int(max(1100, min(left_motor_raw, 1900)))
+            self.right_motor_pwm = int(max(1100, min(right_motor_raw, 1900)))
+            
+            # --- 6. ÇIKISH (MAVLINK OVERRIDE) ---
             if self.parent.pixhawk:
                 try:
-                    CMD_THROTTLE = int(self.current_pwm)
-                    CMD_STEERING = int(self.input_steer)
+                    # ArduRover Skid Mode Setup (Varsayım):
+                    # CH1 Output -> Sol Motor
+                    # CH3 Output -> Sağ Motor
+                    # Biz direkt motor kanallarına PWM basmalıyız.
+                    # RC Override ile bunu yapmak için ArduRover'ın bu kanalları 'PassThrough' yapması gerekebilir.
+                    # VEYA ArduRover'ı "Skid Steering" modunda kullanmayıp, manuel mixing yapıyoruz.
                     
-                    if self.gear == "NEUTRAL": CMD_THROTTLE = 1500
+                    if self.gear == "NEUTRAL": 
+                        self.left_motor_pwm = 1500
+                        self.right_motor_pwm = 1500
                     
-                    # Kanal listesi (1-8 arası, diğerleri ignore)
                     rc_override = [65535]*8
-                    rc_override[0] = CMD_STEERING     # CH1: Roll
-                    rc_override[2] = CMD_THROTTLE     # CH3: Throttle
+                    # Dikkat: ArduRover genelde CH1=Steer, CH3=Throttle bekler.
+                    # Eğer biz mixing yapıyorsak, Sol/Sağ motor hangi kanala bağlıysa ONA yollamalıyız.
+                    # Varsayım: Sol Motor -> CH1, Sağ Motor -> CH3 (Sistem Manifestosu'na göre değil, genel standart)
+                    # KULLANICI NOTU: "Symptom B: mot1 jumps output". 
+                    # Biz şimdi hesaplanmış PWM'leri gönderiyoruz.
+                    
+                    rc_override[0] = self.left_motor_pwm   # CH1 (Left Matrix?)
+                    rc_override[2] = self.right_motor_pwm  # CH3 (Right Matrix?)
                     
                     self.parent.pixhawk.mav.rc_channels_override_send(
                         self.parent.target_system_id if self.parent.target_system_id else 1,
@@ -965,9 +991,12 @@ class MotorController:
                     
                     with self.parent.lock:
                         telemetry_data["Gear"] = self.gear
-                        # Debug: Hedef hızı UI'da görmek için Out1/3'e yazalım (Geçici)
-                        telemetry_data["Out1"] = int(self.input_gear) # DEBUG: CH6 RAW Değerini buraya yazalım
-                        telemetry_data["Out3"] = int(self.target_pwm)
+                        # Backend'de hesaplanan motor çıktılarını UI'a gönder
+                        telemetry_data["Out1"] = self.left_motor_pwm
+                        telemetry_data["Out3"] = self.right_motor_pwm
+                        # Sticklerin UI'da donmaması için inputları da yenile
+                        telemetry_data["RC1"] = self.input_steer
+                        telemetry_data["RC3"] = self.input_throttle
                         
                 except Exception as e:
                     pass
