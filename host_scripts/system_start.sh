@@ -132,24 +132,53 @@ tail -n 0 -f "$LOG_DIR/docker/telemetry.log" | while read line; do
 done || true
 
 # 7. FİNAL BİLGİ TABLOSU
-sleep 3
+sleep 1
+clear
+echo -e "${CYAN}"
+echo -e "   ██████╗███████╗██╗     ███████╗██████╗ ██╗██╗     ███████╗██████╗     ██╗   ██╗███████╗██╗   ██╗"
+echo -e "  ██╔════╝██╔════╝██║     ██╔════╝██╔══██╗██║██║     ██╔════╝██╔══██╗    ██║   ██║██╔════╝██║   ██║"
+echo -e "  ██║     █████╗  ██║     █████╗  ██████╔╝██║██║     █████╗  ██████╔╝    ██║   ██║███████╗██║   ██║"
+echo -e "  ██║     ██╔══╝  ██║     ██╔══╝  ██╔══██╗██║██║     ██╔══╝  ██╔══██╗    ██║   ██║╚════██║╚██╗ ██╔╝"
+echo -e "  ╚██████╗███████╗███████╗███████╗██████╔╝██║███████╗███████╗██║  ██║    ╚██████╔╝███████║ ╚████╔╝ "
+echo -e "   ╚═════╝╚══════╝╚══════╝╚══════╝╚═════╝ ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝     ╚═════╝ ╚══════╝  ╚═══╝ "
+echo -e "${NC}"
+echo -e "${BLUE}  ══════════════════════════════════════════════════════════════════════════════════════════${NC}"
+echo -e "${BOLD}  🚀  MISSION CONTROL CENTER${NC}                          ${DIM}SYSTEM TIME: $(date +'%H:%M:%S')${NC}"
+echo -e "${BLUE}  ══════════════════════════════════════════════════════════════════════════════════════════${NC}"
 echo ""
-echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║              ✅ SİSTEM BAŞARIYLA AÇILDI!                     ║${NC}"
-echo -e "${CYAN}╠══════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${CYAN}║${NC} 🌍 ERİŞİM ADRESLERİ (Ağınıza uygun olanı seçin):            ${CYAN}║${NC}"
 
+echo -e "  ${BOLD}${WHITE}STATUS MODULES:${NC}"
+echo -e "  ┌───────────────────────────┐  ┌──────────────────────────────────────────────────┐"
+echo -e "  │  ${GREEN}● SYSTEM ONLINE${NC}          │  │  ${BOLD}📡 TELEMETRY & CONTROL LINK${NC}                     │"
+echo -e "  │  ${BLUE}● DOCKER ENGINE${NC}          │  │                                                  │"
+echo -e "  │  ${CYAN}● SENSORS:${NC}     2 ACTIVE  │  │   DASHBOARD URL:                                 │"
+
+# IP Listesi (Dinamik Hizalama)
+first_ip=true
 for ip in $CURRENT_IPS; do
     if [[ $ip != "127."* ]]; then
-        echo -e "${CYAN}║${NC}    👉 http://$ip:8080 (Dashboard)                     ${CYAN}║${NC}"
+        if [ "$first_ip" = true ]; then
+            printf "  │                           │  │   👉 ${GREEN}http://%-28s${NC}      │\n" "$ip:8080"
+            first_ip=false
+        else
+            printf "  │                           │  │      ${DIM}http://%-28s${NC}      │\n" "$ip:8080"
+        fi
     fi
 done
 
-echo -e "${CYAN}╠══════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${CYAN}║${NC} 📷 KAMERA: Port 5000  |  🗺️  HARİTA: Port 5001              ${CYAN}║${NC}" 
-echo -e "${CYAN}╠══════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${CYAN}║${NC} 📡 Lidar IP: 192.168.11.2                                 ${CYAN}║${NC}"
-echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+# Eğer hiç IP yoksa
+if [ "$first_ip" = true ]; then
+     printf "  │                           │  │   ${RED}NO NETWORK CONNECTION${NC}                          │\n"
+fi
+
+echo -e "  └───────────────────────────┘  │                                                  │"
+echo -e "                                 └──────────────────────────────────────────────────┘"
 echo ""
-echo -e "${YELLOW}Not: Kapatmak için terminali kapatabilirsin, sistem arkada çalışır.${NC}"
-echo -e "${YELLOW}Tamamen durdurmak için: 'docker stop ege_ros' yaz.${NC}"
+echo -e "  ${BOLD}${WHITE}SUBSYSTEMS:${NC}"
+echo -e "  ╔══════════════════════════════════════════╗"
+echo -e "  ║  🎥  CAMERA FEED  : ${GREEN}Active${NC} (Port 5000)   ║"
+echo -e "  ║  🗺️   LIDAR MAP    : ${GREEN}Active${NC} (Port 5001)   ║"
+echo -e "  ╚══════════════════════════════════════════╝"
+echo ""
+echo -e "${DIM}  [COMMANDS]  Type 'stop' to shutdown system  |  Type 'loglar' to view real-time logs${NC}"
+echo ""
