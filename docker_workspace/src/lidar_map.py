@@ -30,13 +30,19 @@ class LidarMapper(Node):
     def __init__(self):
         super().__init__('lidar_mapper_web')
         
-        qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
-        )
+from rclpy.qos import qos_profile_sensor_data
+
+class LidarMapper(Node):
+    def __init__(self):
+        super().__init__('lidar_mapper_web')
+        
+        # Standart SensorData profili kullan (BestEffort, Volatile)
+        # Genelde rplidar_node gibi sürücüler bununla yayın yapar.
         self.subscription = self.create_subscription(
-            LaserScan, '/scan', self.scan_callback, qos_profile
+            LaserScan, 
+            '/scan', 
+            self.scan_callback, 
+            qos_profile_sensor_data
         )
         
         # Boş siyah harita
