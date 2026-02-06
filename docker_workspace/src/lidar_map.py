@@ -32,13 +32,23 @@ class LidarMapper(Node):
     def __init__(self):
         super().__init__('lidar_mapper_web')
         
-        # Standart SensorData profili kullan (BestEffort, Volatile)
-        # Genelde rplidar_node gibi sürücüler bununla yayın yapar.
+        # Manuel QoS Profili (En Güvenlisi)
+        # Rplidar genelde: Reliability=BEST_EFFORT, Durability=VOLATILE yayınlar.
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=dict(
+                transient_local=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL,
+                volatile=rclpy.qos.DurabilityPolicy.VOLATILE
+            ).get('volatile', rclpy.qos.DurabilityPolicy.VOLATILE), # Volatile default
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+        
         self.subscription = self.create_subscription(
             LaserScan, 
             '/scan', 
             self.scan_callback, 
-            qos_profile_sensor_data
+            qos_profile
         )
         
         # Boş siyah harita
