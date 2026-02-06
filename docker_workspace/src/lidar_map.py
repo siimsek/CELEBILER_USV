@@ -26,10 +26,6 @@ cv2.putText(output_frame, "MAP LOADING...", (180, 300), cv2.FONT_HERSHEY_SIMPLEX
 lock = threading.Lock()
 SIMULATION_MODE = False
 
-class LidarMapper(Node):
-    def __init__(self):
-        super().__init__('lidar_mapper_web')
-        
 from rclpy.qos import qos_profile_sensor_data
 
 class LidarMapper(Node):
