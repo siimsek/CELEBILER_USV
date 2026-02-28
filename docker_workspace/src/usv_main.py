@@ -163,17 +163,28 @@ class USVStateMachine:
     # DONANIM BAĞLANTILARI
     # ----------------------------------------------------------
     def _find_pixhawk_port(self):
-        """Otomatik port tarama (glob ile)."""
+        """Otomatik port tarama: önce UDP (mavproxy), sonra seri."""
+        # 1. mavproxy UDP bağlantısını dene
+        try:
+            from pymavlink import mavutil
+            m = mavutil.mavlink_connection('udpin:0.0.0.0:14551', baud=115200)
+            if m.wait_heartbeat(timeout=3):
+                print("   ✅ Pixhawk bulundu: UDP:14551 (mavproxy)")
+                return m
+            m.close()
+        except Exception:
+            pass
+
+        # 2. Doğrudan seri port tara (fallback)
         ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
         if not ports:
             return None
-        # İlk bulunan portu dene
         for port in ports:
             try:
                 from pymavlink import mavutil
                 m = mavutil.mavlink_connection(port, baud=BAUD_RATE)
                 if m.wait_heartbeat(timeout=2):
-                    print(f"   ✅ Pixhawk bulundu: {port}")
+                    print(f"   ✅ Pixhawk bulundu: {port} (seri)")
                     return m
                 m.close()
             except Exception:

@@ -16,6 +16,44 @@ mkdir -p /root/workspace/control
 
 echo "--- [DOCKER] USV SİSTEMLERİ BAŞLATILIYOR (Mod: $USV_MODE) ---"
 
+# --- 0. MAVPROXY KURULUM & BAŞLATMA ---
+# Pixhawk seri portunu paylaştırır (telemetry.py + usv_main.py aynı anda bağlanabilir)
+if ! command -v mavproxy.py &> /dev/null; then
+    echo "📦 [SETUP] mavproxy kuruluyor..."
+    pip3 install -q MAVProxy 2>/dev/null || pip install -q MAVProxy 2>/dev/null
+fi
+
+# Pixhawk portunu otomatik bul
+PIXHAWK_PORT=""
+for port in /dev/ttyACM* /dev/ttyUSB*; do
+    [ -e "$port" ] || continue
+    # STM32 genelde 9600 baud JSON gönderir, Pixhawk 115200 MAVLink
+    # İlk bulunan ACM portu genelde Pixhawk; hepsini dene
+    timeout 2 python3 -c "
+from pymavlink import mavutil
+m = mavutil.mavlink_connection('$port', baud=115200)
+if m.wait_heartbeat(timeout=1.5):
+    print('OK')
+    m.close()
+else:
+    m.close()
+    exit(1)
+" 2>/dev/null && PIXHAWK_PORT="$port" && break
+done
+
+if [ -n "$PIXHAWK_PORT" ]; then
+    echo "📡 [MAV] Pixhawk: $PIXHAWK_PORT -> UDP :14550 (telemetry) + :14551 (autonomous)"
+    mavproxy.py --master=$PIXHAWK_PORT --baudrate=115200 \
+        --out=udpout:127.0.0.1:14550 \
+        --out=udpout:127.0.0.1:14551 \
+        --daemon --non-interactive \
+        > /root/workspace/logs/mavproxy.log 2>&1 &
+    sleep 2
+    echo "✅ [MAV] MAVProxy aktif"
+else
+    echo "⚠️ [MAV] Pixhawk bulunamadı — doğrudan bağlantı denenecek"
+fi
+
 # 1. LIDAR BAŞLAT (Her iki modda da - onboard kullanım için)
 echo "🚀 [LIDAR] Başlatılıyor..."
 ros2 launch rplidar_ros rplidar_s2e_launch.py channel_type:=udp ip:=192.168.11.2 tcp_port:=20108 frame_id:=laser_frame > /root/workspace/logs/lidar.log 2>&1 &

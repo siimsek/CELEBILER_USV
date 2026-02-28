@@ -103,7 +103,7 @@ HTML_PAGE = """
         .clock { font-family:var(--mono); font-size:0.8rem; color:var(--text2); }
 
         /* === MAIN GRID === */
-        .main { flex:1; display:grid; grid-template-columns:280px 1fr 1fr; grid-template-rows:1fr 1fr; gap:8px; padding:8px; overflow:hidden; }
+        .main { flex:1; display:grid; grid-template-columns:280px 1fr 1fr; grid-template-rows:1fr auto; gap:8px; padding:8px; overflow:hidden; }
 
         /* === CARDS === */
         .card { background:var(--card); border-radius:10px; border:1px solid var(--card-border); display:flex; flex-direction:column; overflow:hidden; }
@@ -148,16 +148,16 @@ HTML_PAGE = """
 
         /* === STATS ROW === */
         .stats-row { grid-column:span 2; display:grid; grid-template-columns:repeat(6,1fr); gap:8px; }
-        .s-card { background:linear-gradient(180deg,rgba(19,26,46,0.9),rgba(10,14,26,0.9)); border-radius:8px; padding:8px 10px; border:1px solid var(--card-border); display:flex; flex-direction:column; justify-content:space-between; min-height:0; }
-        .s-label { font-size:0.6rem; color:var(--text2); text-transform:uppercase; font-weight:600; letter-spacing:0.5px; }
-        .s-val { font-family:var(--mono); font-size:1.1rem; font-weight:700; }
-        .s-sub { font-size:0.75rem; color:var(--accent); margin-top:2px; }
-        .s-unit { font-size:0.8rem; color:var(--text2); font-weight:400; }
+        .s-card { background:linear-gradient(180deg,rgba(19,26,46,0.9),rgba(10,14,26,0.9)); border-radius:8px; padding:6px 8px; border:1px solid var(--card-border); display:flex; flex-direction:column; justify-content:space-between; min-height:0; max-height:120px; }
+        .s-label { font-size:0.55rem; color:var(--text2); text-transform:uppercase; font-weight:600; letter-spacing:0.5px; }
+        .s-val { font-family:var(--mono); font-size:0.95rem; font-weight:700; }
+        .s-sub { font-size:0.65rem; color:var(--accent); margin-top:1px; }
+        .s-unit { font-size:0.7rem; color:var(--text2); font-weight:400; }
 
         /* Sticks */
         .sticks { display:flex; justify-content:space-around; align-items:center; padding:6px 0; }
-        .stick-box { position:relative; width:52px; height:52px; border:2px solid rgba(255,255,255,0.08); border-radius:50%; background:rgba(0,0,0,0.3); }
-        .stick-dot { position:absolute; width:10px; height:10px; background:var(--accent); border-radius:50%; top:21px; left:21px; transition:all 0.05s; }
+        .stick-box { position:relative; width:42px; height:42px; border:2px solid rgba(255,255,255,0.08); border-radius:50%; background:rgba(0,0,0,0.3); }
+        .stick-dot { position:absolute; width:8px; height:8px; background:var(--accent); border-radius:50%; top:17px; left:17px; transition:all 0.05s; }
         .stick-lbl { text-align:center; font-size:0.6rem; color:var(--text2); margin-top:4px; }
 
         /* Motor Bars */
@@ -536,31 +536,32 @@ class SmartTelemetry:
             time.sleep(10)
 
     def scan_ports(self):
-        """Boştaki portları tarar ve uygun cihazları eşleştirir."""
-        all_ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
-        active_ports = [self.pixhawk_port, self.stm32_port]
-        active_ports = [p for p in active_ports if p] # None'ları temizle
-        
-        scan_list = [p for p in all_ports if p not in active_ports]
-        if not scan_list and (not self.pixhawk or not self.stm32):
-             return # Taranacak port yok
-
-        print(f"🔍 [SCAN] Hedef Portlar: {scan_list}")
+        """Bostaki portlari tarar ve uygun cihazlari eslestirir."""
+        # Pixhawk: Önce UDP dene (mavproxy aktifse)
+        if not self.pixhawk:
+            if self._probe_pixhawk('udpin:0.0.0.0:14550'):
+                print("📡 [MAV] Pixhawk bağlantısı: UDP:14550 (mavproxy)")
+            else:
+                # Fallback: doğrudan seri port tara
+                all_ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
+                active_ports = [self.stm32_port]
+                active_ports = [p for p in active_ports if p]
+                for port in all_ports:
+                    if port in active_ports: continue
+                    if self._probe_pixhawk(port):
+                        break
 
         # STM32 Tara
         if not self.stm32:
-            for port in scan_list:
-                if self._probe_stm32(port):
-                    active_ports.append(port)
-                    break # Bulduysam döngüyü kır (diğer cihazlara şans ver)
-
-        # Pixhawk Tara
-        if not self.pixhawk:
-            for port in scan_list:
-                if port in active_ports: continue
-                if self._probe_pixhawk(port):
-                    active_ports.append(port)
-                    break
+            all_ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
+            active_ports = [self.pixhawk_port]
+            active_ports = [p for p in active_ports if p]
+            scan_list = [p for p in all_ports if p not in active_ports]
+            if scan_list:
+                print(f"🔍 [SCAN] STM32 aranacak portlar: {scan_list}")
+                for port in scan_list:
+                    if self._probe_stm32(port):
+                        break
 
     def _probe_stm32(self, port):
         """Belirtilen portta STM32 var mı bakar (Otomatik Baud)."""
