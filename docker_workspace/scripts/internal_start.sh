@@ -12,6 +12,7 @@ USV_MODE="${USV_MODE:-test}"
 export USV_MODE
 
 mkdir -p /root/workspace/logs
+mkdir -p /root/workspace/control
 
 echo "--- [DOCKER] USV SİSTEMLERİ BAŞLATILIYOR (Mod: $USV_MODE) ---"
 

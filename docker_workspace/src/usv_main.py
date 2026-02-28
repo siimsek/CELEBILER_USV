@@ -42,6 +42,13 @@ CONTROL_HZ = 10         # Ana kontrol döngüsü frekansı
 # Görev noktaları dosyası (USB'den veya YKİ'den yüklenen)
 MISSION_FILE = os.environ.get('MISSION_FILE', '/root/workspace/mission.json')
 
+# IPC: Dashboard'dan gelen komutlar (telemetry.py dosyaları yazar)
+CONTROL_DIR = '/root/workspace/control'
+FLAG_START = f'{CONTROL_DIR}/start_mission.flag'
+FLAG_STOP = f'{CONTROL_DIR}/emergency_stop.flag'
+FLAG_NEXT = f'{CONTROL_DIR}/next_parkur.flag'
+STATE_FILE = f'{CONTROL_DIR}/mission_state.json'
+
 
 def clean_port(port):
     """Belirtilen portu kullanan işlemleri temizler."""
@@ -126,6 +133,8 @@ class USVStateMachine:
         self.waypoints_p2 = []  # Parkur-2: Engelli nokta takibi
         self.waypoints_p3 = []  # Parkur-3: Kamikaze hedef noktası
         self.target_color = ""  # Parkur-3: Angajman hedef rengi
+        self._wp_target = "--"
+        self._wp_info = "-- / --"
 
         # Pixhawk Bağlantısı
         self.master = None
@@ -134,6 +143,21 @@ class USVStateMachine:
         # Lidar Bağlantısı (ROS 2 — opsiyonel)
         self._lidar_thread = None
         self._try_connect_lidar()
+
+    def _write_state(self):
+        """Dashboard için mission durumunu dosyaya yazar."""
+        try:
+            os.makedirs(CONTROL_DIR, exist_ok=True)
+            with open(STATE_FILE, 'w') as f:
+                json.dump({
+                    'state': self.state,
+                    'active': self.mission_active,
+                    'start_time': self.mission_start_time,
+                    'target': getattr(self, '_wp_target', '--'),
+                    'wp_info': getattr(self, '_wp_info', '-- / --'),
+                }, f)
+        except Exception:
+            pass
 
     # ----------------------------------------------------------
     # DONANIM BAĞLANTILARI
@@ -349,15 +373,24 @@ class USVStateMachine:
     # GÖREV BAŞLATMA / DURDURMA
     # ----------------------------------------------------------
     def start_mission(self):
-        """Görevi başlatır. ARM yapar ve Parkur-1'e geçer."""
+        """Görevi başlatır. RC bağlı değilse ARM yapmaz. ARM yapar ve Parkur-1'e geçer."""
         if self.mission_active:
             print("⚠️ Görev zaten aktif!")
             return
+
+        # RC kontrolü: Kumanda bağlı değilse ARM yapma
+        if not self.simulation_mode and self.master:
+            if not self._check_rc_connected():
+                print("❌ KUMANDA BAĞLI DEĞİL! Motorlar ARM edilmeyecek.")
+                print("   Kumandayı bağlayıp sinyal gelene kadar bekleyin, sonra tekrar başlatın.")
+                return
+            print("✅ Kumanda sinyali alındı.")
 
         print("🚀 GÖREV BAŞLATILDI!")
         self.mission_active = True
         self.mission_start_time = time.time()
         self.state = self.STATE_PARKUR1
+        self._write_state()
 
         if not self.simulation_mode and self.master:
             try:
@@ -379,11 +412,36 @@ class USVStateMachine:
         if USV_MODE == 'race':
             print("🔒 YARIŞMA MODU — HARİCİ KOMUTLAR KİLİTLENDİ (Şartname 4.4)")
 
+    def _check_rc_connected(self, timeout_sec=3):
+        """
+        Pixhawk'tan RC sinyali gelip gelmediğini kontrol eder.
+        Kumanda bağlı değilse ArduPilot genelde 0 veya 65535 gönderir.
+        Returns: True (RC bağlı), False (RC yok)
+        """
+        if self.simulation_mode or not self.master:
+            return True  # Simülasyonda veya Pixhawk yoksa kabul et
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            msg = self.master.recv_match(type='RC_CHANNELS', blocking=True, timeout=0.5)
+            if msg:
+                ch1, ch2, ch3, ch4 = msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw
+                # Geçerli RC aralığı: 900–2100 (tipik PWM). 0 veya 65535 = sinyal yok
+                valid = (900 <= ch1 <= 2100 or 900 <= ch2 <= 2100 or
+                         900 <= ch3 <= 2100 or 900 <= ch4 <= 2100)
+                if valid:
+                    return True
+                # Tüm kanallar 0 veya 65535 ise RC yok
+                all_null = all(v in (0, 65535) for v in (ch1, ch2, ch3, ch4))
+                if all_null:
+                    return False
+        return False
+
     def emergency_stop(self):
         """Acil durdurma (E-STOP). Her modda çalışır."""
         print("🚨 ACİL DURDURMA (E-STOP) TETİKLENDİ!")
         self.mission_active = False
         self.state = self.STATE_IDLE
+        self._write_state()
         self.stop_motors()
 
     # ----------------------------------------------------------
@@ -398,8 +456,18 @@ class USVStateMachine:
         """
         print(f"   🎯 Hedef: {target_lat:.7f}, {target_lon:.7f}"
               f" {'(Engel Kaçınma AÇIK)' if avoid_obstacles else ''}")
+        self._wp_target = f"{target_lat:.7f}, {target_lon:.7f}"
+        self._write_state()
 
         while self.mission_active:
+            # Acil durdurma kontrolü (Dashboard'dan E-STOP)
+            if os.path.exists(FLAG_STOP):
+                try:
+                    os.remove(FLAG_STOP)
+                except Exception:
+                    pass
+                return False
+
             self._update_gps()
 
             # Mesafe ve açı hesapla
@@ -472,6 +540,8 @@ class USVStateMachine:
             return True
 
         for i, wp in enumerate(self.waypoints_p1):
+            self._wp_info = f"{i + 1} / {len(self.waypoints_p1)}"
+            self._write_state()
             print(f"\n[P1] Waypoint {i + 1}/{len(self.waypoints_p1)}")
             if not self.navigate_to_waypoint(wp[0], wp[1], avoid_obstacles=False):
                 return False
@@ -493,6 +563,8 @@ class USVStateMachine:
             return True
 
         for i, wp in enumerate(self.waypoints_p2):
+            self._wp_info = f"{i + 1} / {len(self.waypoints_p2)}"
+            self._write_state()
             print(f"\n[P2] Waypoint {i + 1}/{len(self.waypoints_p2)}")
             if not self.navigate_to_waypoint(wp[0], wp[1], avoid_obstacles=True):
                 return False
@@ -540,9 +612,17 @@ class USVStateMachine:
         print(f"     veya bu terminalde ENTER tuşuna basın")
         print(f"{'=' * 50}")
 
-        # Bekle: ya stdin'den ENTER ya da self.advance_parkur flag
+        # Bekle: stdin ENTER, advance_flag veya Dashboard'dan next_parkur.flag
         self._advance_flag = False
         while not self._advance_flag:
+            # Dashboard'dan gelen sonraki parkur isteği (dosya IPC)
+            if os.path.exists(FLAG_NEXT):
+                try:
+                    os.remove(FLAG_NEXT)
+                except Exception:
+                    pass
+                self._advance_flag = True
+                break
             # stdin kontrolü (non-blocking mümkün değilse kısa timeout)
             try:
                 import select
@@ -623,6 +703,9 @@ class USVStateMachine:
 
                 elif self.state == self.STATE_COMPLETED:
                     total_time = time.time() - self.mission_start_time
+                    self._wp_info = "-- / --"
+                    self._wp_target = "TAMAMLANDI"
+                    self._write_state()
                     print("\n" + "=" * 50)
                     print("  🎉 TÜM GÖREVLER BAŞARIYLA TAMAMLANDI!")
                     print(f"  Toplam Süre: {total_time:.1f} saniye")
@@ -645,6 +728,34 @@ if __name__ == "__main__":
     mission_path = sys.argv[1] if len(sys.argv) > 1 else MISSION_FILE
     usv.load_mission(mission_path)
 
-    # Görevi başlat
-    usv.start_mission()
-    usv.run()
+    # Kumanda bağlı değilse otomatik ARM yapma. Dashboard'dan "Görevi Başlat" beklenir.
+    print("\n⏸️  SİSTEM HAZIR — GÖREV BEKLİYOR")
+    print("   Kumanda bağlı olmalı. Dashboard'dan '▶ Görevi Başlat' ile başlatın.")
+    print("   http://<RPi_IP>:8080\n")
+    usv._write_state()
+
+    while True:
+        # Acil durdurma her zaman kontrol edilsin
+        if os.path.exists(FLAG_STOP):
+            try:
+                os.remove(FLAG_STOP)
+            except Exception:
+                pass
+            usv.emergency_stop()
+            break
+
+        # Görev başlatma isteği
+        if os.path.exists(FLAG_START):
+            try:
+                os.remove(FLAG_START)
+            except Exception:
+                pass
+            usv.start_mission()
+            usv.run()
+            # Görev bitti; tekrar başlatma için bekle
+            usv.mission_active = False
+            usv.state = usv.STATE_IDLE
+            usv._write_state()
+            print("\n⏸️  SİSTEM HAZIR — Yeni görev başlatmak için Dashboard kullanın.\n")
+
+        time.sleep(0.5)

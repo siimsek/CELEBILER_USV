@@ -16,7 +16,14 @@ BAUD_RATE_PIXHAWK = 115200
 BAUD_RATES_STM32 = [9600, 115200] # Otomatik denenir
 WEB_PORT = 8080
 LOG_DIR = "/root/workspace/logs"
+CONTROL_DIR = "/root/workspace/control"
 CSV_FILE = f"{LOG_DIR}/telemetri_verisi.csv"
+
+# IPC: usv_main.py ile dosya üzerinden iletişim (farklı süreçler)
+FLAG_START = f"{CONTROL_DIR}/start_mission.flag"
+FLAG_STOP = f"{CONTROL_DIR}/emergency_stop.flag"
+FLAG_NEXT = f"{CONTROL_DIR}/next_parkur.flag"
+STATE_FILE = f"{CONTROL_DIR}/mission_state.json"
 
 # --- USV MODE (test | race) ---
 USV_MODE = os.environ.get('USV_MODE', 'test')
@@ -1046,25 +1053,36 @@ class MotorController:
 def index():
     return render_template_string(HTML_PAGE, usv_mode=USV_MODE)
 
+def _read_mission_state():
+    """usv_main tarafından yazılan state dosyasını oku."""
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, 'r') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return mission_data
+
 @app.route('/api/data')
 def get_data():
     out = dict(telemetry_data)
     out['usv_mode'] = USV_MODE
-    # Mission state ekleme
-    out['mission_state'] = mission_data['state']
-    out['mission_active'] = mission_data['active']
-    out['mission_target'] = mission_data['target']
-    out['mission_wp_info'] = mission_data['wp_info']
+    state = _read_mission_state()
+    out['mission_state'] = state.get('state', mission_data['state'])
+    out['mission_active'] = state.get('active', mission_data['active'])
+    out['mission_target'] = state.get('target', mission_data['target'])
+    out['mission_wp_info'] = state.get('wp_info', mission_data['wp_info'])
     return jsonify(out)
 
 @app.route('/api/mission_status')
 def mission_status():
+    state = _read_mission_state()
     elapsed = 0
-    if mission_data['active'] and mission_data['start_time'] > 0:
-        elapsed = time.time() - mission_data['start_time']
+    if state.get('active') and state.get('start_time', 0) > 0:
+        elapsed = time.time() - state['start_time']
     return jsonify({
-        'active': mission_data['active'],
-        'state': mission_data['state'],
+        'active': state.get('active', False),
+        'state': state.get('state', 0),
         'elapsed': elapsed
     })
 
@@ -1074,20 +1092,35 @@ def next_parkur():
     if USV_MODE != 'test':
         return jsonify({'error': 'Sadece test modunda kullanılabilir'}), 403
     mission_data['next_parkur_requested'] = True
+    try:
+        os.makedirs(CONTROL_DIR, exist_ok=True)
+        open(FLAG_NEXT, 'w').close()
+    except Exception:
+        pass
     print("📡 [DASHBOARD] Sonraki parkur isteği alındı")
     return jsonify({'ok': True})
 
 @app.route('/api/start_mission', methods=['POST'])
 def start_mission():
-    """Görevi başlat."""
+    """Görevi başlat (usv_main dosya IPC ile algılar)."""
     mission_data['start_requested'] = True
+    try:
+        os.makedirs(CONTROL_DIR, exist_ok=True)
+        open(FLAG_START, 'w').close()
+    except Exception:
+        pass
     print("📡 [DASHBOARD] Görev başlat isteği alındı")
     return jsonify({'ok': True})
 
 @app.route('/api/emergency_stop', methods=['POST'])
 def emergency_stop():
-    """Acil durdur."""
+    """Acil durdur (usv_main dosya IPC ile algılar)."""
     mission_data['stop_requested'] = True
+    try:
+        os.makedirs(CONTROL_DIR, exist_ok=True)
+        open(FLAG_STOP, 'w').close()
+    except Exception:
+        pass
     print("🚨 [DASHBOARD] ACİL DURDUR isteği alındı")
     return jsonify({'ok': True})
 

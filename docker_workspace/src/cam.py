@@ -18,7 +18,9 @@ if RACE_MODE:
     print("🏁 [cam.py] YARIŞMA MODU — Web yayını KAPALI, onboard işleme AKTİF")
 
 # --- AYARLAR ---
-HOST = '127.0.0.1'
+# Host'ta rpicam-vid 0.0.0.0:8888 dinler.
+# --net=host: 127.0.0.1 çalışır. Bridge modunda CAM_HOST=172.17.0.1 verebilirsiniz.
+HOST = os.environ.get('CAM_HOST', '127.0.0.1')
 PORT = 8888
 WEB_PORT = 5000
 SAVE_PATH = "/root/workspace/logs/video/"
@@ -69,6 +71,8 @@ class VideoCamera:
 
     def update(self):
         """Tek bir thread: Soket'ten oku -> self.frame'e yaz. Hepsi bu."""
+        # Host rpicam-vid başlaması için ilk denemeden önce bekle
+        time.sleep(5)
         while not self.stopped:
             try:
                 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
