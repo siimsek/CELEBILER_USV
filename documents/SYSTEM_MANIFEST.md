@@ -26,17 +26,26 @@
 * **Web Arayüzü:** Flask tabanlı mikro servisler.
 * **Kritik Kütüphaneler:** `rclpy`, `pymavlink`, `opencv-python`, `pandas`, `flask`, `numpy`.
 
-## 4. DOSYA YAPISI VE GÖREVLERİ
+## 4. ÇALIŞMA MODLARI (TEST / YARIŞMA)
+* **Test Modu (varsayılan):** Kamera (5000), Lidar harita (5001) ve Telemetri (8080) tam açık. Web üzerinden manuel test ve debug için.
+* **Yarışma Modu:** Sadece telemetri (8080). Kamera ve lidar web yayını kapalı (IDA Şartname 3.7 - görüntü aktarımı yasak).
+* **Geçiş:** `config/usv_mode.cfg` içinde `USV_MODE=test` veya `USV_MODE=race` yazın. Veya: `./system_start.sh race` (argüman öncelikli).
+
+## 5. DOSYA YAPISI VE GÖREVLERİ
 * `~/CELEBILER_USV/` (Ana Dizin)
-    * `host_scripts/system_start.sh`: **Sistemi Başlatan Anahtar.** IP atar, kamerayı açar, Docker'ı tetikler.
-    * `docker_workspace/scripts/internal_start.sh`: **İç Kaptan.** Lidar'ı, Web sunucularını ve Otonom kodu sırayla açar.
+    * `config/usv_mode.cfg`: **Mod Seçimi.** USV_MODE=test veya race.
+    * `host_scripts/system_start.sh`: **Sistemi Başlatan Anahtar.** IP atar, mod okur, kamerayı açar, Docker'ı tetikler.
+    * `docker_workspace/scripts/internal_start.sh`: **İç Kaptan.** Moda göre cam/lidar web sunucularını açıp açmaz; telemetri her zaman başlar.
     * `docker_workspace/src/`:
         * `cam.py`: Görüntü işleme + Web Yayın (Port 5000).
         * `lidar_map.py`: Lidar verisini haritalama + Web Yayın (Port 5001).
         * `telemetry.py`: Pixhawk verilerini okuma + Dashboard + CSV Kayıt (Port 8080).
         * `fusion_main.py`: **ANA BEYİN.** Sensör füzyonu ve motor kontrolü.
 
-## 5. ANTIGRAVITY ÇALIŞMA PRENSİBİ (DEVOPS)
+## 6. VERİ TESLİM (Şartname Bölüm 6)
+* **Telemetri CSV:** `docker_workspace/logs/telemetri_verisi.csv` — 1 Hz, zorunlu alanlar: lat, lon, Speed, Roll, Pitch, Heading, Speed_Setpoint, Heading_Setpoint. İDA karaya alındıktan sonra USB ile teslim.
+
+## 7. ANTIGRAVITY ÇALIŞMA PRENSİBİ (DEVOPS)
 1.  **Geliştirme (Windows):** Kodlar VS Code üzerinde yazılır.
 2.  **Senkronizasyon:** `git push` ile GitHub'a gönderilir.
 3.  **Dağıtım (Raspberry Pi):** Terminalde `guncelle` komutu ile çekilir.

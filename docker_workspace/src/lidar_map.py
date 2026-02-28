@@ -8,10 +8,16 @@ import math
 import threading
 import time
 import os
+import sys
 from flask import Flask, Response
 import logging
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR) # Gereksiz logları kapat
+
+# --- YARIŞMA MODU GUARD (IDA 3.7 - görüntü aktarımı yasak) ---
+if os.environ.get('USV_MODE') == 'race':
+    print("🏁 [lidar_map.py] YARIŞMA MODU - Harita yayını başlatılmıyor.")
+    sys.exit(0)
 
 # --- AYARLAR ---
 WEB_PORT = 5001

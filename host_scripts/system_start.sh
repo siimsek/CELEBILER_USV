@@ -2,18 +2,49 @@
 # Dosya Yeri: CELEBILER_USV/host_scripts/system_start.sh
 
 CONTAINER_NAME="ege_ros"
+# Config path: script dizininden veya $HOME/CELEBILER_USV
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"; pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+if [ ! -f "$PROJECT_ROOT/config/usv_mode.cfg" ]; then
+    PROJECT_ROOT="$HOME/CELEBILER_USV"
+fi
+CONFIG_FILE="$PROJECT_ROOT/config/usv_mode.cfg"
 
 # Renk Kodları
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+BOLD='\033[1m'
+DIM='\033[2m'
+WHITE='\033[1;37m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 clear
 echo -e "${CYAN}=================================================${NC}"
 echo -e "${CYAN}   🚀 ÇELEBİLER USV - YER İSTASYONU BAŞLATICI   ${NC}"
 echo -e "${CYAN}=================================================${NC}"
+
+# --- USV MODE (test | race) ---
+# Argüman: ./system_start.sh [test|race]  veya  config/usv_mode.cfg
+if [ "$1" = "race" ] || [ "$1" = "test" ]; then
+    USV_MODE="$1"
+    echo -e "📋 [MOD] Komut satırından: ${USV_MODE}"
+elif [ -f "$CONFIG_FILE" ]; then
+    USV_MODE=$(grep -E "^USV_MODE=" "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    if [ "$USV_MODE" != "race" ] && [ "$USV_MODE" != "test" ]; then
+        USV_MODE="test"
+    fi
+    echo -e "📋 [MOD] Config'den: ${USV_MODE}"
+else
+    USV_MODE="test"
+    echo -e "📋 [MOD] Varsayılan: test"
+fi
+
+if [ "$USV_MODE" = "race" ]; then
+    echo -e "${YELLOW}⚠️  [ŞARTNAME 3.4] Yarışma modunda Raspberry Pi WiFi kapatılmalıdır.${NC}"
+fi
 
 LOG_DIR="$HOME/CELEBILER_USV/logs"
 echo "🧹 [HOST] Eski loglar temizleniyor..."
@@ -111,8 +142,8 @@ if [ ! "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
 fi
 
 # 5. İÇ SCRİPTİ TETİKLEME
-echo -e "${GREEN}[SİSTEM]${NC} Otonom Pilot ve Web Sunucular Başlatılıyor..."
-docker exec -d $CONTAINER_NAME /bin/bash -c "/root/workspace/scripts/internal_start.sh"
+echo -e "${GREEN}[SİSTEM]${NC} Otonom Pilot ve Web Sunucular Başlatılıyor... (Mod: $USV_MODE)"
+docker exec -e USV_MODE="$USV_MODE" -d $CONTAINER_NAME /bin/bash -c "/root/workspace/scripts/internal_start.sh"
 
 # 6. BAĞLANTI KONTROLÜ (5 Saniye İzle)
 echo -e "\n🔎 [KONTROL] Donanım Bağlantıları Bekleniyor (5sn)..."
@@ -171,13 +202,19 @@ if [ "$first_ip" = true ]; then
      printf "  │                           │  │   ${RED}NO NETWORK CONNECTION${NC}                          │\n"
 fi
 
-echo -e "  └───────────────────────────┘  │                                                  │"
+echo -e "  └───────────────────────────┘  │  ${BOLD}MOD:${NC} ${USV_MODE^^}                                        │"
 echo -e "                                 └──────────────────────────────────────────────────┘"
 echo ""
 echo -e "  ${BOLD}${WHITE}SUBSYSTEMS:${NC}"
 echo -e "  ╔══════════════════════════════════════════╗"
-echo -e "  ║  🎥  CAMERA FEED  : ${GREEN}Active${NC} (Port 5000)   ║"
-echo -e "  ║  🗺️   LIDAR MAP    : ${GREEN}Active${NC} (Port 5001)   ║"
+if [ "$USV_MODE" = "race" ]; then
+    echo -e "  ║  🏁  YARIŞMA MODU - Görüntü kapalı (IDA 3.7) ║"
+    echo -e "  ║  🎥  CAMERA FEED  : ${YELLOW}Off${NC} (Yasak)        ║"
+    echo -e "  ║  🗺️   LIDAR MAP    : ${YELLOW}Off${NC} (Yasak)        ║"
+else
+    echo -e "  ║  🎥  CAMERA FEED  : ${GREEN}Active${NC} (Port 5000)   ║"
+    echo -e "  ║  🗺️   LIDAR MAP    : ${GREEN}Active${NC} (Port 5001)   ║"
+fi
 echo -e "  ╚══════════════════════════════════════════╝"
 echo ""
 echo -e "${DIM}  [COMMANDS]  Type 'stop' to shutdown system  |  Type 'loglar' to view real-time logs${NC}"

@@ -9,7 +9,7 @@ import json
 import random
 import serial
 import math
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 # --- YAPILANDIRMA VE SABİTLER ---
 BAUD_RATE_PIXHAWK = 115200
@@ -18,17 +18,36 @@ WEB_PORT = 8080
 LOG_DIR = "/root/workspace/logs"
 CSV_FILE = f"{LOG_DIR}/telemetri_verisi.csv"
 
+# --- USV MODE (test | race) ---
+USV_MODE = os.environ.get('USV_MODE', 'test')
+
 # --- GLOBAL DURUM ---
+# Şartname Bölüm 6: lat, lon, hız, roll, pitch, heading, hız_setpoint, yön_setpoint
 telemetry_data = {
     "Timestamp": "--", "Lat": 0, "Lon": 0, "Heading": 0,
     "Battery": 0, "Mode": "DISCONNECTED", "Speed": 0, "Roll": 0, "Pitch": 0,
+    "Speed_Setpoint": 0, "Heading_Setpoint": 0,  # Şartname 6 zorunlu alanları
     "STM_Date": "--:--:--", "Env_Temp": 0, "Env_Hum": 0, "Rain_Val": 0, "Rain_Status": "DRY",
     "Sys_CPU": 0, "Sys_RAM": 0, "Sys_Temp": 0,
     "RC1": 0, "RC2": 0, "RC3": 0, "RC4": 0,
     "Out1": 0, "Out3": 0
 }
 COLUMNS = list(telemetry_data.keys())
+CSV_LOG_INTERVAL = 1.0  # Şartname: en az 1 Hz
 SIMULATION_MODE = False
+
+# --- GÖREV DURUMU (Dashboard <-> usv_main.py iletişimi) ---
+# usv_main.py bu dict'i import edip günceller, dashboard okur
+mission_data = {
+    "state": 0,         # 0=Bekleme, 1=Parkur1, 2=Parkur2, 3=Parkur3, 4=Tamamlandı
+    "active": False,    # Görev çalışıyor mu?
+    "start_time": 0,    # time.time() başlangıç
+    "target": "--",     # Hedef açıklama
+    "wp_info": "-- / --",  # Waypoint bilgisi
+    "next_parkur_requested": False,  # Dashboard'dan "sonraki parkur" isteği
+    "start_requested": False,  # Görev başlat isteği
+    "stop_requested": False,   # Acil durdur isteği
+}
 
 # Flask Uygulaması
 import logging
@@ -44,411 +63,370 @@ HTML_PAGE = """
     <title>CELEBILER USV - MISSION CONTROL</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #0f172a;
-            --card-bg: #1e293b;
+            --bg: #0a0e1a;
+            --card: #131a2e;
+            --card-border: rgba(255,255,255,0.06);
             --accent: #38bdf8;
-            --text-primary: #f8fafc;
-            --text-secondary: #94a3b8;
-            --success: #4ade80;
+            --accent-glow: rgba(56,189,248,0.15);
+            --success: #22c55e;
             --danger: #ef4444;
-            --warning: #facc15;
-            --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+            --warning: #eab308;
+            --text: #f1f5f9;
+            --text2: #64748b;
+            --mono: 'JetBrains Mono', monospace;
+            --sans: 'Inter', system-ui, sans-serif;
         }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { background:var(--bg); color:var(--text); font-family:var(--sans); height:100vh; overflow:hidden; display:flex; flex-direction:column; }
 
-        body {
-            background-color: var(--bg-color);
-            color: var(--text-primary);
-            font-family: 'Inter', system-ui, -apple-system, sans-serif;
-            margin: 0;
-            padding: 0;
-            height: 100vh;
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-        }
+        /* === HEADER === */
+        header { background:rgba(10,14,26,0.95); border-bottom:1px solid var(--card-border); padding:0 16px; height:52px; display:flex; align-items:center; justify-content:space-between; backdrop-filter:blur(12px); z-index:10; flex-shrink:0; }
+        .h-left { display:flex; align-items:center; gap:12px; }
+        .h-right { display:flex; align-items:center; gap:14px; }
+        .logo { font-size:1rem; font-weight:800; color:var(--accent); letter-spacing:0.5px; }
+        .mode-badge { font-size:0.7rem; font-weight:700; padding:3px 10px; border-radius:20px; }
+        .mode-test { background:rgba(34,197,94,0.15); color:var(--success); border:1px solid rgba(34,197,94,0.3); }
+        .mode-race { background:rgba(234,179,8,0.15); color:var(--warning); border:1px solid rgba(234,179,8,0.3); }
+        .hm { font-size:0.75rem; color:var(--text2); font-family:var(--mono); background:rgba(255,255,255,0.04); padding:4px 10px; border-radius:6px; border:1px solid var(--card-border); }
+        .hm b { color:var(--text); }
+        .clock { font-family:var(--mono); font-size:0.8rem; color:var(--text2); }
 
-        /* HEADER */
-        header {
-            background: rgba(15, 23, 42, 0.95);
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-            padding: 0 20px;
-            height: 60px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
-            z-index: 10;
-        }
+        /* === MAIN GRID === */
+        .main { flex:1; display:grid; grid-template-columns:280px 1fr 1fr; grid-template-rows:1fr 1fr; gap:8px; padding:8px; overflow:hidden; }
 
-        .header-left { display: flex; align-items: center; gap: 15px; }
-        .header-right { display: flex; align-items: center; gap: 20px; }
+        /* === CARDS === */
+        .card { background:var(--card); border-radius:10px; border:1px solid var(--card-border); display:flex; flex-direction:column; overflow:hidden; }
+        .card-h { padding:6px 12px; font-size:0.68rem; font-weight:700; color:var(--accent); text-transform:uppercase; letter-spacing:0.8px; border-bottom:1px solid var(--card-border); background:rgba(10,14,26,0.5); display:flex; justify-content:space-between; align-items:center; flex-shrink:0; }
+        .card-b { flex:1; padding:10px; overflow:auto; }
+        .dot { width:7px; height:7px; border-radius:50%; display:inline-block; }
+        .dot-g { background:var(--success); box-shadow:0 0 6px var(--success); }
+        .dot-r { background:var(--danger); box-shadow:0 0 6px var(--danger); }
+        .dot-y { background:var(--warning); box-shadow:0 0 6px var(--warning); }
 
-        h1 {
-            font-size: 1.1rem;
-            font-weight: 800;
-            margin: 0;
-            color: var(--accent);
-            letter-spacing: 0.5px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
+        /* === MISSION CONTROL (Left Sidebar) === */
+        .mission-panel { grid-row:span 2; }
+        .mission-panel .card-b { display:flex; flex-direction:column; gap:8px; padding:10px; }
+        .m-timer { text-align:center; font-family:var(--mono); font-size:1.8rem; font-weight:700; color:var(--accent); padding:8px 0; }
+        .m-timer small { display:block; font-size:0.65rem; color:var(--text2); font-weight:400; margin-top:2px; }
+        .m-state { text-align:center; padding:6px; background:rgba(56,189,248,0.08); border-radius:8px; border:1px solid rgba(56,189,248,0.15); }
+        .m-state .label { font-size:0.65rem; color:var(--text2); text-transform:uppercase; }
+        .m-state .val { font-size:1rem; font-weight:700; color:var(--accent); margin-top:2px; }
+        .m-wp { font-size:0.75rem; color:var(--text2); text-align:center; padding:4px 0; }
+        .m-wp b { color:var(--text); }
+        .m-btns { display:flex; flex-direction:column; gap:6px; margin-top:auto; }
+        .btn { padding:10px; border:none; border-radius:8px; font-weight:700; font-size:0.8rem; cursor:pointer; transition:all 0.15s; text-transform:uppercase; letter-spacing:0.5px; font-family:var(--sans); }
+        .btn:active { transform:scale(0.97); }
+        .btn-start { background:linear-gradient(135deg,#22c55e,#16a34a); color:#fff; }
+        .btn-start:hover { box-shadow:0 0 20px rgba(34,197,94,0.4); }
+        .btn-next { background:linear-gradient(135deg,#38bdf8,#0284c7); color:#fff; }
+        .btn-next:hover { box-shadow:0 0 20px rgba(56,189,248,0.4); }
+        .btn-stop { background:linear-gradient(135deg,#ef4444,#b91c1c); color:#fff; }
+        .btn-stop:hover { box-shadow:0 0 20px rgba(239,68,68,0.4); }
+        .btn:disabled { opacity:0.4; cursor:not-allowed; box-shadow:none !important; }
 
-        /* SYSTEM METRICS (HEADER) */
-        .sys-metric {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            background: rgba(255,255,255,0.05);
-            padding: 6px 12px;
-            border-radius: 8px;
-            border: 1px solid rgba(255,255,255,0.05);
-        }
-        
-        .sys-metric span {
-            font-family: var(--font-mono);
-            font-weight: 700;
-            color: var(--text-primary);
-        }
+        /* Parkur Progress */
+        .parkur-steps { display:flex; gap:4px; justify-content:center; padding:6px 0; }
+        .p-step { flex:1; height:6px; border-radius:3px; background:rgba(255,255,255,0.08); transition:all 0.3s; }
+        .p-step.active { background:var(--accent); box-shadow:0 0 8px var(--accent-glow); }
+        .p-step.done { background:var(--success); }
 
-        .metric-icon { opacity: 0.7; }
+        /* === FEEDS === */
+        .feed { background:#000; flex:1; display:flex; justify-content:center; align-items:center; position:relative; }
+        .feed img { width:100%; height:100%; object-fit:contain; }
+        .feed-off { color:var(--text2); font-size:0.85rem; text-align:center; padding:20px; }
 
-        /* DASHBOARD GRID - COMPACT (ONE SCREEN) */
-        .dashboard-grid {
-            flex: 1;
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            grid-template-rows: 60vh 1fr; /* 60% Video, Kalan Stats */
-            gap: 10px;
-            padding: 10px;
-            max-width: 100%;
-            height: calc(100vh - 60px); /* Header hariç tüm alan */
-            box-sizing: border-box;
-            overflow: hidden; /* Scroll Yasak */
-        }
+        /* === STATS ROW === */
+        .stats-row { grid-column:span 2; display:grid; grid-template-columns:repeat(6,1fr); gap:8px; }
+        .s-card { background:linear-gradient(180deg,rgba(19,26,46,0.9),rgba(10,14,26,0.9)); border-radius:8px; padding:8px 10px; border:1px solid var(--card-border); display:flex; flex-direction:column; justify-content:space-between; min-height:0; }
+        .s-label { font-size:0.6rem; color:var(--text2); text-transform:uppercase; font-weight:600; letter-spacing:0.5px; }
+        .s-val { font-family:var(--mono); font-size:1.1rem; font-weight:700; }
+        .s-sub { font-size:0.75rem; color:var(--accent); margin-top:2px; }
+        .s-unit { font-size:0.8rem; color:var(--text2); font-weight:400; }
 
-        /* CARDS */
-        .card {
-            background: var(--card-bg);
-            border-radius: 8px;
-            border: 1px solid rgba(255,255,255,0.06);
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
-        }
+        /* Sticks */
+        .sticks { display:flex; justify-content:space-around; align-items:center; padding:6px 0; }
+        .stick-box { position:relative; width:52px; height:52px; border:2px solid rgba(255,255,255,0.08); border-radius:50%; background:rgba(0,0,0,0.3); }
+        .stick-dot { position:absolute; width:10px; height:10px; background:var(--accent); border-radius:50%; top:21px; left:21px; transition:all 0.05s; }
+        .stick-lbl { text-align:center; font-size:0.6rem; color:var(--text2); margin-top:4px; }
 
-        .card-header {
-            padding: 6px 12px;
-            background: rgba(15, 23, 42, 0.6);
-            font-size: 0.75rem;
-            font-weight: 700;
-            color: var(--accent);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 1px solid rgba(255,255,255,0.03);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
+        /* Motor Bars */
+        .mot-row { display:flex; align-items:center; gap:6px; margin-bottom:4px; }
+        .mot-lbl { font-size:0.65rem; color:var(--text2); width:55px; }
+        .mot-bar-bg { flex:1; height:5px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden; }
+        .mot-bar { height:100%; background:var(--accent); transition:width 0.1s; border-radius:3px; }
+        .mot-val { font-family:var(--mono); font-size:0.75rem; width:35px; text-align:right; }
 
-        /* VIDEO CONTAINER */
-        .video-container {
-            flex: 1;
-            background: #000;
-            position: relative;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            overflow: hidden;
-        }
+        /* Gear */
+        .gear-disp { text-align:center; font-size:0.9rem; font-weight:700; margin-top:4px; }
 
-        .stream-img {
-            width: 100%;
-            height: 100%;
-            object-fit: contain; /* Görüntüyü sığdır */
-        }
-
-        /* STATS GRID - BOTTOM PANEL */
-        .stats-area {
-            grid-column: span 2;
-            display: grid;
-            grid-template-columns: repeat(6, 1fr); /* 5 yerine 6 bölme */
-            gap: 8px;
-            height: 100%;
-        }
-
-        .stat-card {
-            background: linear-gradient(180deg, rgba(30,41,59,0.8) 0%, rgba(15,23,42,0.8) 100%);
-            border-radius: 6px;
-            padding: 8px;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            border: 1px solid rgba(255,255,255,0.05);
-        }
-
-        .stat-label { 
-            font-size: 0.65rem; 
-            color: var(--text-secondary); 
-            text-transform: uppercase; 
-            font-weight: 600;
-            letter-spacing: 0.5px;
-        }
-        
-        .stat-value { 
-            font-family: var(--font-mono); 
-            font-size: 1.1rem; /* Daha küçük font */
-            font-weight: 700; 
-            color: var(--text-primary); 
-            white-space: nowrap;
-        }
-        
-        .status-dot { width: 8px; height: 8px; border-radius: 50%; display: block; }
-        .bg-green { background: var(--success); box-shadow: 0 0 8px var(--success); }
-        .bg-red { background: var(--danger); }
-
-        /* Helpers */
-        .unit { font-size: 0.9rem; color: var(--text-secondary); font-weight: 400; }
-        .sub-val { font-size: 0.8rem; color: var(--accent); display: block; margin-top: 4px;}
-        .divider { width: 1px; height: 20px; background: rgba(255,255,255,0.1); margin: 0 10px; }
+        /* Race mode layout */
+        .main.race-mode { grid-template-columns:280px 1fr; }
+        .main.race-mode .stats-row { grid-column:span 1; grid-template-columns:repeat(3,1fr); }
     </style>
-    <script>
-        function updateStats() {
-            fetch('/api/data')
-                .then(response => response.json())
-                .then(data => {
-                    // System (Header)
-                    document.getElementById('sys_cpu').innerText = data.Sys_CPU + "%";
-                    document.getElementById('sys_ram').innerText = data.Sys_RAM + "%";
-                    document.getElementById('sys_temp').innerText = data.Sys_Temp + "°C";
-                    document.getElementById('ts').innerText = data.Timestamp;
-
-                    // Main Stats
-                    document.getElementById('bat').innerHTML = data.Battery.toFixed(1) + "<span class='unit'> V</span>";
-                    document.getElementById('mode').innerText = data.Mode;
-                    
-                    // GPS
-                    document.getElementById('lat').innerText = data.Lat.toFixed(6);
-                    document.getElementById('lon').innerText = data.Lon.toFixed(6);
-                    
-                    // Nav
-                    document.getElementById('spd').innerText = data.Speed.toFixed(1);
-                    document.getElementById('hdg').innerText = data.Heading.toFixed(0);
-                    
-                    // Environment
-                    document.getElementById('temp').innerHTML = data.Env_Temp.toFixed(1) + "<span class='unit'>°C</span>";
-                    document.getElementById('hum').innerHTML = data.Env_Hum.toFixed(1) + "<span class='unit'>%</span>";
-                    
-                    // Rain
-                    const rainEl = document.getElementById('rain');
-                    rainEl.innerText = data.Rain_Status;
-                    rainEl.style.color = data.Rain_Status === "RAIN" ? "var(--warning)" : "var(--success)";
-                    document.getElementById('rain_val').innerText = "VAL: " + data.Rain_Val;
-
-                    // RC & Motors
-                    // Stick Animasyonu (1000-2000 aralığını -24px ile +24px arasına map et)
-                    const mapStick = (val) => {
-                         if (!val) return 0;
-                         let norm = (val - 1500) / 500.0; // -1 to 1
-                         if (Math.abs(norm) < 0.1) norm = 0; // Deadzone
-                         if (norm > 1) norm = 1; 
-                         if (norm < -1) norm = -1;
-                         return norm * 24; // Yarıçap
-                    };
-
-                    // Sol Stick (Sadece HIZ - Dikey) - RC3
-                    const s1_x = 0; 
-                    const s1_y = -mapStick(data.RC3); // Y ekseni (Cruise)
-                    document.getElementById('stick_left').style.transform = `translate(${s1_x}px, ${s1_y}px)`;
-                    
-                    // Sağ Stick (Sadece YÖN - Yatay) - RC1
-                    const s2_x = mapStick(data.RC1); // X ekseni (Steer)
-                    const s2_y = 0;
-                    document.getElementById('stick_right').style.transform = `translate(${s2_x}px, ${s2_y}px)`;
-                    
-                    // Debug Text (Stick Altına)
-                    // document.getElementById('rc_debug').innerText = `T:${data.RC3} S:${data.RC1}`;
-
-                    // Değerler
-                    // document.getElementById('rc1_val').innerText = data.RC1 || "--";
-                    // document.getElementById('rc3_val').innerText = data.RC3 || "--";
-                    
-                    // Gear Göstergesi
-                    const gearEl = document.getElementById('gear_disp');
-                    if (gearEl && data.Gear) {
-                        gearEl.innerText = data.Gear;
-                        if (data.Gear === "FORWARD") gearEl.style.color = "var(--success)";
-                        else if (data.Gear === "REVERSE") gearEl.style.color = "var(--danger)";
-                        else gearEl.style.color = "var(--warning)";
-                    }
-
-                    // Motor Barları (PWM 1000-2000 -> %0-%100)
-                    const mapPWM = (val) => {
-                        if (!val) return 0;
-                        let p = (val - 1000) / 10.0;
-                        if (p < 0) p = 0; if (p > 100) p = 100;
-                        return p;
-                    }
-                    document.getElementById('out1').innerText = data.Out1 || "--";
-                    document.getElementById('mot1_bar').style.width = mapPWM(data.Out1) + "%";
-                    
-                    document.getElementById('out3').innerText = data.Out3 || "--";
-                    document.getElementById('mot3_bar').style.width = mapPWM(data.Out3) + "%";
-
-                    // Mode Renkleri
-
-                    // Mode Color
-                    const modeEl = document.getElementById('mode');
-                    modeEl.style.color = data.Mode === "DISCONNECTED" ? "var(--danger)" : "var(--success)";
-                });
-        }
-        setInterval(updateStats, 1000);
-
-        // Dinamik IP ve IMG Yükleyici
-        window.onload = function() {
-            var host = window.location.hostname;
-            console.log("Detected Host: " + host);
-            var rand = Math.random();
-            document.getElementById('cam_img').src = "http://" + host + ":5000/?t=" + rand;
-            document.getElementById('map_img').src = "http://" + host + ":5001/?t=" + rand;
-        }
-    </script>
 </head>
 <body>
     <header>
-        <div class="header-left">
-            <h1><span class="status-dot bg-green"></span> CELEBILER USV</h1>
-            <div class="divider"></div>
-            <div id="ts" style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary);">--:--:--</div>
+        <div class="h-left">
+            <span class="logo">⚓ CELEBILER USV</span>
+            <span class="mode-badge {% if usv_mode == 'race' %}mode-race{% else %}mode-test{% endif %}">
+                {% if usv_mode == 'race' %}🏁 YARIŞMA{% else %}🔧 TEST{% endif %}
+            </span>
+            <span class="clock" id="ts">--:--:--</span>
         </div>
-        
-        <div class="header-right">
-            <!-- RPI METRICS -->
-            <div class="sys-metric" title="CPU Load">
-                <span class="metric-icon">CPU</span>
-                <span id="sys_cpu">--%</span>
-            </div>
-            <div class="sys-metric" title="RAM Usage">
-                <span class="metric-icon">RAM</span>
-                <span id="sys_ram">--%</span>
-            </div>
-            <div class="sys-metric" title="SoC Temp">
-                <span class="metric-icon">TMP</span>
-                <span id="sys_temp">--°C</span>
-            </div>
+        <div class="h-right">
+            <span class="hm">CPU <b id="sys_cpu">--%</b></span>
+            <span class="hm">RAM <b id="sys_ram">--%</b></span>
+            <span class="hm">TMP <b id="sys_temp">--°C</b></span>
         </div>
     </header>
 
-    <div class="dashboard-grid">
-        <!-- KAMERA -->
-        <div class="card">
-            <div class="card-header">
-                <span>FRONT VISION</span>
-                <span class="status-dot bg-green"></span>
-            </div>
-            <div class="video-container">
-                <img id="cam_img" class="stream-img" alt="Camera Feed Loading..." />
+    <div class="main {% if usv_mode == 'race' %}race-mode{% endif %}">
+
+        <!-- LEFT: MISSION CONTROL -->
+        <div class="card mission-panel">
+            <div class="card-h"><span>Mission Control</span><span class="dot dot-g" id="mc_dot"></span></div>
+            <div class="card-b">
+                <div class="m-timer" id="m_timer">00:00<small>ELAPSED</small></div>
+
+                <div class="m-state">
+                    <div class="label">DURUM</div>
+                    <div class="val" id="m_state">BEKLEME</div>
+                </div>
+
+                <div class="parkur-steps">
+                    <div class="p-step" id="ps1"></div>
+                    <div class="p-step" id="ps2"></div>
+                    <div class="p-step" id="ps3"></div>
+                </div>
+
+                <div class="m-wp" id="m_wp">Waypoint: <b>-- / --</b></div>
+                <div class="m-wp">Hedef: <b id="m_target">--</b></div>
+
+                <div class="m-btns">
+                    <button class="btn btn-start" id="btn_start" onclick="cmdStart()">▶ Görevi Başlat</button>
+                    <button class="btn btn-next" id="btn_next" onclick="cmdNext()" disabled>⏭ Sonraki Parkur</button>
+                    <button class="btn btn-stop" id="btn_stop" onclick="cmdStop()">⛔ Acil Durdur</button>
+                </div>
             </div>
         </div>
 
-        <!-- LIDAR -->
+        {% if usv_mode == 'test' %}
+        <!-- CAMERA FEED -->
         <div class="card">
-            <div class="card-header">
-                <span>LIDAR SLAM MAP</span>
-                <span class="status-dot bg-green"></span>
-            </div>
-            <div class="video-container">
-                <img id="map_img" class="stream-img" alt="Map Feed Loading..." />
-            </div>
+            <div class="card-h"><span>Front Vision</span><span class="dot dot-g"></span></div>
+            <div class="feed"><img id="cam_img" alt="Camera" /></div>
         </div>
 
-        <!-- ISTATISTIKLER (5 Kolon) -->
-        <div class="stats-area">
-            <!-- 1. BATTERY & MODE -->
-            <div class="stat-card">
-                <div class="stat-label">SYSTEM STATUS</div>
+        <!-- LIDAR MAP -->
+        <div class="card">
+            <div class="card-h"><span>Lidar Map</span><span class="dot dot-g"></span></div>
+            <div class="feed"><img id="map_img" alt="Lidar Map" /></div>
+        </div>
+        {% else %}
+        <!-- RACE MODE: No feeds -->
+        <div class="card" style="grid-column:span 1; grid-row:span 2;">
+            <div class="card-h"><span>Yarışma Modu</span><span class="dot dot-y"></span></div>
+            <div class="card-b" style="display:flex; align-items:center; justify-content:center; text-align:center;">
                 <div>
-                    <div class="stat-value" id="bat">-- V</div>
-                    <div class="sub-val" id="mode">--</div>
+                    <div style="font-size:2rem; margin-bottom:8px;">🏁</div>
+                    <div style="font-size:0.85rem; color:var(--text2);">Görüntü aktarımı kapalı<br/>(Şartname 3.7)</div>
+                    <div style="margin-top:12px; font-size:0.75rem; color:var(--text2);">Kamera onboard çalışıyor<br/>Engel tespiti aktif</div>
                 </div>
             </div>
+        </div>
+        {% endif %}
 
-            <!-- 2. NAVIGATION -->
-            <div class="stat-card">
-                <div class="stat-label">SPEED / HEADING</div>
-                <div>
-                    <div class="stat-value"><span id="spd">--</span> <span class="unit">M/S</span></div>
-                    <div class="sub-val">HDG: <span id="hdg">--</span>°</div>
-                </div>
+        <!-- BOTTOM STATS -->
+        <div class="stats-row">
+            <!-- 1: Battery & Mode -->
+            <div class="s-card">
+                <div class="s-label">System</div>
+                <div class="s-val" id="bat">-- <span class="s-unit">V</span></div>
+                <div class="s-sub" id="mode">--</div>
             </div>
 
-            <!-- 3. GPS -->
-            <div class="stat-card">
-                <div class="stat-label">GPS COORDINATES</div>
-                <div>
-                    <div class="stat-value" id="lat" style="font-size: 1.2rem; margin-bottom: 2px;">--</div>
-                    <div class="stat-value" id="lon" style="font-size: 1.2rem; opacity: 0.7;">--</div>
-                </div>
+            <!-- 2: GPS -->
+            <div class="s-card">
+                <div class="s-label">GPS</div>
+                <div class="s-val" id="lat" style="font-size:0.9rem;">--</div>
+                <div style="font-size:0.9rem; font-family:var(--mono); opacity:0.7;" id="lon">--</div>
             </div>
 
-            <!-- 4. ENVIRONMENT (STM32) -->
-            <div class="stat-card">
-                <div class="stat-label">ATMOSPHERE</div>
-                <div>
-                    <div class="stat-value" id="temp">--°C</div>
-                    <div class="sub-val">HUMIDITY: <span id="hum">--%</span></div>
-                    <div class="sub-val" style="margin-top:2px;">RAIN: <span id="rain">--</span> <span id="rain_val" style="font-size:0.7em; opacity:0.7"></span></div>
-                </div>
+            <!-- 3: Speed / Heading -->
+            <div class="s-card">
+                <div class="s-label">Nav</div>
+                <div class="s-val"><span id="spd">--</span> <span class="s-unit">m/s</span></div>
+                <div class="s-sub">HDG: <span id="hdg">--</span>°</div>
             </div>
 
-            <!-- 5. RC / MOTORS (Görsel Simülasyon) -->
-            <div class="stat-card" style="grid-column: span 1;">
-                <div class="stat-label">PILOT DECK</div>
-                <div style="display:flex; justify-content:space-around; align-items:center; padding:10px 0;">
-                    <!-- Sol Stick (Throttle/Yaw) -->
-                    <div style="position:relative; width:60px; height:60px; border:2px solid rgba(255,255,255,0.1); border-radius:50%; background:rgba(0,0,0,0.2);">
-                        <div id="stick_left" style="position:absolute; width:12px; height:12px; background:var(--accent); border-radius:50%; top:24px; left:24px; transition:all 0.05s;"></div>
-                        <span style="position:absolute; bottom:-20px; width:100%; text-align:center; font-size:0.7rem; color:var(--text-secondary);">CRUISE</span>
+            <!-- 4: Atmosphere -->
+            <div class="s-card">
+                <div class="s-label">Atmosphere</div>
+                <div class="s-val" id="temp">-- <span class="s-unit">°C</span></div>
+                <div class="s-sub">HUM: <span id="hum">--%</span> | <span id="rain" style="font-weight:700;">--</span></div>
+            </div>
+
+            <!-- 5: RC Sticks -->
+            <div class="s-card">
+                <div class="s-label">Pilot</div>
+                <div class="sticks">
+                    <div>
+                        <div class="stick-box"><div class="stick-dot" id="stick_left"></div></div>
+                        <div class="stick-lbl">CRUISE</div>
                     </div>
-
-                    <!-- Sağ Stick (Pitch/Roll) -->
-                    <div style="position:relative; width:60px; height:60px; border:2px solid rgba(255,255,255,0.1); border-radius:50%; background:rgba(0,0,0,0.2);">
-                        <div id="stick_right" style="position:absolute; width:12px; height:12px; background:var(--accent); border-radius:50%; top:24px; left:24px; transition:all 0.05s;"></div>
-                        <span style="position:absolute; bottom:-20px; width:100%; text-align:center; font-size:0.7rem; color:var(--text-secondary);">STEER</span>
+                    <div>
+                        <div class="stick-box"><div class="stick-dot" id="stick_right"></div></div>
+                        <div class="stick-lbl">STEER</div>
                     </div>
                 </div>
-                <div style="text-align:center; margin-top:15px; font-size:0.9rem; color:var(--text-secondary);">
-                    GEAR STATUS: <strong id="gear_disp" style="font-size:1.2rem; margin-left:5px;">--</strong>
-                </div>
+                <div class="gear-disp" id="gear_disp">--</div>
             </div>
 
-            <!-- MOTOR DURUMU -->
-             <div class="stat-card" style="grid-column: span 1;">
-                 <div class="stat-label">MOTORS (PWM)</div>
-                 <div style="display:flex; flex-direction:column; gap:8px;">
-                     <div style="display:flex; justify-content:space-between; align-items:center;">
-                         <span style="font-size:0.8rem; color:var(--text-secondary);">L-MOT (CH1)</span>
-                         <div style="flex:1; height:6px; background:rgba(255,255,255,0.1); margin:0 10px; border-radius:3px; overflow:hidden;">
-                             <div id="mot1_bar" style="width:0%; height:100%; background:var(--accent); transition:width 0.1s;"></div>
-                         </div>
-                         <strong id="out1" style="font-size:0.9rem;">--</strong>
-                     </div>
-                     <div style="display:flex; justify-content:space-between; align-items:center;">
-                         <span style="font-size:0.8rem; color:var(--text-secondary);">R-MOT (CH3)</span>
-                         <div style="flex:1; height:6px; background:rgba(255,255,255,0.1); margin:0 10px; border-radius:3px; overflow:hidden;">
-                             <div id="mot3_bar" style="width:0%; height:100%; background:var(--accent); transition:width 0.1s;"></div>
-                         </div>
-                         <strong id="out3" style="font-size:0.9rem;">--</strong>
-                     </div>
-                 </div>
-             </div>
+            <!-- 6: Motors -->
+            <div class="s-card">
+                <div class="s-label">Motors</div>
+                <div style="padding-top:4px;">
+                    <div class="mot-row">
+                        <span class="mot-lbl">L (CH1)</span>
+                        <div class="mot-bar-bg"><div class="mot-bar" id="mot1_bar" style="width:0%"></div></div>
+                        <span class="mot-val" id="out1">--</span>
+                    </div>
+                    <div class="mot-row">
+                        <span class="mot-lbl">R (CH3)</span>
+                        <div class="mot-bar-bg"><div class="mot-bar" id="mot3_bar" style="width:0%"></div></div>
+                        <span class="mot-val" id="out3">--</span>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
+
+    <script>
+        // --- DATA UPDATE ---
+        let missionStartTime = 0;
+        let missionRunning = false;
+
+        function updateStats() {
+            fetch('/api/data')
+                .then(r => r.json())
+                .then(d => {
+                    // Header
+                    document.getElementById('sys_cpu').innerText = d.Sys_CPU + '%';
+                    document.getElementById('sys_ram').innerText = d.Sys_RAM + '%';
+                    document.getElementById('sys_temp').innerText = d.Sys_Temp + '°C';
+                    document.getElementById('ts').innerText = d.Timestamp || '--:--:--';
+
+                    // System
+                    document.getElementById('bat').innerHTML = (d.Battery || 0).toFixed(1) + '<span class="s-unit"> V</span>';
+                    const modeEl = document.getElementById('mode');
+                    modeEl.innerText = d.Mode || '--';
+                    modeEl.style.color = d.Mode === 'DISCONNECTED' ? 'var(--danger)' : (d.Mode === 'SIMULATION' ? 'var(--warning)' : 'var(--success)');
+
+                    // GPS
+                    document.getElementById('lat').innerText = (d.Lat || 0).toFixed(7);
+                    document.getElementById('lon').innerText = (d.Lon || 0).toFixed(7);
+
+                    // Nav
+                    document.getElementById('spd').innerText = (d.Speed || 0).toFixed(1);
+                    document.getElementById('hdg').innerText = (d.Heading || 0).toFixed(0);
+
+                    // Atmosphere
+                    document.getElementById('temp').innerHTML = (d.Env_Temp || 0).toFixed(1) + '<span class="s-unit"> °C</span>';
+                    document.getElementById('hum').innerText = (d.Env_Hum || 0).toFixed(0) + '%';
+                    const rainEl = document.getElementById('rain');
+                    rainEl.innerText = d.Rain_Status || '--';
+                    rainEl.style.color = d.Rain_Status === 'WET' ? 'var(--warning)' : 'var(--success)';
+
+                    // RC Sticks
+                    const mapS = (v) => { if(!v) return 0; let n=(v-1500)/500.0; if(Math.abs(n)<0.1) n=0; return Math.max(-1,Math.min(1,n))*20; };
+                    document.getElementById('stick_left').style.transform = 'translate(0px,' + (-mapS(d.RC3)) + 'px)';
+                    document.getElementById('stick_right').style.transform = 'translate(' + mapS(d.RC1) + 'px,0px)';
+
+                    // Gear
+                    const gearEl = document.getElementById('gear_disp');
+                    if(d.Gear) {
+                        gearEl.innerText = d.Gear;
+                        gearEl.style.color = d.Gear==='FORWARD' ? 'var(--success)' : (d.Gear==='REVERSE' ? 'var(--danger)' : 'var(--warning)');
+                    }
+
+                    // Motors
+                    const mapPWM = (v) => { if(!v) return 0; let p=(v-1000)/10.0; return Math.max(0,Math.min(100,p)); };
+                    document.getElementById('out1').innerText = d.Out1 || '--';
+                    document.getElementById('mot1_bar').style.width = mapPWM(d.Out1) + '%';
+                    document.getElementById('out3').innerText = d.Out3 || '--';
+                    document.getElementById('mot3_bar').style.width = mapPWM(d.Out3) + '%';
+
+                    // Mission Control
+                    if(d.mission_state !== undefined) {
+                        const states = ['BEKLEME','PARKUR-1','PARKUR-2','PARKUR-3','TAMAMLANDI'];
+                        const stateEl = document.getElementById('m_state');
+                        stateEl.innerText = states[d.mission_state] || 'BEKLEME';
+
+                        // Parkur progress
+                        for(let i=1;i<=3;i++) {
+                            const el = document.getElementById('ps'+i);
+                            if(d.mission_state > i) el.className='p-step done';
+                            else if(d.mission_state === i) el.className='p-step active';
+                            else el.className='p-step';
+                        }
+
+                        // Buttons
+                        document.getElementById('btn_start').disabled = d.mission_active;
+                        document.getElementById('btn_next').disabled = !d.mission_active || d.usv_mode === 'race';
+                        document.getElementById('btn_stop').disabled = !d.mission_active;
+
+                        // Mission dot
+                        document.getElementById('mc_dot').className = 'dot ' + (d.mission_active ? 'dot-g' : 'dot-r');
+                    }
+
+                    if(d.mission_target) document.getElementById('m_target').innerText = d.mission_target;
+                    if(d.mission_wp_info) document.getElementById('m_wp').innerHTML = 'Waypoint: <b>' + d.mission_wp_info + '</b>';
+                })
+                .catch(() => {});
+        }
+
+        // Mission Timer
+        function updateTimer() {
+            fetch('/api/mission_status')
+                .then(r => r.json())
+                .then(d => {
+                    if(d.elapsed !== undefined && d.active) {
+                        const m = Math.floor(d.elapsed/60);
+                        const s = Math.floor(d.elapsed%60);
+                        const el = document.getElementById('m_timer');
+                        el.innerHTML = String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0') + '<small>ELAPSED</small>';
+                        if(d.elapsed > 1200) el.style.color = 'var(--danger)';
+                        else if(d.elapsed > 1080) el.style.color = 'var(--warning)';
+                        else el.style.color = 'var(--accent)';
+                    }
+                })
+                .catch(() => {});
+        }
+
+        // Commands
+        function cmdStart() { fetch('/api/start_mission', {method:'POST'}).then(()=>{missionRunning=true;}); }
+        function cmdNext() { fetch('/api/next_parkur', {method:'POST'}); }
+        function cmdStop() { fetch('/api/emergency_stop', {method:'POST'}).then(()=>{missionRunning=false;}); }
+
+        setInterval(updateStats, 1000);
+        setInterval(updateTimer, 1000);
+
+        // Load feeds (test mode only)
+        window.onload = function() {
+            {% if usv_mode == 'test' %}
+            var host = window.location.hostname;
+            var r = Math.random();
+            var camEl = document.getElementById('cam_img');
+            var mapEl = document.getElementById('map_img');
+            if(camEl) camEl.src = 'http://' + host + ':5000/?t=' + r;
+            if(mapEl) mapEl.src = 'http://' + host + ':5001/?t=' + r;
+            {% endif %}
+        };
+    </script>
 </body>
 </html>
 """
@@ -477,26 +455,41 @@ class SmartTelemetry:
         if not os.path.exists(LOG_DIR):
             os.makedirs(LOG_DIR)
             
-        # CSV init
-        if not os.path.isfile(CSV_FILE):
-             pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
+        # CSV init - Her oturumda sıfırdan (Şartname 6: İDA karaya alındıktan sonra teslim)
+        pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
+        self.last_csv_log_time = 0
 
         # Motor Kontrolcüsünü Başlat
         self.motor_ctrl = MotorController(self)
+
+    def csv_logger(self):
+        """Şartname Bölüm 6: Telemetri CSV 1 Hz kayıt"""
+        while self.running:
+            try:
+                if time.time() - self.last_csv_log_time >= CSV_LOG_INTERVAL:
+                    with self.lock:
+                        row = {k: telemetry_data.get(k, 0) for k in COLUMNS}
+                    row_df = pd.DataFrame([row])
+                    row_df.to_csv(CSV_FILE, mode='a', header=False, index=False)
+                    self.last_csv_log_time = time.time()
+            except Exception as e:
+                pass
+            time.sleep(0.2)
 
     def start(self):
         """Tüm threadleri başlatır."""
         threads = [
             threading.Thread(target=self.read_pixhawk, daemon=True),
             threading.Thread(target=self.read_stm32, daemon=True),
-            threading.Thread(target=self.connection_manager, daemon=True)
-            # Motor thread'i kendi içinde başlıyor zaten
+            threading.Thread(target=self.connection_manager, daemon=True),
+            threading.Thread(target=self.csv_logger, daemon=True),
         ]
         
         for t in threads:
             t.start()
         
         print(f"🌍 WEB SERVER BAŞLATILIYOR: Port {WEB_PORT}")
+        print(f"📋 [CSV] Telemetri 1 Hz kayıt: {CSV_FILE}")
         app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)
 
     # --- BAĞLANTI YÖNETİMİ ---
@@ -670,6 +663,10 @@ class SmartTelemetry:
                 telemetry_data['Lat'] = msg.lat / 1e7
                 telemetry_data['Lon'] = msg.lon / 1e7
                 telemetry_data['Heading'] = msg.hdg / 100.0
+                # Manuel modda yön setpoint = mevcut yön; AUTO/GUIDED'da NAV_CONTROLLER_OUTPUT kullanılır
+                mode_str = telemetry_data.get('Mode', '')
+                if 'AUTO' not in mode_str and 'GUIDED' not in mode_str:
+                    telemetry_data['Heading_Setpoint'] = msg.hdg / 100.0
                 
             elif mtype == 'RC_CHANNELS':
                 telemetry_data['RC1'] = msg.chan1_raw
@@ -752,7 +749,14 @@ class SmartTelemetry:
                 
             elif mtype == 'VFR_HUD':
                 telemetry_data['Speed'] = msg.groundspeed
-                
+                # Hız setpoint: Motor output yoksa (NEUTRAL) mevcut hız kullan
+                if telemetry_data.get('Gear') == 'NEUTRAL' or abs(telemetry_data.get('Out1', 1500) - 1500) + abs(telemetry_data.get('Out3', 1500) - 1500) < 50:
+                    telemetry_data['Speed_Setpoint'] = msg.groundspeed
+
+            elif mtype == 'NAV_CONTROLLER_OUTPUT':
+                # Otonom modda hedef yön (Şartname 6)
+                telemetry_data['Heading_Setpoint'] = msg.target_bearing
+
             elif mtype == 'ATTITUDE':
                 telemetry_data['Roll'] = msg.roll * 57.2958
                 telemetry_data['Pitch'] = msg.pitch * 57.2958
@@ -820,13 +824,17 @@ class SmartTelemetry:
             self.sim_lat += random.uniform(-0.00005, 0.00005)
             self.sim_lon += random.uniform(-0.00005, 0.00005)
             
+            hdg = (telemetry_data.get("Heading", 0) + 1) % 360
+            spd = random.uniform(0, 2.0)
             telemetry_data.update({
                 "Timestamp": time.strftime("%H:%M:%S"),
                 "Lat": self.sim_lat,
                 "Lon": self.sim_lon,
-                "Heading": (telemetry_data["Heading"] + 1) % 360,
+                "Heading": hdg,
+                "Heading_Setpoint": hdg,
                 "Battery": 12.0 + random.uniform(0, 0.5),
-                "Speed": random.uniform(0, 3.0),
+                "Speed": spd,
+                "Speed_Setpoint": spd,
                 "Mode": "SIMULATION",
                 "Gear": "NEUTRAL",
                 # STM32 Mock
@@ -1020,10 +1028,11 @@ class MotorController:
                     
                     with self.parent.lock:
                         telemetry_data["Gear"] = self.gear
-                        # Backend'de hesaplanan motor çıktılarını UI'a gönder
                         telemetry_data["Out1"] = self.left_motor_pwm
                         telemetry_data["Out3"] = self.right_motor_pwm
-                        # Sticklerin UI'da donmaması için inputları da yenile
+                        # Şartname 6: Hız setpoint - motor PWM'lerinden tahmini
+                        thrust_norm = ((self.left_motor_pwm - 1500) + (self.right_motor_pwm - 1500)) / 800.0
+                        telemetry_data["Speed_Setpoint"] = thrust_norm * 3.0  # m/s tahmini
                         telemetry_data["RC1"] = self.input_steer
                         telemetry_data["RC3"] = self.input_throttle
                         
@@ -1034,10 +1043,53 @@ class MotorController:
 
 # --- FLASK ROUTES ---
 @app.route('/')
-def index(): return render_template_string(HTML_PAGE)
+def index():
+    return render_template_string(HTML_PAGE, usv_mode=USV_MODE)
 
 @app.route('/api/data')
-def get_data(): return jsonify(telemetry_data)
+def get_data():
+    out = dict(telemetry_data)
+    out['usv_mode'] = USV_MODE
+    # Mission state ekleme
+    out['mission_state'] = mission_data['state']
+    out['mission_active'] = mission_data['active']
+    out['mission_target'] = mission_data['target']
+    out['mission_wp_info'] = mission_data['wp_info']
+    return jsonify(out)
+
+@app.route('/api/mission_status')
+def mission_status():
+    elapsed = 0
+    if mission_data['active'] and mission_data['start_time'] > 0:
+        elapsed = time.time() - mission_data['start_time']
+    return jsonify({
+        'active': mission_data['active'],
+        'state': mission_data['state'],
+        'elapsed': elapsed
+    })
+
+@app.route('/api/next_parkur', methods=['POST'])
+def next_parkur():
+    """Test modunda sonraki parkura geçiş isteği."""
+    if USV_MODE != 'test':
+        return jsonify({'error': 'Sadece test modunda kullanılabilir'}), 403
+    mission_data['next_parkur_requested'] = True
+    print("📡 [DASHBOARD] Sonraki parkur isteği alındı")
+    return jsonify({'ok': True})
+
+@app.route('/api/start_mission', methods=['POST'])
+def start_mission():
+    """Görevi başlat."""
+    mission_data['start_requested'] = True
+    print("📡 [DASHBOARD] Görev başlat isteği alındı")
+    return jsonify({'ok': True})
+
+@app.route('/api/emergency_stop', methods=['POST'])
+def emergency_stop():
+    """Acil durdur."""
+    mission_data['stop_requested'] = True
+    print("🚨 [DASHBOARD] ACİL DURDUR isteği alındı")
+    return jsonify({'ok': True})
 
 if __name__ == "__main__":
     clean_port(WEB_PORT)

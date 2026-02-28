@@ -4,10 +4,18 @@ import socket
 import numpy as np
 import threading
 import os
+import sys
 from flask import Flask, Response
 import logging
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR) # Gereksiz logları kapat
+
+# --- YARIŞMA MODU (IDA 3.7 - YKİ'ye görüntü aktarımı yasak) ---
+# ANCAK: Kamera İDA üzerinde engelden kaçınma ve hedef tespiti için çalışmaya devam eder.
+# Sadece Flask web yayını (port 5000) kapatılır.
+RACE_MODE = os.environ.get('USV_MODE') == 'race'
+if RACE_MODE:
+    print("🏁 [cam.py] YARIŞMA MODU — Web yayını KAPALI, onboard işleme AKTİF")
 
 # --- AYARLAR ---
 HOST = '127.0.0.1'
@@ -170,5 +178,18 @@ def video_feed():
 if __name__ == '__main__':
     clean_port(WEB_PORT)
     camera_stream = VideoCamera().start()
-    print(f"🌍 WEB ARAYÜZÜ BAŞLATILIYOR: http://0.0.0.0:{WEB_PORT}")
-    app.run(host='0.0.0.0', port=WEB_PORT, threaded=True)
+
+    if RACE_MODE:
+        # YARIŞMA MODU: Kamera çalışıyor (onboard engel tespiti için)
+        # ama web yayını YOK (Şartname 3.7: YKİ'ye görüntü aktarımı yasak)
+        print("📷 [cam.py] Kamera onboard çalışıyor — Web yayını KAPALI")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("📷 [cam.py] Kapatılıyor...")
+    else:
+        # TEST MODU: Tam web yayını
+        print(f"🌍 WEB ARAYÜZÜ BAŞLATILIYOR: http://0.0.0.0:{WEB_PORT}")
+        app.run(host='0.0.0.0', port=WEB_PORT, threaded=True)
+
