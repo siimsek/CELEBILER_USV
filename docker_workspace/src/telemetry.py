@@ -471,17 +471,18 @@ class SmartTelemetry:
 
     def csv_logger(self):
         """Şartname Bölüm 6: Telemetri CSV 1 Hz kayıt"""
+        import csv as csv_mod
         while self.running:
             try:
                 if time.time() - self.last_csv_log_time >= CSV_LOG_INTERVAL:
                     with self.lock:
-                        row = {k: telemetry_data.get(k, 0) for k in COLUMNS}
-                    row_df = pd.DataFrame([row])
-                    row_df.to_csv(CSV_FILE, mode='a', header=False, index=False)
+                        row = [telemetry_data.get(k, '') for k in COLUMNS]
+                    with open(CSV_FILE, 'a', newline='') as f:
+                        csv_mod.writer(f).writerow(row)
                     self.last_csv_log_time = time.time()
-            except Exception as e:
+            except Exception:
                 pass
-            time.sleep(0.2)
+            time.sleep(0.5)
 
     def start(self):
         """Tüm threadleri başlatır."""
@@ -523,15 +524,16 @@ class SmartTelemetry:
                     print("🌊 [SYSTEM] Donanım Bulundu -> SİMÜLASYON KAPATILDI")
                     SIMULATION_MODE = False
                 
-                # Periyodik olarak veri akışını tazele (Her 5 saniyede bir)
-                # Bu, mod simgesinin donmasını veya güncelleme almamasını engeller
-                if self.pixhawk and time.time() % 5 < 1.0:
+                # Periyodik olarak veri akışını tazele (Her 30 saniyede bir)
+                stream_counter = getattr(self, '_stream_refresh_counter', 0) + 1
+                self._stream_refresh_counter = stream_counter
+                if self.pixhawk and stream_counter % 3 == 0:  # 3 * 10s = 30s
                      try:
                          self._request_mavlink_streams(self.pixhawk)
                      except: pass
             
             first_scan = False
-            time.sleep(3)
+            time.sleep(10)
 
     def scan_ports(self):
         """Boştaki portları tarar ve uygun cihazları eşleştirir."""
@@ -688,12 +690,11 @@ class SmartTelemetry:
                 self.motor_ctrl.update_inputs(msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw, rc6)
                 
                 # --- RC DEBUG (Kanal Tespiti) ---
-                # Her 5 mesajda bir (yaklaşık saniyede 1) loga bas
+                # Her 25 mesajda bir (~5 saniyede 1) loga bas — CPU tasarrufu
                 self.rc_debug_counter = getattr(self, 'rc_debug_counter', 0) + 1
-                if self.rc_debug_counter % 5 == 0:
+                if self.rc_debug_counter % 25 == 0:
                     gear_stat = telemetry_data.get('Gear', 'N')
-                    # Hangi kanalın ne yaptığını görmek için hepsini yazdır
-                    print(f"🎮 RC RAW: 1:{msg.chan1_raw} 2:{msg.chan2_raw} 3:{msg.chan3_raw} 4:{msg.chan4_raw} -> Gear:{gear_stat}")
+                    print(f"🎮 RC: 1:{msg.chan1_raw} 2:{msg.chan2_raw} 3:{msg.chan3_raw} 4:{msg.chan4_raw} 6:{msg.chan6_raw} -> {gear_stat}")
 
                 self._update_physics_sim(msg.chan1_raw, msg.chan3_raw)
                 
@@ -912,8 +913,8 @@ class MotorController:
     def control_loop(self):
         print("⚙️ [MOTOR] Kontrolcü Aktif. Yönler: INV_THR={}, INV_STR={}".format(self.INV_THROTTLE, self.INV_STEER))
         while self.active:
-            # 50 Hz Döngü (Daha az lag için 0.05 -> 0.02)
-            time.sleep(0.02)
+            # 25 Hz Döngü (RC data 5Hz, motor smoothing yeterli)
+            time.sleep(0.04)
             
             # --- 1. VİTES MANTIĞI (CH6) ---
             # ... (Vites mantığı aynı)
