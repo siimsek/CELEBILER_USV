@@ -1,4 +1,4 @@
-# 🚢 ÇELEBİLER USV - Autonomous Surface Vehicle
+﻿# 🚢 ÇELEBİLER USV - Autonomous Surface Vehicle
 
 <div align="center">
 
@@ -10,7 +10,7 @@
 
 **TEKNOFEST 2026 İDA Competition Entry**
 
-*Otonom İnsansız Su Üstü Aracı — GPS navigasyon, engelden kaçınma ve görev yürütme.*
+*Otonom İnsansız Su Üstü Aracı: GPS navigasyon, engelden kaçınma ve görev yürütme.*
 
 </div>
 
@@ -18,7 +18,7 @@
 
 ## 📖 Genel Bakış
 
-Bu proje, TEKNOFEST İDA (İnsansız Deniz Aracı) yarışması için Raspberry Pi 4 üzerinde Docker container'da çalışan otonom USV yazılım altyapısını içerir. Sistem 3 parkurlu görev yapısını destekler:
+Bu proje, TEKNOFEST İDA (İnsansız Deniz Aracı) yarışması için Raspberry Pi 4 üzerinde Docker container içinde çalışan otonom USV yazılım altyapısını içerir. Sistem 3 parkurlu görev yapısını destekler:
 
 | Parkur | Görev | Sensörler |
 |--------|-------|-----------|
@@ -29,31 +29,16 @@ Bu proje, TEKNOFEST İDA (İnsansız Deniz Aracı) yarışması için Raspberry 
 ## 🏗️ Sistem Mimarisi
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      RASPBERRY PI 4 (HOST)                       │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────────┐ │
-│  │ RPi Camera  │  │ RPLidar S2E  │  │  Pixhawk (MAVLink)      │ │
-│  │ TCP :8888   │  │ UDP :20108   │  │  /dev/ttyACM*           │ │
-│  └──────┬──────┘  └──────┬───────┘  └───────────┬─────────────┘ │
-│         │                │                      │               │
-│         │                │               ┌──────┴──────┐        │
-│         │                │               │  MAVProxy   │        │
-│         │                │               │ UDP :14550  │        │
-│         │                │               │ UDP :14551  │        │
-│         │                │               └─────────────┘        │
-├─────────┴────────────────┴──────────────────────────────────────┤
-│                     DOCKER CONTAINER (ege_ros)                   │
-│                     Ubuntu 22.04 + ROS 2 Humble                  │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐ │
-│  │  cam.py    │  │lidar_map.py│  │telemetry.py│  │usv_main.py │ │
-│  │  Port:5000 │  │  Port:5001 │  │  Port:8080 │  │  (Brain)   │ │
-│  │ 720p MJPEG │  │ Lidar Map  │  │ Dashboard  │  │ State Mach.│ │
-│  └────────────┘  └────────────┘  └──────┬─────┘  └──────┬─────┘ │
-│                                  IPC (dosya) ◄──────────┘       │
-│                                  /root/workspace/control/        │
-└─────────────────────────────────────────────────────────────────┘
+HOST (Raspberry Pi 4)
+├─ rpicam-vid (TCP 8888)
+├─ Lidar modem (UDP 20108)
+└─ Docker: ege_ros (Ubuntu 22.04 + ROS2 Humble)
+   ├─ mavproxy.py -> UDP 14550 (telemetry) + 14551 (usv_main)
+   ├─ telemetry.py (Dashboard + API, Port 8080)
+   ├─ usv_main.py (State Machine / Otonom Beyin)
+   ├─ cam.py (Port 5000, race modunda web kapalı / onboard aktif)
+   ├─ lidar_map.py (Port 5001, race modunda açılmaz)
+   └─ IPC dosyaları: /root/workspace/control
 ```
 
 ## 🛠️ Teknoloji Yığını
@@ -65,46 +50,47 @@ Bu proje, TEKNOFEST İDA (İnsansız Deniz Aracı) yarışması için Raspberry 
 | **Middleware** | ROS 2 Humble, MAVProxy |
 | **Diller** | Python 3.10+, Bash |
 | **Web Framework** | Flask (MJPEG streaming, REST API) |
-| **Bilgisayar Görüşü** | OpenCV (Renk tespiti, HUD overlay) |
+| **Bilgisayar Görüşü** | OpenCV (renk tespiti, HUD overlay) |
 | **Uçuş Kontrolü** | MAVLink via pymavlink (ArduRover) |
-| **Veri İşleme** | NumPy (Vektörize Lidar işleme) |
+| **Veri İşleme** | NumPy |
 
 ## 📁 Proje Yapısı
 
 ```
 CELEBILER_USV/
 ├── host_scripts/
-│   ├── system_start.sh          # 🔑 Ana başlatma scripti
-│   ├── system_stop.sh           # Güvenli kapatma
-│   └── usv_logs.sh              # Log izleme aracı
+│   ├── system_start.sh               # Ana başlatma scripti
+│   ├── system_stop.sh                # Güvenli kapatma
+│   ├── usv_logs.sh                   # Log izleme
+│   ├── check_compliance_static.py    # Statik uyum kontrolü
+│   └── check_compliance_behavior.py  # Davranışsal uyum kontrolü
 ├── docker_workspace/
 │   ├── src/
-│   │   ├── usv_main.py          # 🧠 Otonom beyin (State Machine)
-│   │   ├── telemetry.py         # 🌐 Dashboard + Telemetri (8080)
-│   │   ├── cam.py               # 📷 Kamera işleme + web stream (5000)
-│   │   ├── lidar_map.py         # 🗺️ Lidar harita görselleştirme (5001)
-│   │   ├── rc_test.py           # RC override test aracı
-│   │   └── auto_dry_test.py     # Kara testi scripti
-│   ├── scripts/
-│   │   └── internal_start.sh    # Docker içi başlatma (mavproxy + servisler)
-│   ├── mission.json             # 📍 Görev noktaları (GPS waypoints)
-│   └── logs/                    # Telemetri CSV & video logları
-├── config/
-│   └── usv_mode.cfg             # test | race mod seçimi
-├── documents/
-│   └── ida_sartname.md          # TEKNOFEST şartname
+│   │   ├── usv_main.py               # Otonom beyin (state machine)
+│   │   ├── telemetry.py              # Dashboard + REST API (8080)
+│   │   ├── cam.py                    # Kamera işleme / web stream (5000)
+│   │   ├── lidar_map.py              # Lidar harita servisi (5001)
+│   │   ├── compliance_profile.py     # Tüm eşik/frekans/mod profili
+│   │   ├── console_utils.py          # UTF-8 + Windows konsol log formatı
+│   │   ├── rc_test.py
+│   │   └── auto_dry_test.py
+│   ├── scripts/internal_start.sh     # Docker içi başlatma
+│   ├── mission.json                  # Görev noktaları
+│   └── logs/                         # CSV, video ve servis logları
+├── config/usv_mode.cfg               # test | race
+├── documents/ida_sartname.md
 └── README.md
 ```
 
 ## 🚀 Hızlı Başlangıç
 
-### 1. Repoyu Klonla
+### 1. Repoyu klonla
 ```bash
 git clone https://github.com/celebiler/CELEBILER_USV.git
 cd CELEBILER_USV
 ```
 
-### 2. Görev Noktalarını Ayarla
+### 2. Görev noktalarını ayarla
 `docker_workspace/mission.json` dosyasını düzenle:
 ```json
 {
@@ -115,7 +101,7 @@ cd CELEBILER_USV
 }
 ```
 
-### 3. Sistemi Başlat (Raspberry Pi üzerinde)
+### 3. Sistemi başlat (Raspberry Pi üzerinde)
 ```bash
 # Test modu (varsayılan)
 ./host_scripts/system_start.sh
@@ -124,52 +110,69 @@ cd CELEBILER_USV
 ./host_scripts/system_start.sh race
 ```
 
-### 4. Dashboard'a Eriş
-Tarayıcıdan: `http://<RPi_IP>:8080`
+### 4. Dashboard erişimi
+Tarayıcı: `http://<RPi_IP>:8080`
 
 ## 🌐 Web Arayüzleri
 
 | Port | Servis | Açıklama | Yarışma Modu |
-|------|--------|----------|-------------|
-| `8080` | Mission Control Dashboard | Görev kontrolü, telemetri, sensör verileri | ✅ Aktif |
-| `5000` | Kamera Stream | 720p MJPEG + renk tespiti overlay | ❌ Kapalı (Şartname 3.7) |
-| `5001` | Lidar Haritası | Canlı 2D engel haritası | ❌ Kapalı (Şartname 3.7) |
+|------|--------|----------|--------------|
+| `8080` | Mission Control Dashboard | Görev kontrolü, telemetri, API | ✅ Aktif |
+| `5000` | Kamera Stream (`cam.py`) | 720p MJPEG + renk tespiti overlay | ❌ Web kapalı, onboard işleme aktif |
+| `5001` | Lidar Harita (`lidar_map.py`) | Canlı 2D engel haritası | ❌ Başlatılmaz |
 
 ## 🎮 Dashboard Özellikleri
 
 Tek sayfa Mission Control arayüzü:
 
-- **Mission Control Paneli** — Görev timer, parkur durumu, progress bar, kontrol butonları
-- **Kontrol Butonları** — ▶ Görevi Başlat / ⏭ Sonraki Parkur / ⛔ Acil Durdur
-- **Kamera + Lidar Feed** — Canlı görüntü (sadece test modunda)
-- **Telemetri Kartları** — Batarya, GPS, Hız/Yön, Atmosfer, RC Stickler, Motor PWM
-- **Sistem Metrikleri** — CPU, RAM, Sıcaklık
+- **Mission paneli**: Görev timer, parkur durumu, progress
+- **Kontrol butonları**: ▶ Görevi Başlat / ⛔ Acil Durdur
+- **Telemetri kartları**: Batarya, GPS, hız/yön, atmosfer, RC, motor PWM
+- **Sistem metrikleri**: CPU, RAM, sıcaklık
+- **5 Hz dashboard polling** + **kritik olay akışı** (`/api/events`)
 
 ## 🔧 Temel Özellikler
 
-- **Mod Ayrımı:** `test` (tam web yayını + manuel parkur geçişi) / `race` (onboard only, Şartname uyumlu)
-- **MAVProxy Port Paylaşımı:** Pixhawk'a `telemetry.py` ve `usv_main.py` aynı anda erişir
-- **Dosya Tabanlı IPC:** Dashboard ↔ Otonom beyin arası güvenli iletişim
-- **Simülasyon Modu:** Donanım yoksa otomatik sahte veri üretimi
-- **Performans Optimizasyonu:** Native CSV, 25Hz motor loop, akıllı log filtreleme
-- **STM32 Entegrasyonu:** Çevresel sensörler (Sıcaklık, Nem, Yağmur)
-- **RC Kumanda:** Cruise control, soft-start ramping, vites mantığı (CH6 switch)
-- **Şartname Uyumu:** 20dk uyarı timer, GPS JSON (float), bounding box formatı
+- **Mod ayrımı**: `test` (tam geliştirme görünürlüğü), `race` (şartnameye uygun kısıtlı yayın).
+- **Race start politikası**: Yarış modunda görev start **yalnızca RC CH5 >= 1700** ile yapılır. API start race modunda 403 döner.
+- **Dosya tabanlı IPC**: `telemetry.py` ↔ `usv_main.py` (`/root/workspace/control`).
+- **Fail-safe (çift katman)**: Telemetri link heartbeat ana tetik, onboard heartbeat yedek tetik (5s warning, 30s hold).
+- **Manuel/otonom arbitraj**: Mission aktif/lock/estop/AUTO-GUIDED-HOLD modlarında manuel motor override neutral lock.
+- **RC timeout güvenliği**: RC güncel değilse motor çıkışları neutral hold.
+- **MAVProxy port paylaşımı**: Pixhawk verisi aynı anda `telemetry.py` ve `usv_main.py` tarafından tüketilir.
+- **Simülasyon modu**: Donanım yoksa sahte telemetri ile akış devam eder.
+- **Uyumluluk kontrolleri**: `check_compliance_static.py` ve `check_compliance_behavior.py`.
+- **Windows terminal desteği**: `console_utils.py` ile UTF-8, okunabilir zaman damgalı ve renkli log formatı.
+
+## 🔌 API Özeti
+
+| Endpoint | Yöntem | Açıklama |
+|----------|--------|----------|
+| `/api/data` | GET | Dashboard verisi + report_view + health alanları |
+| `/api/mission_status` | GET | Görev aktiflik ve geçen süre |
+| `/api/events` | GET | Kritik olay akışı (long-poll) |
+| `/api/start_mission` | POST | Test modunda görev başlatma |
+| `/api/emergency_stop` | POST | Acil durdurma |
+
+Notlar:
+- Race modunda `/api/start_mission` politika gereği engellidir.
+- Olay akışında `gate_gecildi`, `failsafe`, `estop`, `timeout` yayınlanır.
 
 ## 📡 Port Haritası
 
 | Port | Protokol | Kullanım |
 |------|----------|----------|
-| `8080` | HTTP | Telemetri Dashboard |
-| `5000` | HTTP/MJPEG | Kamera Web Stream |
-| `5001` | HTTP | Lidar Haritası |
-| `8888` | TCP | Ham Kamera (Host → Docker) |
+| `8080` | HTTP | Dashboard + API |
+| `5000` | HTTP/MJPEG | Kamera web stream (test) |
+| `5001` | HTTP | Lidar haritası (test) |
+| `8888` | TCP | Ham kamera (Host → Docker) |
 | `14550` | UDP/MAVLink | mavproxy → telemetry.py |
 | `14551` | UDP/MAVLink | mavproxy → usv_main.py |
+| `20108` | UDP | RPLidar S2E |
 
 ## 📜 Lisans
 
-Bu proje MIT Lisansı altında lisanslanmıştır.
+Bu proje MIT lisansı altındadır.
 
 ## 👥 Takım
 

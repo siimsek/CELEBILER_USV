@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 
+from console_utils import make_console_printer
 from compliance_profile import (
     CAMERA_FRAME_TIMEOUT_S,
     COMMS_POLICY,
@@ -50,6 +51,8 @@ from compliance_profile import (
     evaluate_storage_health,
 )
 
+print = make_console_printer("USV")
+
 BAUD_RATE = 115200
 LOOP_DT = 1.0 / CONTROL_HZ
 
@@ -58,6 +61,7 @@ MISSION_FILE = os.environ.get("MISSION_FILE", "/root/workspace/mission.json")
 FLAG_START = f"{CONTROL_DIR}/start_mission.flag"
 FLAG_STOP = f"{CONTROL_DIR}/emergency_stop.flag"
 STATE_FILE = f"{CONTROL_DIR}/mission_state.json"
+LINK_STATE_FILE = f"{CONTROL_DIR}/telemetry_link_state.json"
 CAMERA_STATUS_FILE = f"{CONTROL_DIR}/camera_status.json"
 
 FILE3_MAP_MP4 = f"{LOG_DIR}/file3_local_map.mp4"
@@ -140,7 +144,18 @@ class USVStateMachine:
 
         self.last_heartbeat_time = time.monotonic()
         self.heartbeat_age_s = 0.0
+        self.link_heartbeat_age_s = 0.0
+        self.link_heartbeat_source = "onboard_fallback"
         self.failsafe_state = "normal"
+        self.timeout_count = 0
+        self.error_counters = {
+            "state_write_error": 0,
+            "mav_read_error": 0,
+            "camera_state_read_error": 0,
+            "link_state_read_error": 0,
+        }
+        self._warn_last = {}
+        self._last_race_flag_purge_log = 0.0
 
         self.estop_latched = False
         self.estop_source = ""
@@ -190,6 +205,51 @@ class USVStateMachine:
             return True
         return any(900 <= self.rc_channels.get(f"ch{i}", 0) <= 2100 for i in range(1, 5))
 
+    def _warn_throttled(self, key, message, period_s=5.0):
+        now = time.monotonic()
+        last = self._warn_last.get(key, 0.0)
+        if now - last >= period_s:
+            print(message)
+            self._warn_last[key] = now
+
+    def _bump_error(self, key, message=None, period_s=5.0):
+        self.error_counters[key] = int(self.error_counters.get(key, 0)) + 1
+        if message:
+            self._warn_throttled(f"err_{key}", f"{message} (count={self.error_counters[key]})", period_s=period_s)
+
+    def _refresh_link_heartbeat(self):
+        onboard_age = max(0.0, time.monotonic() - self.last_heartbeat_time)
+        if self.simulation_mode or not self.master:
+            self.link_heartbeat_age_s = 0.0
+            self.link_heartbeat_source = "simulation"
+            return
+
+        link_age = None
+        try:
+            if os.path.exists(LINK_STATE_FILE):
+                with open(LINK_STATE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    link_age = float(data.get("link_heartbeat_age_s", onboard_age))
+                    ts = float(data.get("ts_monotonic", 0.0))
+                    if ts > 0.0:
+                        link_age += max(0.0, time.monotonic() - ts)
+                    link_age = max(0.0, link_age)
+                    self.link_heartbeat_source = "telemetry"
+                else:
+                    self.link_heartbeat_source = "onboard_fallback"
+            else:
+                self.link_heartbeat_source = "onboard_fallback"
+        except Exception as exc:
+            self._bump_error("link_state_read_error", f"[WARN] [LINK] Link state okuma hatasi: {exc}")
+            self.link_heartbeat_source = "onboard_fallback"
+            link_age = None
+
+        if link_age is None:
+            link_age = onboard_age
+
+        self.link_heartbeat_age_s = float(link_age)
+
     def _refresh_health_check(self):
         if self.simulation_mode:
             mavlink_ok = True
@@ -197,7 +257,7 @@ class USVStateMachine:
             rc_ok = True
         else:
             mavlink_ok = bool(self.master is not None)
-            heartbeat_ok = bool(self.heartbeat_age_s < HEARTBEAT_WARN_S)
+            heartbeat_ok = bool(self.link_heartbeat_age_s < HEARTBEAT_WARN_S)
             rc_ok = self._rc_link_active()
 
         estop_safe = bool((not self.estop_latched) and self.rc_channels.get("ch7", 0) <= RC7_SAFE_PWM and not os.path.exists(FLAG_STOP))
@@ -221,42 +281,48 @@ class USVStateMachine:
     def _write_state(self):
         try:
             os.makedirs(CONTROL_DIR, exist_ok=True)
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "state": self.state,
-                        "active": self.mission_active,
-                        "start_time": self.mission_start_time,
-                        "target": self._wp_target,
-                        "wp_info": self._wp_info,
-                        "active_parkur": self._active_parkur_label(),
-                        "gate_count": self.gate_count,
-                        "command_lock": self.command_lock,
-                        "failsafe_state": self.failsafe_state,
-                        "estop_state": self.estop_latched,
-                        "estop_source": self.estop_source or "--",
-                        "camera_ready": self.camera_ready,
-                        "lidar_ready": self.lidar_ready,
-                        "heartbeat_age_s": round(self.heartbeat_age_s, 3),
-                        "v_target": round(self.v_target, 3),
-                        "heading_target": round(self.heading_target, 3),
-                        "health_check": {
-                            "ready": self.health_ready,
-                            "missing": self.health_missing,
-                            "flags": self.health_flags,
-                            "storage": self.health_storage,
-                            "checked_at_monotonic": self.health_checked_at,
-                        },
-                        "ready_state": self.health_ready,
-                        "ready_missing": self.health_missing,
-                        "telemetry_groups": REPORT_TELEMETRY_GROUPS,
-                        "link_topology": LINK_TOPOLOGY,
-                        "comms_policy": COMMS_POLICY,
-                    },
-                    f,
-                )
+            payload = {
+                "ts_monotonic": round(time.monotonic(), 3),
+                "state": self.state,
+                "active": self.mission_active,
+                "start_time": self.mission_start_time,
+                "target": self._wp_target,
+                "wp_info": self._wp_info,
+                "active_parkur": self._active_parkur_label(),
+                "gate_count": self.gate_count,
+                "command_lock": self.command_lock,
+                "failsafe_state": self.failsafe_state,
+                "estop_state": self.estop_latched,
+                "estop_source": self.estop_source or "--",
+                "camera_ready": self.camera_ready,
+                "lidar_ready": self.lidar_ready,
+                "heartbeat_age_s": round(self.heartbeat_age_s, 3),
+                "link_heartbeat_age_s": round(self.link_heartbeat_age_s, 3),
+                "link_heartbeat_source": self.link_heartbeat_source,
+                "v_target": round(self.v_target, 3),
+                "heading_target": round(self.heading_target, 3),
+                "timeout_count": self.timeout_count,
+                "error_counters": dict(self.error_counters),
+                "health_check": {
+                    "ready": self.health_ready,
+                    "missing": self.health_missing,
+                    "flags": self.health_flags,
+                    "storage": self.health_storage,
+                    "checked_at_monotonic": self.health_checked_at,
+                },
+                "ready_state": self.health_ready,
+                "ready_missing": self.health_missing,
+                "telemetry_groups": REPORT_TELEMETRY_GROUPS,
+                "link_topology": LINK_TOPOLOGY,
+                "comms_policy": COMMS_POLICY,
+            }
+
+            tmp_path = f"{STATE_FILE}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp_path, STATE_FILE)
         except Exception as exc:
-            print(f"[WARN] [STATE] Yazma hatası: {exc}")
+            self._bump_error("state_write_error", f"[WARN] [STATE] Yazma hatasi: {exc}")
 
     def _init_file3_recorder(self):
         try:
@@ -287,13 +353,13 @@ class USVStateMachine:
         try:
             if self._file3_writer:
                 self._file3_writer.release()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._warn_throttled("file3_close_writer", f"[WARN] [FILE3] Writer kapatma hatasi: {exc}")
         try:
             if self._file3_index_file:
                 self._file3_index_file.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._warn_throttled("file3_close_index", f"[WARN] [FILE3] Index kapatma hatasi: {exc}")
 
     def _record_file3_if_due(self):
         now = time.monotonic()
@@ -360,8 +426,8 @@ class USVStateMachine:
                 print("[OK] [MAV] Pixhawk UDP:14551")
                 return m
             m.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            self._bump_error("mav_read_error", f"[WARN] [MAV] Mesaj drain hatasi: {exc}")
 
         for port in glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"):
             try:
@@ -573,9 +639,10 @@ class USVStateMachine:
             return False
         try:
             os.remove(path)
-        except Exception:
-            pass
-        return True
+            return True
+        except Exception as exc:
+            print(f"[WARN] [FLAG] Silme hatasi ({path}): {exc}")
+            return False
 
     def _drain_mav_messages(self):
         if self.simulation_mode or not self.master:
@@ -604,8 +671,8 @@ class USVStateMachine:
                     self.rc_channels["ch8"] = getattr(msg, "chan8_raw", 0)
                     if self.rc_channels["ch7"] >= RC7_ESTOP_PWM:
                         self._trigger_estop("RC7", force_rc7=False)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._bump_error("mav_read_error", f"[WARN] [MAV] Mesaj drain hatasi: {exc}")
 
     def _read_camera_status(self):
         default = {
@@ -625,7 +692,8 @@ class USVStateMachine:
                 with open(CAMERA_STATUS_FILE, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
                 data = {**default, **loaded}
-        except Exception:
+        except Exception as exc:
+            self._bump_error("camera_state_read_error", f"[WARN] [CAM] Status okuma hatasi: {exc}")
             data = default
         self.camera_status = data
         self.camera_ready = bool(data.get("frame_age_s", 999.0) < CAMERA_FRAME_TIMEOUT_S)
@@ -640,18 +708,36 @@ class USVStateMachine:
     def _update_watchdog(self):
         if self.simulation_mode or not self.master:
             self.heartbeat_age_s = 0.0
+            self.link_heartbeat_age_s = 0.0
+            self.link_heartbeat_source = "simulation"
             self.failsafe_state = "normal"
             return
+
         self.heartbeat_age_s = time.monotonic() - self.last_heartbeat_time
-        if self.heartbeat_age_s >= HEARTBEAT_FAIL_S and self.failsafe_state != "hold":
-            print("[ESTOP] [FAILSAFE] Heartbeat timeout >=30s")
+        self._refresh_link_heartbeat()
+
+        link_fail = self.link_heartbeat_age_s >= HEARTBEAT_FAIL_S
+        onboard_fail = self.heartbeat_age_s >= HEARTBEAT_FAIL_S
+        link_warn = self.link_heartbeat_age_s >= HEARTBEAT_WARN_S
+        onboard_warn = self.heartbeat_age_s >= HEARTBEAT_WARN_S
+
+        if link_fail and self.link_heartbeat_source == "telemetry" and self.failsafe_state != "hold":
+            print("[ESTOP] [FAILSAFE] Telemetri link heartbeat timeout >=30s")
             self.failsafe_state = "triggered"
             if self.mission_active:
                 self._command_speed_heading(FAILSAFE_SLOW_MPS, 0.0)
                 time.sleep(1.0)
             self.failsafe_state = "hold"
-            self._enter_hold("FAILSAFE_HEARTBEAT")
-        elif self.heartbeat_age_s >= HEARTBEAT_WARN_S:
+            self._enter_hold("FAILSAFE_LINK_HEARTBEAT")
+        elif onboard_fail and self.failsafe_state != "hold":
+            print("[ESTOP] [FAILSAFE] Onboard heartbeat timeout >=30s")
+            self.failsafe_state = "triggered"
+            if self.mission_active:
+                self._command_speed_heading(FAILSAFE_SLOW_MPS, 0.0)
+                time.sleep(1.0)
+            self.failsafe_state = "hold"
+            self._enter_hold("FAILSAFE_ONBOARD_HEARTBEAT")
+        elif link_warn or onboard_warn:
             self.failsafe_state = "warning"
         else:
             self.failsafe_state = "normal"
@@ -701,10 +787,14 @@ class USVStateMachine:
             self._sim_dist = max(0.0, self._sim_dist - random.uniform(0.15, 0.45))
             self.current_heading = (self.current_heading + random.uniform(-5, 5)) % 360
             return self._sim_dist, random.uniform(-6, 6)
-        if self.current_lat == 0.0 and self.current_lon == 0.0:
+        lat = self.current_lat
+        lon = self.current_lon
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
             return 9999.0, 0.0
-        dist = haversine_distance(self.current_lat, self.current_lon, target_lat, target_lon)
-        target_bearing = calculate_bearing(self.current_lat, self.current_lon, target_lat, target_lon)
+        if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+            return 9999.0, 0.0
+        dist = haversine_distance(lat, lon, target_lat, target_lon)
+        target_bearing = calculate_bearing(lat, lon, target_lat, target_lon)
         heading_error = normalize_heading_error(target_bearing - self.current_heading)
         return dist, heading_error
 
@@ -786,12 +876,26 @@ class USVStateMachine:
         self.state = self.STATE_PARKUR1
         self.failsafe_state = "normal"
         self.gate_count = 0
+        self.timeout_count = 0
         self._gate_event_start = None
         self._gate_event_latched = False
         self._wp_target = "--"
         self._wp_info = "-- / --"
-        self._set_mode("AUTO")
-        self._arm()
+        if not self._set_mode("AUTO"):
+            print("❌ [START] AUTO moda gecilemedi")
+            self.mission_active = False
+            self.command_lock = False
+            self.state = self.STATE_IDLE
+            self._write_state()
+            return False
+        if not self._arm():
+            print("❌ [START] Arming basarisiz")
+            self.mission_active = False
+            self.command_lock = False
+            self.state = self.STATE_IDLE
+            self.stop_motors()
+            self._write_state()
+            return False
         self._write_state()
         print("[START] [GOREV] Baslatildi")
         return True
@@ -799,11 +903,20 @@ class USVStateMachine:
     def _navigate_p1_waypoint(self, lat, lon):
         self._sim_dist = 14.0
         hold_start = None
+        next_invalid_log = 0.0
         while self.mission_active:
             if self._check_abort():
                 return False
             dist, heading_err = self._distance_and_heading_error(lat, lon)
             self._wp_target = f"{lat:.7f}, {lon:.7f}"
+            if dist >= 9000.0:
+                self._command_speed_heading(0.0, 0.0)
+                if time.monotonic() >= next_invalid_log:
+                    print("[WARN] [P1] Gecersiz navigasyon verisi, beklemede")
+                    next_invalid_log = time.monotonic() + 1.5
+                self._write_state()
+                time.sleep(LOOP_DT)
+                continue
             if dist <= R_WP_M:
                 if hold_start is None:
                     hold_start = time.monotonic()
@@ -855,12 +968,21 @@ class USVStateMachine:
 
     def _navigate_p2_waypoint(self, lat, lon):
         self._sim_dist = 12.0
+        next_invalid_log = 0.0
         while self.mission_active:
             if self._check_abort():
                 return False
             self._track_gate_event()
             dist, gps_heading_err = self._distance_and_heading_error(lat, lon)
             self._wp_target = f"{lat:.7f}, {lon:.7f}"
+            if dist >= 9000.0:
+                self._command_speed_heading(0.0, 0.0)
+                if time.monotonic() >= next_invalid_log:
+                    print("[WARN] [P2] Gecersiz navigasyon verisi, beklemede")
+                    next_invalid_log = time.monotonic() + 1.5
+                self._write_state()
+                time.sleep(LOOP_DT)
+                continue
             if dist <= R_WP_M:
                 self.stop_motors()
                 return True
@@ -893,6 +1015,7 @@ class USVStateMachine:
     def _run_p3_attempt(self, timeout_s):
         start_t = time.monotonic()
         contact_start = None
+        next_invalid_log = 0.0
         wp = self.waypoints_p3[0] if self.waypoints_p3 else [self.current_lat, self.current_lon]
         self._sim_dist = 10.0
         while self.mission_active and (time.monotonic() - start_t) < timeout_s:
@@ -901,6 +1024,14 @@ class USVStateMachine:
             dist, gps_heading_err = self._distance_and_heading_error(wp[0], wp[1])
             target_detected = bool(self.camera_status.get("target_detected", False))
             target_area = float(self.camera_status.get("target_area_norm", 0.0))
+            if dist >= 9000.0 and not target_detected:
+                self._command_speed_heading(0.0, 0.0)
+                if time.monotonic() >= next_invalid_log:
+                    print("[WARN] [P3] Gecersiz navigasyon/hedef verisi, beklemede")
+                    next_invalid_log = time.monotonic() + 1.5
+                self._write_state()
+                time.sleep(LOOP_DT)
+                continue
             if target_detected:
                 heading_err = float(self.camera_status.get("target_bearing_error_deg", 0.0))
                 speed = max(0.25, P3_MAX_SPEED_MPS * (1.0 - clamp(target_area, 0.0, 0.85)))
@@ -924,6 +1055,10 @@ class USVStateMachine:
 
             self._write_state()
             time.sleep(LOOP_DT)
+        if self.mission_active and (time.monotonic() - start_t) >= timeout_s:
+            self.timeout_count += 1
+            print(f"[TIMEOUT] [P3] Deneme zaman asimi ({timeout_s:.0f}s), sayac={self.timeout_count}")
+            self._write_state()
         return False
 
     def _retreat_and_hold(self):
@@ -971,7 +1106,9 @@ class USVStateMachine:
         self._write_state()
         if not self._wait_p2_ready():
             return False
-        self._set_mode("GUIDED")
+        if not self._set_mode("GUIDED"):
+            print("❌ [P2] GUIDED moda gecilemedi")
+            return False
         if not self.waypoints_p2:
             print("[WARN] [P2] Waypoint yok")
             return True
@@ -1005,7 +1142,9 @@ class USVStateMachine:
         print("  [PARKUR-3] HSV HEDEFLEME + ANGAJMAN")
         print("=" * 52)
         self.state = self.STATE_PARKUR3
-        self._set_mode("GUIDED")
+        if not self._set_mode("GUIDED"):
+            print("❌ [P3] GUIDED moda gecilemedi")
+            return False
         self._write_state()
         if not self.waypoints_p3:
             print("[WARN] [P3] Hedef waypoint yok")
@@ -1076,7 +1215,7 @@ if __name__ == "__main__":
         usv.load_mission(mission_path)
         print("\n[READY] [SISTEM] Hazir - gorev baslatma bekleniyor")
         if USV_MODE == USV_MODE_RACE:
-            print("   Race start: RC CH5 >= 1700 veya harici start flag")
+            print("   Race start: Sadece RC CH5 >= 1700 (API/flag kapali)")
         else:
             print("   Test start: /api/start_mission")
         usv._refresh_health_check()
@@ -1093,10 +1232,16 @@ if __name__ == "__main__":
                 usv._trigger_estop("YKI", force_rc7=True)
 
             if not usv.mission_active:
-                start_from_api = usv._consume_flag(FLAG_START)
+                if USV_MODE == USV_MODE_RACE and os.path.exists(FLAG_START):
+                    usv._consume_flag(FLAG_START)
+                    if (time.monotonic() - usv._last_race_flag_purge_log) >= 2.0:
+                        print("[POLICY] [RACE] API start flag temizlendi (RC-only baslatma politikasi)")
+                        usv._last_race_flag_purge_log = time.monotonic()
+
+                start_from_api = bool(USV_MODE != USV_MODE_RACE and usv._consume_flag(FLAG_START))
                 start_from_rc = bool(USV_MODE == USV_MODE_RACE and usv.rc_channels.get("ch5", 0) >= RC_RACE_START_PWM)
                 if start_from_api or start_from_rc:
-                    src = "API" if start_from_api else "RC"
+                    src = "RC" if start_from_rc else "API"
                     print(f"[START] [START] Kaynak={src}")
                     if usv.start_mission():
                         usv.run()

@@ -9,7 +9,10 @@ import cv2
 import numpy as np
 from flask import Flask, Response
 
+from console_utils import make_console_printer
 from compliance_profile import USV_MODE, USV_MODE_RACE
+
+print = make_console_printer("CAM")
 
 log = logging.getLogger("werkzeug")
 log.setLevel(logging.ERROR)
@@ -60,6 +63,8 @@ class VideoCamera:
         self.frame = None
         self.connected = False
         self.stopped = False
+        self._warn_last = {}
+        self.error_counters = {"status_write_error": 0}
         self.last_frame_ts = 0.0
         self.gate_seen_since = None
         self.last_gate_seen_ts = 0.0
@@ -93,6 +98,22 @@ class VideoCamera:
             print(f"[WARN] [CAM] Video writer hatasi: {exc}")
 
         print(f"[CAM] [CAM] Kamera sistemi baslatiliyor ({HOST}:{PORT})")
+
+    def _warn_throttled(self, key, message, period_s=5.0):
+        now = time.monotonic()
+        last = self._warn_last.get(key, 0.0)
+        if now - last >= period_s:
+            print(message)
+            self._warn_last[key] = now
+
+    def _bump_error(self, key, message=None, period_s=5.0):
+        self.error_counters[key] = int(self.error_counters.get(key, 0)) + 1
+        if message:
+            self._warn_throttled(
+                f"err_{key}",
+                f"{message} (count={self.error_counters[key]})",
+                period_s=period_s,
+            )
 
     def start(self):
         threading.Thread(target=self.update, daemon=True).start()
@@ -134,10 +155,11 @@ class VideoCamera:
 
     def _write_status(self):
         try:
+            self.status["error_counters"] = dict(self.error_counters)
             with open(STATUS_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.status, f)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._bump_error("status_write_error", f"[WARN] [CAM] Status yazma hatasi: {exc}")
 
     def _extract_detections(self, frame):
         small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)

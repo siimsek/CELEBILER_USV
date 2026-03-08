@@ -1,4 +1,5 @@
 import time
+from collections import deque
 import pandas as pd
 from pymavlink import mavutil
 import sys
@@ -11,6 +12,7 @@ import serial
 import math
 from flask import Flask, jsonify, render_template_string, request
 
+from console_utils import make_console_printer
 from compliance_profile import (
     COMMS_POLICY,
     GENERAL_TELEMETRY_HZ,
@@ -22,6 +24,8 @@ from compliance_profile import (
     USV_MODE_RACE,
 )
 
+print = make_console_printer("TELEM")
+
 # --- YAPILANDIRMA VE SABİTLER ---
 BAUD_RATE_PIXHAWK = 115200
 BAUD_RATES_STM32 = [9600, 115200] # Otomatik denenir
@@ -31,6 +35,10 @@ CONTROL_DIR = "/root/workspace/control"
 CSV_FILE = f"{LOG_DIR}/telemetri_verisi.csv"
 RC7_SAFE_PWM = 1100
 RC7_ESTOP_FORCE_PWM = 2011
+PWM_VALID_MIN = 900
+PWM_VALID_MAX = 2100
+RC_SIGNAL_TIMEOUT_S = 1.5
+LINK_STATE_FILE = f"{CONTROL_DIR}/telemetry_link_state.json"
 
 # IPC: usv_main.py ile dosya üzerinden iletişim (farklı süreçler)
 FLAG_START = f"{CONTROL_DIR}/start_mission.flag"
@@ -63,6 +71,115 @@ mission_data = {
     "start_requested": False,  # Görev başlat isteği
     "stop_requested": False,   # Acil durdur isteği
 }
+last_state_cache = dict(mission_data)
+EVENT_QUEUE = deque(maxlen=256)
+EVENT_ID = 0
+EVENT_LAST = {
+    "gate_count": 0,
+    "failsafe_state": "--",
+    "estop_state": False,
+    "timeout_count": 0,
+}
+EVENT_LOCK = threading.Lock()
+
+
+def _is_valid_pwm(value):
+    try:
+        iv = int(value)
+    except (TypeError, ValueError):
+        return False
+    return PWM_VALID_MIN <= iv <= PWM_VALID_MAX
+
+
+def _pick_primary_fallback(primary, fallback, default=1500):
+    if _is_valid_pwm(primary):
+        return int(primary)
+    if _is_valid_pwm(fallback):
+        return int(fallback)
+    return int(default)
+
+
+def _touch_flag(path):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8"):
+            pass
+        return True
+    except Exception as exc:
+        print(f"[WARN] [IPC] Flag yazilamadi ({path}): {exc}")
+        return False
+
+
+def _emit_event(kind, payload=None):
+    global EVENT_ID
+    with EVENT_LOCK:
+        EVENT_ID += 1
+        event = {
+            "id": EVENT_ID,
+            "ts_unix": round(time.time(), 3),
+            "kind": kind,
+            "payload": payload or {},
+        }
+        EVENT_QUEUE.append(event)
+        return event
+
+
+def _sync_events_from_state(state):
+    if not isinstance(state, dict):
+        return
+
+    to_emit = []
+    with EVENT_LOCK:
+        try:
+            gate_count = max(0, int(state.get("gate_count", 0) or 0))
+        except (TypeError, ValueError):
+            gate_count = 0
+        prev_gate = int(EVENT_LAST.get("gate_count", 0) or 0)
+        if gate_count > prev_gate:
+            for idx in range(prev_gate + 1, gate_count + 1):
+                to_emit.append(("gate_gecildi", {"gate_count": idx}))
+        EVENT_LAST["gate_count"] = gate_count
+
+        failsafe_state = str(state.get("failsafe_state", "--"))
+        prev_failsafe = str(EVENT_LAST.get("failsafe_state", "--"))
+        if failsafe_state != prev_failsafe:
+            to_emit.append(
+                (
+                    "failsafe",
+                    {
+                        "state": failsafe_state,
+                        "previous": prev_failsafe,
+                    },
+                )
+            )
+        EVENT_LAST["failsafe_state"] = failsafe_state
+
+        estop_state = bool(state.get("estop_state", False))
+        prev_estop = bool(EVENT_LAST.get("estop_state", False))
+        if estop_state != prev_estop:
+            to_emit.append(
+                (
+                    "estop",
+                    {
+                        "state": estop_state,
+                        "source": state.get("estop_source", "--"),
+                    },
+                )
+            )
+        EVENT_LAST["estop_state"] = estop_state
+
+        try:
+            timeout_count = max(0, int(state.get("timeout_count", 0) or 0))
+        except (TypeError, ValueError):
+            timeout_count = 0
+        prev_timeout = int(EVENT_LAST.get("timeout_count", 0) or 0)
+        if timeout_count > prev_timeout:
+            for idx in range(prev_timeout + 1, timeout_count + 1):
+                to_emit.append(("timeout", {"timeout_count": idx}))
+        EVENT_LAST["timeout_count"] = timeout_count
+
+    for kind, payload in to_emit:
+        _emit_event(kind, payload)
 
 # Flask Uygulaması
 import logging
@@ -187,7 +304,7 @@ HTML_PAGE = """
 <body>
     <header>
         <div class="h-left">
-            <span class="logo">âš“ CELEBILER USV</span>
+            <span class="logo">⚓ CELEBILER USV</span>
             <span class="mode-badge {% if usv_mode == 'race' %}mode-race{% else %}mode-test{% endif %}">
                 {% if usv_mode == 'race' %}🏁 YARIŞMA{% else %}🔧 TEST{% endif %}
             </span>
@@ -224,7 +341,7 @@ HTML_PAGE = """
 
                 <div class="m-btns">
                     <button class="btn btn-start" id="btn_start" onclick="cmdStart()" {% if usv_mode == 'race' %}disabled{% endif %}>▶ Görevi Başlat</button>
-                    <button class="btn btn-stop" id="btn_stop" onclick="cmdStop()">â›” Acil Durdur</button>
+                    <button class="btn btn-stop" id="btn_stop" onclick="cmdStop()">⛔ Acil Durdur</button>
                 </div>
             </div>
         </div>
@@ -455,11 +572,23 @@ class SmartTelemetry:
         self.stm32 = None
         self.pixhawk_port = None
         self.stm32_port = None
+        self.target_system_id = None
         
         self.running = True
         self.lock = threading.Lock()
         self.boot_monotonic = time.monotonic()
         self.last_gnss_epoch = 0.0
+        self.last_link_heartbeat_time = 0.0
+        self.link_heartbeat_age_s = 999.0
+        self._last_link_state_write = 0.0
+        self._warn_last = {}
+        self.error_counters = {
+            "csv_write_error": 0,
+            "mav_read_error": 0,
+            "state_read_error": 0,
+            "rc_override_error": 0,
+            "link_state_write_error": 0,
+        }
         
         # Simülasyon Değişkenleri
         self.sim_lat = 38.4192
@@ -483,6 +612,49 @@ class SmartTelemetry:
             return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(self.last_gnss_epoch))
         return f"MONO+{(time.monotonic() - self.boot_monotonic):.3f}"
 
+    def _warn_throttled(self, key, message, period_s=5.0):
+        now = time.monotonic()
+        last = self._warn_last.get(key, 0.0)
+        if now - last >= period_s:
+            print(message)
+            self._warn_last[key] = now
+
+    def _bump_error(self, key, message=None, period_s=5.0):
+        self.error_counters[key] = int(self.error_counters.get(key, 0)) + 1
+        if message:
+            self._warn_throttled(
+                f"err_{key}",
+                f"{message} (count={self.error_counters[key]})",
+                period_s=period_s,
+            )
+
+    def _publish_link_state(self, force=False):
+        now = time.monotonic()
+        if SIMULATION_MODE:
+            self.link_heartbeat_age_s = 0.0
+        elif self.pixhawk and self.last_link_heartbeat_time > 0.0:
+            self.link_heartbeat_age_s = max(0.0, now - self.last_link_heartbeat_time)
+        else:
+            self.link_heartbeat_age_s = 999.0
+
+        if not force and (now - self._last_link_state_write) < 0.2:
+            return
+
+        payload = {
+            "ts_monotonic": round(now, 3),
+            "link_heartbeat_age_s": round(self.link_heartbeat_age_s, 3),
+            "error_counters": dict(self.error_counters),
+        }
+        try:
+            os.makedirs(CONTROL_DIR, exist_ok=True)
+            tmp_path = f"{LINK_STATE_FILE}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp_path, LINK_STATE_FILE)
+            self._last_link_state_write = now
+        except Exception as exc:
+            self._bump_error("link_state_write_error", f"[WARN] [LINK] state yazim hatasi: {exc}")
+
     def force_estop_relay(self):
         """YKİ E-stop tetiklenince RC7'yi kesme seviyesine zorla."""
         if not self.pixhawk:
@@ -502,7 +674,7 @@ class SmartTelemetry:
             print("🚨 [ESTOP] RC7 force gönderildi")
             return True
         except Exception as e:
-            print(f"⚠️ [ESTOP] RC7 force hatası: {e}")
+            self._bump_error("rc_override_error", f"[WARN] [ESTOP] RC7 force hatasi: {e}")
             return False
 
     def csv_logger(self):
@@ -518,8 +690,8 @@ class SmartTelemetry:
                     with open(CSV_FILE, 'a', newline='') as f:
                         csv_mod.writer(f).writerow(row)
                     self.last_csv_log_time = time.time()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._bump_error("csv_write_error", f"[WARN] [CSV] Yazma hatasi: {exc}")
             time.sleep(0.5)
 
     def start(self):
@@ -568,7 +740,10 @@ class SmartTelemetry:
                 if self.pixhawk and stream_counter % 3 == 0:  # 3 * 10s = 30s
                      try:
                          self._request_mavlink_streams(self.pixhawk)
-                     except: pass
+                     except Exception as exc:
+                         self._warn_throttled("stream_refresh", f"[WARN] [MAV] Stream refresh hatasi: {exc}")
+
+                self._publish_link_state()
             
             first_scan = False
             time.sleep(10)
@@ -614,17 +789,19 @@ class SmartTelemetry:
                     try:
                         line = s.readline().decode('utf-8', errors='ignore').strip()
                         if "tarih" in line and "temp" in line:
-                            print(f"âœ… STM32 Bulundu: {port} @ {baud}")
+                            print(f"✅ STM32 Bulundu: {port} @ {baud}")
                             with self.lock:
                                 self.stm32 = s
                                 self.stm32_port = port
                             detected = True
                             break
-                    except: pass
+                    except Exception as exc:
+                        self._warn_throttled("probe_stm32_line", f"[WARN] [STM32] Satir okuma hatasi: {exc}")
                 
                 if detected: return True
                 s.close()
-            except: pass
+            except Exception as exc:
+                self._warn_throttled("probe_stm32", f"[WARN] [STM32] Probe hatasi ({port}@{baud}): {exc}")
         return False
 
     def _probe_pixhawk(self, port):
@@ -632,14 +809,16 @@ class SmartTelemetry:
         try:
             master = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
             if master.wait_heartbeat(timeout=1):
-                print(f"âœ… Pixhawk Bulundu: {port}")
+                print(f"✅ Pixhawk Bulundu: {port}")
                 self._request_mavlink_streams(master)
                 with self.lock:
                     self.pixhawk = master
                     self.pixhawk_port = port
+                self.last_link_heartbeat_time = time.monotonic()
                 return True
             master.close()
-        except: pass
+        except Exception as exc:
+            self._warn_throttled("probe_pixhawk", f"[WARN] [MAV] Pixhawk probe hatasi ({port}): {exc}")
         return False
 
     def _request_mavlink_streams(self, master):
@@ -686,6 +865,7 @@ class SmartTelemetry:
         
         while self.running:
             if not self.pixhawk:
+                self._publish_link_state()
                 time.sleep(0.1); continue
                 
             try:
@@ -696,9 +876,10 @@ class SmartTelemetry:
                         if msg.chan3_raw > 0:
                             print(f"🎮 [RC] Sinyal Tespit Edildi: CH3={msg.chan3_raw}")
                             rc_logged = True
+                self._publish_link_state()
             except Exception as e:
-                # print(f"❌ MAV Error: {e}")
-                pass
+                self._bump_error("mav_read_error", f"[WARN] [MAV] Okuma hatasi: {e}")
+                self._publish_link_state()
 
     def _process_mavlink_msg(self, msg, rc_logged):
         """MAVLink mesajlarını işleyen yardımcı metot."""
@@ -736,7 +917,7 @@ class SmartTelemetry:
                 self.motor_ctrl.update_inputs(msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw, rc6)
                 
                 # --- RC DEBUG (Kanal Tespiti) ---
-                # Her 25 mesajda bir (~5 saniyede 1) loga bas â€” CPU tasarrufu
+                # Her 25 mesajda bir (~5 saniyede 1) loga bas — CPU tasarrufu
                 self.rc_debug_counter = getattr(self, 'rc_debug_counter', 0) + 1
                 if self.rc_debug_counter % 25 == 0:
                     gear_stat = telemetry_data.get('Gear', 'N')
@@ -764,6 +945,7 @@ class SmartTelemetry:
                     if msg.type not in ignore_types and msg.type <= 30: 
                          print(f"🎯 [SYSTEM LOCKED] Kilitlenen Sistem ID: {src_sys} (Type: {msg.type})")
                          self.target_system_id = src_sys
+                         self.last_link_heartbeat_time = time.monotonic()
                     else:
                         # GCS'i sessizce geç veya çok nadir bas
                         pass
@@ -771,6 +953,7 @@ class SmartTelemetry:
                 # 2. FİLTRE (Sadece hedef sistem)
                 if getattr(self, 'target_system_id', None) != src_sys:
                     return
+                self.last_link_heartbeat_time = time.monotonic()
 
                 # 3. MOD DEĞİŞİM LOGU
                 custom_mode = msg.custom_mode
@@ -842,7 +1025,8 @@ class SmartTelemetry:
             # Not: Gerçek GPS varsa bunu kapatmak isteyebiliriz ama şimdilik hibrit.
             # telemetry_data['Lat'] = self.sim_lat
             # telemetry_data['Lon'] = self.sim_lon
-        except: pass
+        except Exception as exc:
+            self._warn_throttled("physics_sim", f"[WARN] [SIM] Fizik guncelleme hatasi: {exc}")
 
     # --- EKLENEN EKSİK METOTLAR (Move from bottom) ---
     def update_system_metrics(self):
@@ -869,7 +1053,8 @@ class SmartTelemetry:
                 telemetry_data["Sys_CPU"] = min(cpu, 100)
                 telemetry_data["Sys_RAM"] = ram
                 telemetry_data["Sys_Temp"] = temp
-        except: pass
+        except Exception as exc:
+            self._warn_throttled("sys_metrics", f"[WARN] [SYS] Metric okuma hatasi: {exc}")
 
     def update_simulation(self):
         """Donanım yoksa rastgele veriler üretir."""
@@ -915,6 +1100,9 @@ class MotorController:
         self.input_throttle = 1500 # CH3 (Sol Stick)
         self.input_steer = 1500    # CH1 (Sağ Stick)
         self.input_gear = 1000     # CH6 (Switch)
+        self.left_motor_pwm = 1500
+        self.right_motor_pwm = 1500
+        self.last_input_ts = time.monotonic()
         
         # Ayarlar
         self.PWM_NEUTRAL = 1500
@@ -946,15 +1134,13 @@ class MotorController:
         self.thread.start()
 
     def update_inputs(self, rc1, rc2, rc3, rc4, rc6):
-        """RC verilerini güncelle"""
-        # HATA DÜZELTME: RC2/RC4 MANTIĞINA GERİ DÖNÜŞ
-        # Önceki loglarda RC2 ve RC4'ün aktif olduğu teyit edilmişti.
-        # Kullanıcı "kontrol komple gitti" dediği için, çalışan o konfigürasyona dönüyoruz.
-        
-        self.input_throttle = rc2  # Sağ Stick Dikey (Gaz)
-        self.input_steer = rc4     # Sol Stick Yatay (Dümen)
-        
-        if rc6: self.input_gear = rc6
+        """RC verilerini filtreleyip güvenli girişlere dönüştür."""
+        # Primary/fallback: throttle rc2->rc3, steer rc4->rc1
+        self.input_throttle = _pick_primary_fallback(rc2, rc3, default=1500)
+        self.input_steer = _pick_primary_fallback(rc4, rc1, default=1500)
+        if _is_valid_pwm(rc6):
+            self.input_gear = int(rc6)
+        self.last_input_ts = time.monotonic()
 
     def control_loop(self):
         print("⚙️ [MOTOR] Kontrolcü Aktif. Yönler: INV_THR={}, INV_STR={}".format(self.INV_THROTTLE, self.INV_STEER))
@@ -964,11 +1150,32 @@ class MotorController:
 
             # Görev aktif/lock/estop durumunda tek komut üreticisi usv_main olmalıdır.
             state = _read_mission_state()
+            mode_str = str(telemetry_data.get("Mode", "")).upper()
+            mode_locked = ("AUTO" in mode_str) or ("GUIDED" in mode_str) or ("HOLD" in mode_str)
+            try:
+                state_ts = float(state.get("ts_monotonic", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                state_ts = 0.0
+            state_stale = bool(state_ts <= 0.0 or (time.monotonic() - state_ts) > 2.0)
             mission_locked = bool(
                 state.get("active", False)
                 or state.get("command_lock", False)
                 or state.get("estop_state", False)
+                or mode_locked
+                or state_stale
             )
+            if state.get("active", False):
+                lock_reason = "MISSION_ACTIVE"
+            elif state.get("command_lock", False):
+                lock_reason = "COMMAND_LOCK"
+            elif state.get("estop_state", False):
+                lock_reason = "ESTOP"
+            elif mode_locked:
+                lock_reason = "MODE_LOCK"
+            elif state_stale:
+                lock_reason = "STATE_STALE"
+            else:
+                lock_reason = "--"
             if mission_locked:
                 self.target_pwm = 1500
                 self.current_pwm = 1500
@@ -985,12 +1192,42 @@ class MotorController:
                             self.parent.pixhawk.target_component,
                             *rc_override
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        self.parent._bump_error("rc_override_error", f"[WARN] [MOTOR] Lock RC override hatasi: {exc}")
                 with self.parent.lock:
                     telemetry_data["Gear"] = "LOCKED"
                     telemetry_data["Out1"] = 1500
                     telemetry_data["Out3"] = 1500
+                    telemetry_data["Manual_Lock_Reason"] = lock_reason
+                continue
+
+            # RC güncellemesi kesilirse manuel çıkışları nötre al.
+            if (time.monotonic() - self.last_input_ts) > RC_SIGNAL_TIMEOUT_S:
+                self.target_pwm = 1500
+                self.current_pwm = 1500
+                self.current_turn = 0.0
+                self.input_throttle = 1500
+                self.input_steer = 1500
+                self.gear = "NEUTRAL"
+                self.left_motor_pwm = 1500
+                self.right_motor_pwm = 1500
+                if self.parent.pixhawk:
+                    try:
+                        rc_override = [65535] * 8
+                        rc_override[0] = 1500
+                        rc_override[2] = 1500
+                        self.parent.pixhawk.mav.rc_channels_override_send(
+                            self.parent.target_system_id if self.parent.target_system_id else 1,
+                            self.parent.pixhawk.target_component,
+                            *rc_override
+                        )
+                    except Exception as exc:
+                        self.parent._bump_error("rc_override_error", f"[WARN] [MOTOR] RC timeout override hatasi: {exc}")
+                with self.parent.lock:
+                    telemetry_data["Gear"] = "RC_LOSS_HOLD"
+                    telemetry_data["Out1"] = 1500
+                    telemetry_data["Out3"] = 1500
+                    telemetry_data["Manual_Lock_Reason"] = "RC_TIMEOUT"
                 continue
              
             # --- 1. VİTES MANTIĞI (CH6) ---
@@ -1115,6 +1352,7 @@ class MotorController:
                         telemetry_data["Gear"] = self.gear
                         telemetry_data["Out1"] = self.left_motor_pwm
                         telemetry_data["Out3"] = self.right_motor_pwm
+                        telemetry_data["Manual_Lock_Reason"] = "MANUAL_ACTIVE"
                         # Şartname 6: Hız setpoint - motor PWM'lerinden tahmini
                         thrust_norm = ((self.left_motor_pwm - 1500) + (self.right_motor_pwm - 1500)) / 800.0
                         telemetry_data["Speed_Setpoint"] = thrust_norm * 3.0  # m/s tahmini
@@ -1122,7 +1360,7 @@ class MotorController:
                         telemetry_data["RC3"] = self.input_throttle
                         
                 except Exception as e:
-                    pass
+                    self.parent._bump_error("rc_override_error", f"[WARN] [MOTOR] Override hatasi: {e}")
 
 
 
@@ -1133,19 +1371,26 @@ def index():
 
 def _read_mission_state():
     """usv_main tarafından yazılan state dosyasını oku."""
+    global last_state_cache
     try:
         if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, 'r') as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return mission_data
+            with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            if isinstance(state, dict):
+                last_state_cache = state
+                return state
+    except Exception as exc:
+        # Atomic olmayan yazım anında parse hatası olabilir; son geçerli state'e düş.
+        if st is not None:
+            st._bump_error("state_read_error", f"[WARN] [IPC] State okuma hatasi: {exc}")
+    return last_state_cache
 
 @app.route('/api/data')
 def get_data():
     out = dict(telemetry_data)
     out['usv_mode'] = USV_MODE
     state = _read_mission_state()
+    _sync_events_from_state(state)
     out['mission_state'] = state.get('state', mission_data['state'])
     out['mission_active'] = state.get('active', mission_data['active'])
     out['mission_target'] = state.get('target', mission_data['target'])
@@ -1159,6 +1404,20 @@ def get_data():
     out['ready_state'] = state.get('ready_state', False)
     out['ready_missing'] = state.get('ready_missing', [])
     out['heartbeat_age_s'] = state.get('heartbeat_age_s', 0.0)
+    out['link_heartbeat_age_s'] = state.get(
+        'link_heartbeat_age_s',
+        round(st.link_heartbeat_age_s, 3) if st is not None else out['heartbeat_age_s'],
+    )
+    out['timeout_count'] = state.get('timeout_count', 0)
+    state_errors = state.get('error_counters', {})
+    telemetry_errors = dict(st.error_counters) if st is not None else {}
+    if isinstance(state_errors, dict):
+        out['error_counters'] = dict(state_errors)
+    else:
+        out['error_counters'] = {}
+    for k, v in telemetry_errors.items():
+        out['error_counters'][f"telemetry_{k}"] = v
+    out['manual_lock_reason'] = out.get('Manual_Lock_Reason', state.get('manual_lock_reason', '--'))
     out['camera_ready'] = state.get('camera_ready', False)
     out['lidar_ready'] = state.get('lidar_ready', False)
     out['active_parkur'] = state.get('active_parkur', '--')
@@ -1171,6 +1430,11 @@ def get_data():
     out['report_groups'] = REPORT_TELEMETRY_GROUPS
     out['link_topology'] = LINK_TOPOLOGY
     out['comms_policy'] = COMMS_POLICY
+    try:
+        state_ts = float(state.get('ts_monotonic', 0.0) or 0.0)
+    except (TypeError, ValueError):
+        state_ts = 0.0
+    out['state_age_s'] = round(max(0.0, time.monotonic() - state_ts), 3) if state_ts > 0.0 else 999.0
 
     # Report section 3.4 grouped projection for YKI consumers.
     out['report_view'] = {
@@ -1189,20 +1453,25 @@ def get_data():
             'gate_gecildi': bool(out['gate_count'] > 0),
             'failsafe_state': out['failsafe_state'],
             'estop_state': out['estop_state'],
+            'timeout_count': out['timeout_count'],
         },
         'navigation_health': {
             'camera_ready': out['camera_ready'],
             'lidar_ready': out['lidar_ready'],
             'heartbeat_age_s': out['heartbeat_age_s'],
+            'link_heartbeat_age_s': out['link_heartbeat_age_s'],
+            'state_age_s': out['state_age_s'],
         },
         'link_health': {
             'rc_link_active': bool(900 <= telemetry_data.get('RC1', 0) <= 2100 or 900 <= telemetry_data.get('RC3', 0) <= 2100),
-            'telemetry_heartbeat_age_s': out['heartbeat_age_s'],
+            'telemetry_heartbeat_age_s': out['link_heartbeat_age_s'],
+            'onboard_heartbeat_age_s': out['heartbeat_age_s'],
         },
         'safety': {
             'command_lock': out['command_lock'],
             'estop_state': out['estop_state'],
             'estop_source': out['estop_source'],
+            'manual_lock_reason': out['manual_lock_reason'],
             'health_ready': out['ready_state'],
             'health_missing': out['ready_missing'],
         },
@@ -1224,17 +1493,35 @@ def mission_status():
         'elapsed': elapsed
     })
 
+
+@app.route('/api/events')
+def api_events():
+    since_id = request.args.get('since_id', default=0, type=int)
+    timeout_s = request.args.get('timeout_s', default=8.0, type=float)
+    timeout_s = min(max(timeout_s, 0.0), 20.0)
+    deadline = time.monotonic() + timeout_s
+
+    while True:
+        state = _read_mission_state()
+        _sync_events_from_state(state)
+        with EVENT_LOCK:
+            latest_id = EVENT_ID
+            events = [ev for ev in EVENT_QUEUE if ev.get("id", 0) > since_id]
+        if events or time.monotonic() >= deadline:
+            return jsonify({
+                'events': events,
+                'latest_id': latest_id,
+            })
+        time.sleep(0.1)
+
 @app.route('/api/start_mission', methods=['POST'])
 def start_mission():
     """Görevi başlat (usv_main dosya IPC ile algılar)."""
     if USV_MODE == USV_MODE_RACE:
-        return jsonify({'error': 'Race modda start komutu kabul edilmez'}), 403
+        return jsonify({'error': 'Race modunda gorev baslatma sadece RC CH5 ile yapilir (API politikasi kapali).'}), 403
     mission_data['start_requested'] = True
-    try:
-        os.makedirs(CONTROL_DIR, exist_ok=True)
-        open(FLAG_START, 'w').close()
-    except Exception:
-        pass
+    if not _touch_flag(FLAG_START):
+        return jsonify({'error': 'Start flag yazilamadi'}), 500
     print("📡 [DASHBOARD] Görev başlat isteği alındı")
     return jsonify({'ok': True})
 
@@ -1242,16 +1529,14 @@ def start_mission():
 def emergency_stop():
     """Acil durdur (usv_main dosya IPC ile algılar)."""
     mission_data['stop_requested'] = True
-    try:
-        os.makedirs(CONTROL_DIR, exist_ok=True)
-        open(FLAG_STOP, 'w').close()
-    except Exception:
-        pass
+    if not _touch_flag(FLAG_STOP):
+        return jsonify({'error': 'E-stop flag yazilamadi'}), 500
     try:
         if st is not None:
             st.force_estop_relay()
-    except Exception:
-        pass
+    except Exception as exc:
+        if st is not None:
+            st._bump_error("rc_override_error", f"[WARN] [ESTOP] API estop relay hatasi: {exc}")
     print("🚨 [DASHBOARD] ACİL DURDUR isteği alındı")
     return jsonify({'ok': True})
 
