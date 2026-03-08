@@ -562,7 +562,7 @@ HTML_PAGE = """
 """
 
 def clean_port(port):
-    """Belirtilen portu kullanan işlemleri temizler."""
+    import os
     print(f"🧹 Port {port} temizleniyor...")
     os.system(f"fuser -k {port}/tcp > /dev/null 2>&1")
 
@@ -1231,28 +1231,24 @@ class MotorController:
                 continue
              
             # --- 1. VİTES MANTIĞI (CH6) ---
-            # ... (Vites mantığı aynı)
-            
             new_gear = "NEUTRAL"
             if self.input_gear > 1700: new_gear = "FORWARD"
             elif self.input_gear < 1300: new_gear = "REVERSE"
             
             if new_gear != self.gear:
                  if self.gear == "FORWARD" and new_gear == "REVERSE":
-                     if abs(self.current_pwm - 1500) > 10: new_gear = "NEUTRAL"
+                     # Hızımız henüz durma noktasına gelmediyse, NEUTRAL'a alıp yavaşlamasını bekle
+                     if abs(self.current_pwm - 1500) > 25: 
+                         new_gear = "NEUTRAL"
                  elif self.gear == "REVERSE" and new_gear == "FORWARD":
-                     if abs(self.current_pwm - 1500) > 10: new_gear = "NEUTRAL"
+                     if abs(self.current_pwm - 1500) > 25: 
+                         new_gear = "NEUTRAL"
                  self.gear = new_gear
-                 if self.gear == "NEUTRAL": self.target_pwm = 1500
+                 if self.gear == "NEUTRAL": 
+                     self.target_pwm = 1500
 
             # --- 2. CRUISE CONTROL GİRDİSİ (SOL STICK - CH3) ---
-            # Kullanıcı İsteği: Stick ne kadar itilirse o kadar hızlı ivmelensin
-            # Merkez (1500) = Hız değişimi yok.
-            
-            # 2. CRUISE CONTROL (HIZ)
             throttle_raw_diff = self.input_throttle - 1500
-            
-            # Yön Çevirme
             if self.INV_THROTTLE: throttle_raw_diff *= -1
             
             if abs(throttle_raw_diff) > self.PWM_DEADZONE:
@@ -1266,81 +1262,80 @@ class MotorController:
                     elif self.gear == "REVERSE":
                         self.target_pwm = max(self.target_pwm - step_val, self.MAX_REV)
                 else: 
-                    # HIZ AZALT
+                    # HIZ AZALT (Frenleme hissiyatı vermek için daha hızlı yavaşlayabiliriz)
+                    brake_factor = 2.0
                     if self.target_pwm > 1500:
-                        self.target_pwm = max(self.target_pwm - step_val, 1500)
+                        self.target_pwm = max(self.target_pwm - (step_val * brake_factor), 1500)
                     elif self.target_pwm < 1500:
-                        self.target_pwm = min(self.target_pwm + step_val, 1500)
+                        self.target_pwm = min(self.target_pwm + (step_val * brake_factor), 1500)
 
-            # 3. RAMPING (YUMUŞAK GEÇİŞ)
-            diff = self.target_pwm - self.current_pwm
-            if abs(diff) < self.RAMP_STEP:
+            # --- 3. EXPONENTIAL RAMPING (YUMUŞAK GEÇİŞ - LPF) ---
+            # Lineer rampa yerine üstel filtre (Low Pass Filter) ile daha gerçekçi tekne ataleti
+            alpha_pwm = 0.15  # 0.0 - 1.0 (küçük değerler = daha yavaş/yumuşak hızlanma)
+            self.current_pwm += (self.target_pwm - self.current_pwm) * alpha_pwm
+            
+            # Küsüratları temizle ve tam durmayı garantiye al
+            if abs(self.target_pwm - self.current_pwm) < 2.0:
                 self.current_pwm = self.target_pwm
-            else:
-                self.current_pwm += self.RAMP_STEP if diff > 0 else -self.RAMP_STEP
 
-            # --- 4. STEERING MIXING (SKID STEER - DIFFERENTIAL DRIVE) ---
-            # Sağ Stick (CH1): Dönüş
+            # --- 4. MIXING (NORMALIZED DIFFERENTIAL DRIVE) ---
+            # Pixhawk SERVO_PASS_THROUGH ayarlandığında tüm miksaj Python'da yapılır:
+            throttle_norm = (self.current_pwm - 1500) / 400.0  # -1.0 to 1.0
             
-            steer_input = (self.input_steer - 1500) 
-            # Mix Gain: Dönüş hassasiyeti (0.8 = Güçlü dönüş)
-            mix_gain = 0.8
-            target_turn = steer_input * mix_gain
+            steer_input = (self.input_steer - 1500)
+            if self.INV_STEER: steer_input *= -1
             
-            # Steering Ramping (Dönüş Yumuşatma)
-            turn_diff = target_turn - self.current_turn
-            if abs(turn_diff) < self.STEER_RAMP_STEP:
-                self.current_turn = target_turn
-            else:
-                self.current_turn += self.STEER_RAMP_STEP if turn_diff > 0 else -self.STEER_RAMP_STEP
+            # Joystick deadband
+            if abs(steer_input) < 25: steer_input = 0.0
             
-            turn_component = self.current_turn
+            alpha_steer = 0.2
+            self.current_turn += (steer_input - self.current_turn) * alpha_steer
+            steer_norm = self.current_turn / 400.0
+            steer_norm = max(-1.0, min(steer_norm, 1.0))
             
-            cruise_pwm = self.current_pwm
+            # Normalized Mixing
+            left_mix = throttle_norm + steer_norm
+            right_mix = throttle_norm - steer_norm
             
-            # Formül: Sol = Hız + Dönüş, Sağ = Hız - Dönüş
-            left_motor_raw = cruise_pwm + turn_component
-            right_motor_raw = cruise_pwm - turn_component
+            # Limitleri aşarsa orantılı kıs (Normalization)
+            max_mag = max(abs(left_mix), abs(right_mix))
+            if max_mag > 1.0:
+                left_mix /= max_mag
+                right_mix /= max_mag
+                
+            left_pwm_out = int(1500 + left_mix * 400)
+            right_pwm_out = int(1500 + right_mix * 400)
             
             # --- 5. SAFETY CLAMP & DYNAMIC LIMITS ---
+            # İleri viteste aniden tam geri veya geri viteste tam ileri komutlarını yumuşatma
+            if self.gear == "FORWARD":
+                left_pwm_out = max(1450, left_pwm_out)
+                right_pwm_out = max(1450, right_pwm_out)
+            elif self.gear == "REVERSE":
+                left_pwm_out = min(1550, left_pwm_out)
+                right_pwm_out = min(1550, right_pwm_out)
+                
+            if self.gear == "NEUTRAL": 
+                left_pwm_out = 1500
+                right_pwm_out = 1500
+                
+            left_pwm_out = int(max(1100, min(left_pwm_out, 1900)))
+            right_pwm_out = int(max(1100, min(right_pwm_out, 1900)))
             
-            # DİNAMİK LİMİT: Hızlı giderken terse dönmeyi engelle (Güvenli Dönüş)
-            # Eğer ana hız (Cruise) 1550'den büyükse (İleri gidiyoruz),
-            # motorların altına düşebileceği en düşük değer 1450 (Hafif fren/boş) olsun.
-            # 1200 gibi sert geri değerlere inmesin.
+            # Düşük pwm kesilmesi
+            if abs(left_pwm_out - 1500) < 15: left_pwm_out = 1500
+            if abs(right_pwm_out - 1500) < 15: right_pwm_out = 1500
             
-            min_limit = 1100 # Varsayılan (Pivot dönüş serbest)
+            self.left_motor_pwm = left_pwm_out
+            self.right_motor_pwm = right_pwm_out
             
-            if self.gear == "FORWARD" and cruise_pwm > 1550:
-                min_limit = 1450 # Sadece yavaşlayarak dön, geri takma
-            
-            # Motorları güvenli aralığa ve dinamik limite göre kırp
-            self.left_motor_pwm = int(max(min_limit, min(left_motor_raw, 1900)))
-            self.right_motor_pwm = int(max(min_limit, min(right_motor_raw, 1900)))
-            
-            # --- 6. ÇIKISH (MAVLINK OVERRIDE) ---
+            # --- 6. ÇIKIŞ (MAVLINK OVERRIDE) ---
             if self.parent.pixhawk:
                 try:
-                    # ArduRover Skid Mode Setup (Varsayım):
-                    # CH1 Output -> Sol Motor
-                    # CH3 Output -> Sağ Motor
-                    # Biz direkt motor kanallarına PWM basmalıyız.
-                    # RC Override ile bunu yapmak için ArduRover'ın bu kanalları 'PassThrough' yapması gerekebilir.
-                    # VEYA ArduRover'ı "Skid Steering" modunda kullanmayıp, manuel mixing yapıyoruz.
-                    
-                    if self.gear == "NEUTRAL": 
-                        self.left_motor_pwm = 1500
-                        self.right_motor_pwm = 1500
-                    
                     rc_override = [65535]*8
-                    # Dikkat: ArduRover genelde CH1=Steer, CH3=Throttle bekler.
-                    # Eğer biz mixing yapıyorsak, Sol/Sağ motor hangi kanala bağlıysa ONA yollamalıyız.
-                    # Varsayım: Sol Motor -> CH1, Sağ Motor -> CH3 (Sistem Manifestosu'na göre değil, genel standart)
-                    # KULLANICI NOTU: "Symptom B: mot1 jumps output". 
-                    # Biz şimdi hesaplanmış PWM'leri gönderiyoruz.
-                    
-                    rc_override[0] = self.left_motor_pwm   # CH1 (Left Matrix?)
-                    rc_override[2] = self.right_motor_pwm  # CH3 (Right Matrix?)
+                    # Pixhawk CH1 ve CH3 Pass-Through olduğu için direkt Sol ve Sağ gönderilir.
+                    rc_override[0] = left_pwm_out     # CH1 -> SERVO1 (Left ESC)
+                    rc_override[2] = right_pwm_out    # CH3 -> SERVO3 (Right ESC)
                     
                     self.parent.pixhawk.mav.rc_channels_override_send(
                         self.parent.target_system_id if self.parent.target_system_id else 1,
@@ -1350,12 +1345,12 @@ class MotorController:
                     
                     with self.parent.lock:
                         telemetry_data["Gear"] = self.gear
-                        telemetry_data["Out1"] = self.left_motor_pwm
-                        telemetry_data["Out3"] = self.right_motor_pwm
+                        telemetry_data["Out1"] = left_pwm_out
+                        telemetry_data["Out3"] = right_pwm_out
                         telemetry_data["Manual_Lock_Reason"] = "MANUAL_ACTIVE"
-                        # Şartname 6: Hız setpoint - motor PWM'lerinden tahmini
-                        thrust_norm = ((self.left_motor_pwm - 1500) + (self.right_motor_pwm - 1500)) / 800.0
-                        telemetry_data["Speed_Setpoint"] = thrust_norm * 3.0  # m/s tahmini
+                        
+                        thrust_norm = (self.current_pwm - 1500) / 400.0
+                        telemetry_data["Speed_Setpoint"] = thrust_norm * 3.0
                         telemetry_data["RC1"] = self.input_steer
                         telemetry_data["RC3"] = self.input_throttle
                         

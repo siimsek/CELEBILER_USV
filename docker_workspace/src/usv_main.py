@@ -182,6 +182,10 @@ class USVStateMachine:
         self._file3_index_writer = None
         self._file3_last_ts = 0.0
 
+        # IO Caching state
+        self._last_written_state = None
+        self._last_state_write_time = 0.0
+
         self.master = None
         self._connect_pixhawk()
         self._try_connect_lidar()
@@ -317,10 +321,40 @@ class USVStateMachine:
                 "comms_policy": COMMS_POLICY,
             }
 
-            tmp_path = f"{STATE_FILE}.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f)
-            os.replace(tmp_path, STATE_FILE)
+            now = time.monotonic()
+            
+            # Caching Mechanism: Determine if meaningful state has changed (ignoring age/time fluctuations)
+            logical_state_changed = True
+            if self._last_written_state is not None:
+                old = self._last_written_state
+                # Check critical functional elements
+                if (old.get('state') == payload['state'] and
+                    old.get('active') == payload['active'] and
+                    old.get('target') == payload['target'] and
+                    old.get('wp_info') == payload['wp_info'] and
+                    old.get('gate_count') == payload['gate_count'] and
+                    old.get('command_lock') == payload['command_lock'] and
+                    old.get('failsafe_state') == payload['failsafe_state'] and
+                    old.get('estop_state') == payload['estop_state'] and
+                    old.get('estop_source') == payload['estop_source'] and
+                    old.get('v_target') == payload['v_target'] and
+                    old.get('heading_target') == payload['heading_target'] and
+                    old.get('timeout_count') == payload['timeout_count'] and
+                    old.get('camera_ready') == payload['camera_ready'] and
+                    old.get('lidar_ready') == payload['lidar_ready']):
+                    logical_state_changed = False
+            
+            # Write only if logical state changed or 1 second heartbeat timeout exceeded
+            if logical_state_changed or (now - self._last_state_write_time >= 1.0):
+                tmp_path = f"{STATE_FILE}.tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f)
+                os.replace(tmp_path, STATE_FILE)
+                
+                # Update cache
+                self._last_state_write_time = now
+                self._last_written_state = payload
+                
         except Exception as exc:
             self._bump_error("state_write_error", f"[WARN] [STATE] Yazma hatasi: {exc}")
 
@@ -595,18 +629,21 @@ class USVStateMachine:
             print(f"[WARN] [RC7] E-stop komutu hatasi: {exc}")
             return False
 
-    def _set_motor_raw(self, left_pwm, right_pwm):
+    def _set_rc_override(self, left_pwm, right_pwm):
         left_pwm = int(clamp(left_pwm, 1100, 1900))
         right_pwm = int(clamp(right_pwm, 1100, 1900))
         if self.simulation_mode or not self.master:
             return
         try:
+            # Pixhawk CH1/CH3 Pass-Through Modu:
+            # CH1 -> Left Motor ESC
+            # CH3 -> Right Motor ESC
             self.master.mav.rc_channels_override_send(
                 self.master.target_system,
                 self.master.target_component,
-                left_pwm,
+                left_pwm,       # CH1
                 65535,
-                right_pwm,
+                right_pwm,      # CH3
                 65535,
                 65535,
                 65535,
@@ -619,19 +656,36 @@ class USVStateMachine:
     def _command_speed_heading(self, speed_mps, heading_error_deg):
         self.v_target = float(speed_mps)
         self.heading_target = (self.current_heading + heading_error_deg) % 360
-        base_pwm = 1500 + (speed_mps * 170.0)
-        turn_pwm = clamp(heading_error_deg * 2.4, -220, 220)
-        self._set_motor_raw(base_pwm + turn_pwm, base_pwm - turn_pwm)
+        
+        # Otonom Normalizasyon ve Miksaj
+        throttle_norm = clamp((speed_mps * 170.0) / 400.0, -1.0, 1.0)
+        steer_norm = clamp((heading_error_deg * 2.4) / 400.0, -1.0, 1.0)
+        
+        left_mix = throttle_norm + steer_norm
+        right_mix = throttle_norm - steer_norm
+        
+        max_mag = max(abs(left_mix), abs(right_mix))
+        if max_mag > 1.0:
+            left_mix /= max_mag
+            right_mix /= max_mag
+            
+        self._set_rc_override(
+            int(1500 + left_mix * 400),
+            int(1500 + right_mix * 400)
+        )
 
     def _command_reverse(self, reverse_speed_mps):
         self.v_target = -abs(reverse_speed_mps)
         self.heading_target = self.current_heading
-        base_pwm = 1500 - (abs(reverse_speed_mps) * 170.0)
-        self._set_motor_raw(base_pwm, base_pwm)
+        throttle_norm = -clamp((abs(reverse_speed_mps) * 170.0) / 400.0, 0.0, 1.0)
+        self._set_rc_override(
+            int(1500 + throttle_norm * 400),
+            int(1500 + throttle_norm * 400)
+        )
 
     def stop_motors(self):
         self.v_target = 0.0
-        self._set_motor_raw(1500, 1500)
+        self._set_rc_override(1500, 1500)
         self._disarm()
 
     def _consume_flag(self, path):

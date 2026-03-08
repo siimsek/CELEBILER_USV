@@ -211,10 +211,9 @@ def generate():
         time.sleep(0.05)
 
 def clean_port(port):
+    import os
     print(f"🧹 Port {port} temizleniyor...")
     os.system(f"fuser -k {port}/tcp > /dev/null 2>&1")
-    os.system(f"lsof -t -i:{port} | xargs kill -9 > /dev/null 2>&1")
-    time.sleep(0.5)
 
 @app.route("/")
 def map_feed():

@@ -12,6 +12,9 @@ from flask import Flask, Response
 from console_utils import make_console_printer
 from compliance_profile import USV_MODE, USV_MODE_RACE
 
+def clamp(value, min_val, max_val):
+    return max(min_val, min(value, max_val))
+
 print = make_console_printer("CAM")
 
 log = logging.getLogger("werkzeug")
@@ -53,9 +56,9 @@ TARGET_CLASS = os.environ.get("TARGET_CLASS", "KIRMIZI_SANCAK")
 
 
 def clean_port(port):
+    import os
     print(f"🧹 Port {port} temizleniyor...")
-    os.system(f"fuser -k -9 {port}/tcp > /dev/null 2>&1")
-    time.sleep(0.5)
+    os.system(f"fuser -k {port}/tcp > /dev/null 2>&1")
 
 
 class VideoCamera:
@@ -81,6 +84,10 @@ class VideoCamera:
             "target_bearing_error_deg": 0.0,
             "target_area_norm": 0.0,
         }
+        
+        # IO Caching state
+        self._last_written_status = None
+        self._last_status_write_time = 0.0
 
         os.makedirs(VIDEO_DIR, exist_ok=True)
         os.makedirs(CONTROL_DIR, exist_ok=True)
@@ -156,8 +163,29 @@ class VideoCamera:
     def _write_status(self):
         try:
             self.status["error_counters"] = dict(self.error_counters)
-            with open(STATUS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.status, f)
+            
+            now = time.monotonic()
+            logical_state_changed = True
+            
+            if self._last_written_status is not None:
+                old = self._last_written_status
+                if (old.get('gate_detected') == self.status['gate_detected'] and
+                    old.get('gate_passed_event') == self.status['gate_passed_event'] and
+                    old.get('target_detected') == self.status['target_detected'] and
+                    abs(old.get('gate_center_bearing_deg', 0) - self.status['gate_center_bearing_deg']) < 0.1 and
+                    abs(old.get('target_bearing_error_deg', 0) - self.status['target_bearing_error_deg']) < 0.1 and
+                    abs(old.get('target_area_norm', 0) - self.status['target_area_norm']) < 0.01):
+                    logical_state_changed = False
+
+            if logical_state_changed or (now - self._last_status_write_time >= 1.0):
+                tmp_path = f"{STATUS_FILE}.tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(self.status, f)
+                os.replace(tmp_path, STATUS_FILE)
+                
+                self._last_status_write_time = now
+                self._last_written_status = dict(self.status)
+                
         except Exception as exc:
             self._bump_error("status_write_error", f"[WARN] [CAM] Status yazma hatasi: {exc}")
 
