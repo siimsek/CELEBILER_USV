@@ -11,11 +11,12 @@ import os
 import sys
 from flask import Flask, Response
 import logging
+from compliance_profile import USV_MODE, USV_MODE_RACE
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR) # Gereksiz logları kapat
 
 # --- YARIŞMA MODU GUARD (IDA 3.7 - görüntü aktarımı yasak) ---
-if os.environ.get('USV_MODE') == 'race':
+if USV_MODE == USV_MODE_RACE:
     print("🏁 [lidar_map.py] YARIŞMA MODU - Harita yayını başlatılmıyor.")
     sys.exit(0)
 

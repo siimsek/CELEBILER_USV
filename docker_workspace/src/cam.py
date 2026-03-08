@@ -1,199 +1,307 @@
-import cv2
-import time
-import socket
-import numpy as np
-import threading
-import os
-import sys
-from flask import Flask, Response
+import json
 import logging
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR) # Gereksiz logları kapat
+import os
+import socket
+import threading
+import time
 
-# --- YARIŞMA MODU (IDA 3.7 - YKİ'ye görüntü aktarımı yasak) ---
-# ANCAK: Kamera İDA üzerinde engelden kaçınma ve hedef tespiti için çalışmaya devam eder.
-# Sadece Flask web yayını (port 5000) kapatılır.
-RACE_MODE = os.environ.get('USV_MODE') == 'race'
+import cv2
+import numpy as np
+from flask import Flask, Response
+
+from compliance_profile import USV_MODE, USV_MODE_RACE
+
+log = logging.getLogger("werkzeug")
+log.setLevel(logging.ERROR)
+
+RACE_MODE = USV_MODE == USV_MODE_RACE
 if RACE_MODE:
-    print("🏁 [cam.py] YARIŞMA MODU — Web yayını KAPALI, onboard işleme AKTİF")
+    print("[RACE] [cam.py] YARISMA MODU - web yayini kapali, onboard isleme aktif")
 
-# --- AYARLAR ---
-# Host'ta rpicam-vid 0.0.0.0:8888 dinler.
-# --net=host: 127.0.0.1 çalışır. Bridge modunda CAM_HOST=172.17.0.1 verebilirsiniz.
-HOST = os.environ.get('CAM_HOST', '127.0.0.1')
+HOST = os.environ.get("CAM_HOST", "127.0.0.1")
 PORT = 8888
 WEB_PORT = 5000
-SAVE_PATH = "/root/workspace/logs/video/"
+CONTROL_DIR = "/root/workspace/control"
+STATUS_FILE = f"{CONTROL_DIR}/camera_status.json"
+VIDEO_DIR = "/root/workspace/logs/video"
+FILE1_MP4 = f"{VIDEO_DIR}/file1_camera_processed.mp4"
 
-# --- RENK TANIMLAMALARI ---
 COLOR_RANGES = {
     "SARI_ENGEL": {
         "lower": np.array([20, 100, 100]),
         "upper": np.array([35, 255, 255]),
-        "color": (0, 255, 255)
+        "color": (0, 255, 255),
     },
     "YESIL_SANCAK": {
         "lower": np.array([40, 80, 80]),
         "upper": np.array([85, 255, 255]),
-        "color": (0, 255, 0)
+        "color": (0, 255, 0),
     },
     "KIRMIZI_SANCAK": {
         "lower": np.array([0, 150, 100]),
         "upper": np.array([10, 255, 255]),
         "lower2": np.array([170, 150, 100]),
         "upper2": np.array([180, 255, 255]),
-        "color": (0, 0, 255)
-    }
+        "color": (0, 0, 255),
+    },
 }
 
+TARGET_CLASS = os.environ.get("TARGET_CLASS", "KIRMIZI_SANCAK")
+
+
 def clean_port(port):
-    """Portu kullanan süreci (PID) bulur ve öldürür."""
-    import os
     print(f"🧹 Port {port} temizleniyor...")
-    # Fuser ile zorla (-k -9) öldür
     os.system(f"fuser -k -9 {port}/tcp > /dev/null 2>&1")
-    time.sleep(1) # Portun boşa düşmesi için bekle
+    time.sleep(0.5)
+
 
 class VideoCamera:
-    """Basit, Kanıtlanmış Kamera Okuyucu"""
     def __init__(self):
         self.frame = None
         self.connected = False
         self.stopped = False
-        print(f"📡 Kamera Sistemi Başlatılıyor (Host: {HOST}:{PORT})...")
-        
-        if not os.path.exists(SAVE_PATH):
-            os.makedirs(SAVE_PATH)
+        self.last_frame_ts = 0.0
+        self.gate_seen_since = None
+        self.last_gate_seen_ts = 0.0
+        self.last_gate_stable = 0.0
+        self.gate_passed_until = 0.0
+        self.status = {
+            "ts_monotonic": 0.0,
+            "frame_age_s": 999.0,
+            "gate_detected": False,
+            "gate_stable_s": 0.0,
+            "gate_center_bearing_deg": 0.0,
+            "gate_passed_event": False,
+            "target_detected": False,
+            "target_bearing_error_deg": 0.0,
+            "target_area_norm": 0.0,
+        }
+
+        os.makedirs(VIDEO_DIR, exist_ok=True)
+        os.makedirs(CONTROL_DIR, exist_ok=True)
+
+        self.writer = None
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self.writer = cv2.VideoWriter(FILE1_MP4, fourcc, 10.0, (1280, 720))
+            if not self.writer.isOpened():
+                print("[WARN] [CAM] File-1 writer acilamadi")
+                self.writer = None
+            else:
+                print(f"[REC] [CAM] File-1 kaydi: {FILE1_MP4}")
+        except Exception as exc:
+            print(f"[WARN] [CAM] Video writer hatasi: {exc}")
+
+        print(f"[CAM] [CAM] Kamera sistemi baslatiliyor ({HOST}:{PORT})")
 
     def start(self):
         threading.Thread(target=self.update, daemon=True).start()
         return self
 
     def update(self):
-        """Tek bir thread: Soket'ten oku -> self.frame'e yaz. Hepsi bu."""
-        # Host rpicam-vid başlaması için ilk denemeden önce bekle
-        time.sleep(5)
+        time.sleep(3)
         while not self.stopped:
             try:
-                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                client_socket.settimeout(5)
-                client_socket.connect((HOST, PORT))
-                connection = client_socket.makefile('rb')
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.settimeout(5)
+                sock.connect((HOST, PORT))
+                stream = sock.makefile("rb")
                 self.connected = True
-                print("✅ Kamera Bağlantısı Sağlandı!")
+                print("[OK] [CAM] Kamera baglandi")
 
-                stream_bytes = b''
+                stream_bytes = b""
                 while not self.stopped:
-                    data = connection.read(4096)
-                    if not data: break
+                    data = stream.read(4096)
+                    if not data:
+                        break
                     stream_bytes += data
-                    
-                    first = stream_bytes.find(b'\xff\xd8')
-                    last = stream_bytes.find(b'\xff\xd9')
-
+                    first = stream_bytes.find(b"\xff\xd8")
+                    last = stream_bytes.find(b"\xff\xd9")
                     if first != -1 and last != -1:
-                        jpg = stream_bytes[first:last + 2]
-                        stream_bytes = stream_bytes[last + 2:]
+                        jpg = stream_bytes[first : last + 2]
+                        stream_bytes = stream_bytes[last + 2 :]
                         image = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
                         if image is not None:
-                            # ÇÖZÜNÜRLÜK: 720p (Orijinal gelen görüntü zaten 720p ise resize'a gerek yok)
-                            h, w = image.shape[:2]
-                            if (w, h) != (1280, 720):
+                            if image.shape[:2] != (720, 1280):
                                 image = cv2.resize(image, (1280, 720))
                             self.frame = image
-                            
-            except Exception as e:
+                            self.last_frame_ts = time.monotonic()
+            except Exception as exc:
                 self.connected = False
-                print(f"⚠️ Kamera Bağlantısı Yok: {e}")
-                time.sleep(2)
+                print(f"[WARN] [CAM] Baglanti yok: {exc}")
+                time.sleep(1.5)
 
-    def process_frame(self, frame):
-        """Görüntü İşleme (Renk Tespiti)"""
-        if self.frame is None: return frame
+    def _write_status(self):
+        try:
+            with open(STATUS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.status, f)
+        except Exception:
+            pass
 
-        # OPTIMIZASYON: İşleme (Renk Tespiti) küçük resimde yapılır (0.5x)
-        small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-        blurred = cv2.GaussianBlur(small_frame, (5, 5), 0)
-        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+    def _extract_detections(self, frame):
+        small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+        hsv = cv2.cvtColor(cv2.GaussianBlur(small, (5, 5), 0), cv2.COLOR_BGR2HSV)
+        detections = []
 
         for name, params in COLOR_RANGES.items():
             mask = cv2.inRange(hsv, params["lower"], params["upper"])
             if "lower2" in params:
                 mask2 = cv2.inRange(hsv, params["lower2"], params["upper2"])
                 mask = cv2.bitwise_or(mask, mask2)
-
-            # Morfolojik işlemler (daha küçük kernel)
-            kernel = np.ones((3,3), np.uint8)
+            kernel = np.ones((3, 3), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             for cnt in contours:
                 area = cv2.contourArea(cnt)
-                # Küçük resimde 1000/4 = 250 alan eşiği
-                if area > 250:
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    # Koordinatları orijinal boyuta (2x) çevir
-                    x, y, w, h = x*2, y*2, w*2, h*2
-                    
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), params["color"], 2)
-                    cv2.putText(frame, name, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, params["color"], 2)
+                if area < 250:
+                    continue
+                x, y, w, h = cv2.boundingRect(cnt)
+                x, y, w, h = x * 2, y * 2, w * 2, h * 2
+                detections.append(
+                    {
+                        "name": name,
+                        "area": float(area * 4.0),
+                        "x": x,
+                        "y": y,
+                        "w": w,
+                        "h": h,
+                        "cx": x + w / 2.0,
+                        "cy": y + h / 2.0,
+                    }
+                )
+        return detections
 
-        # HUD
+    def process_frame(self, frame):
+        now = time.monotonic()
         h, w = frame.shape[:2]
-        timestamp = time.strftime("%H:%M:%S")
-        cv2.rectangle(frame, (0, 0), (w, 35), (0, 0, 0), -1)
-        cv2.putText(frame, f"REC: {timestamp} | FPS: 30 | LIVE", (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        # Merkez Nişangah
-        cv2.line(frame, (w//2 - 20, h//2), (w//2 + 20, h//2), (200, 200, 200), 2)
-        cv2.line(frame, (w//2, h//2 - 20), (w//2, h//2 + 20), (200, 200, 200), 2)
-        
+        detections = self._extract_detections(frame)
+
+        for det in detections:
+            color = COLOR_RANGES.get(det["name"], {}).get("color", (255, 255, 255))
+            x, y, bw, bh = int(det["x"]), int(det["y"]), int(det["w"]), int(det["h"])
+            cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, 2)
+            cv2.putText(frame, det["name"], (x, max(12, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+        red = [d for d in detections if d["name"] == "KIRMIZI_SANCAK"]
+        green = [d for d in detections if d["name"] == "YESIL_SANCAK"]
+        red_best = max(red, key=lambda d: d["area"]) if red else None
+        green_best = max(green, key=lambda d: d["area"]) if green else None
+
+        gate_detected = bool(red_best and green_best)
+        gate_bearing = 0.0
+        if gate_detected:
+            center_x = (red_best["cx"] + green_best["cx"]) / 2.0
+            gate_bearing = ((center_x - (w / 2.0)) / (w / 2.0)) * 35.0
+            cv2.circle(frame, (int(center_x), int(h * 0.5)), 8, (255, 255, 0), -1)
+            if self.gate_seen_since is None:
+                self.gate_seen_since = now
+            self.last_gate_seen_ts = now
+            self.last_gate_stable = now - self.gate_seen_since
+        else:
+            if self.gate_seen_since is not None and (now - self.last_gate_seen_ts) <= 0.4 and self.last_gate_stable >= 1.0:
+                self.gate_passed_until = now + 0.5
+            self.gate_seen_since = None
+            self.last_gate_stable = 0.0
+
+        gate_passed_event = now < self.gate_passed_until
+
+        target_pool = [d for d in detections if d["name"] == TARGET_CLASS]
+        if not target_pool:
+            target_pool = detections
+        target = max(target_pool, key=lambda d: d["area"]) if target_pool else None
+
+        target_detected = bool(target)
+        target_bearing = 0.0
+        target_area_norm = 0.0
+        if target_detected:
+            target_bearing = ((target["cx"] - (w / 2.0)) / (w / 2.0)) * 35.0
+            target_area_norm = clamp((target["w"] * target["h"]) / float(w * h), 0.0, 1.0)
+            cv2.circle(frame, (int(target["cx"]), int(target["cy"])), 8, (255, 255, 255), -1)
+
+        frame_age = 999.0 if self.last_frame_ts <= 0.0 else max(0.0, now - self.last_frame_ts)
+        self.status = {
+            "ts_monotonic": round(now, 3),
+            "frame_age_s": round(frame_age, 3),
+            "gate_detected": gate_detected,
+            "gate_stable_s": round(self.last_gate_stable, 3),
+            "gate_center_bearing_deg": round(gate_bearing, 3),
+            "gate_passed_event": gate_passed_event,
+            "target_detected": target_detected,
+            "target_bearing_error_deg": round(target_bearing, 3),
+            "target_area_norm": round(target_area_norm, 4),
+        }
+        self._write_status()
+
+        ts_label = time.strftime("%H:%M:%S")
+        cv2.rectangle(frame, (0, 0), (w, 36), (0, 0, 0), -1)
+        cv2.putText(frame, f"REC {ts_label} | FILE1", (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.line(frame, (w // 2 - 20, h // 2), (w // 2 + 20, h // 2), (200, 200, 200), 2)
+        cv2.line(frame, (w // 2, h // 2 - 20), (w // 2, h // 2 + 20), (200, 200, 200), 2)
+
+        if self.writer:
+            self.writer.write(frame)
+
         return frame
 
     def get_frame(self):
-        if not self.connected or self.frame is None:
-            # Simülasyon Karesi (720p)
+        if self.frame is None:
             sim = np.zeros((720, 1280, 3), dtype=np.uint8)
-            cv2.putText(sim, "KAMERA BEKLENIYOR...", (450, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
-            ret, jpeg = cv2.imencode('.jpg', sim)
-            return jpeg.tobytes()
-        
-        processed = self.process_frame(self.frame.copy())
-        ret, jpeg = cv2.imencode('.jpg', processed, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-        return jpeg.tobytes()
+            cv2.putText(sim, "KAMERA BEKLENIYOR...", (430, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+            self.status["ts_monotonic"] = round(time.monotonic(), 3)
+            self.status["frame_age_s"] = 999.0
+            self._write_status()
+            ok, jpeg = cv2.imencode(".jpg", sim)
+            return jpeg.tobytes() if ok else b""
 
-# Flask App
+        processed = self.process_frame(self.frame.copy())
+        ok, jpeg = cv2.imencode(".jpg", processed, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        return jpeg.tobytes() if ok else b""
+
+    def close(self):
+        self.stopped = True
+        if self.writer:
+            self.writer.release()
+
+
 app = Flask(__name__)
 camera_stream = None
 
-@app.route('/')
+
+@app.route("/")
 def video_feed():
     def generate():
         while True:
             frame = camera_stream.get_frame()
             if frame:
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-            time.sleep(0.033) # ~30 FPS limiti
-    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            time.sleep(0.033)
 
-if __name__ == '__main__':
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+if __name__ == "__main__":
     clean_port(WEB_PORT)
     camera_stream = VideoCamera().start()
 
-    if RACE_MODE:
-        # YARIŞMA MODU: Kamera çalışıyor (onboard engel tespiti için)
-        # ama web yayını YOK (Şartname 3.7: YKİ'ye görüntü aktarımı yasak)
-        print("📷 [cam.py] Kamera onboard çalışıyor — Web yayını KAPALI")
-        try:
+    try:
+        if RACE_MODE:
+            print("[CAM] [cam.py] Race modda sadece onboard isleme calisiyor")
             while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("📷 [cam.py] Kapatılıyor...")
-    else:
-        # TEST MODU: Tam web yayını
-        print(f"🌍 WEB ARAYÜZÜ BAŞLATILIYOR: http://0.0.0.0:{WEB_PORT}")
-        app.run(host='0.0.0.0', port=WEB_PORT, threaded=True)
+                if camera_stream.frame is not None:
+                    camera_stream.process_frame(camera_stream.frame.copy())
+                else:
+                    camera_stream.status["ts_monotonic"] = round(time.monotonic(), 3)
+                    camera_stream.status["frame_age_s"] = 999.0
+                    camera_stream._write_status()
+                time.sleep(0.1)
+        else:
+            print(f"[WEB] [CAM] WEB ARAYUZU: http://0.0.0.0:{WEB_PORT}")
+            app.run(host="0.0.0.0", port=WEB_PORT, debug=False, threaded=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        camera_stream.close()
 

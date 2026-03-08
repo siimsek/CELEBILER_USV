@@ -12,6 +12,15 @@ logs/
 *.csv
 __pycache__/
 *.pyc
+*.tmp
+*.bak
+
+# --- Otomatik Uyum Raporları (lokal çıktı) ---
+documents/compliance_report.md
+documents/compliance_report.json
+documents/compliance_behavior_report.md
+documents/compliance_behavior_report.json
+documents/compliance_runtime.log
 
 # --- VS Code ve Sistem Dosyaları ---
 .vscode/

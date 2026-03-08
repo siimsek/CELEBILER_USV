@@ -11,6 +11,17 @@ import serial
 import math
 from flask import Flask, jsonify, render_template_string, request
 
+from compliance_profile import (
+    COMMS_POLICY,
+    GENERAL_TELEMETRY_HZ,
+    LIDAR_PROCESSING_HZ,
+    LINK_TOPOLOGY,
+    OBSTACLE_TELEMETRY_HZ,
+    REPORT_TELEMETRY_GROUPS,
+    USV_MODE,
+    USV_MODE_RACE,
+)
+
 # --- YAPILANDIRMA VE SABİTLER ---
 BAUD_RATE_PIXHAWK = 115200
 BAUD_RATES_STM32 = [9600, 115200] # Otomatik denenir
@@ -18,15 +29,13 @@ WEB_PORT = 8080
 LOG_DIR = "/root/workspace/logs"
 CONTROL_DIR = "/root/workspace/control"
 CSV_FILE = f"{LOG_DIR}/telemetri_verisi.csv"
+RC7_SAFE_PWM = 1100
+RC7_ESTOP_FORCE_PWM = 2011
 
 # IPC: usv_main.py ile dosya üzerinden iletişim (farklı süreçler)
 FLAG_START = f"{CONTROL_DIR}/start_mission.flag"
 FLAG_STOP = f"{CONTROL_DIR}/emergency_stop.flag"
-FLAG_NEXT = f"{CONTROL_DIR}/next_parkur.flag"
 STATE_FILE = f"{CONTROL_DIR}/mission_state.json"
-
-# --- USV MODE (test | race) ---
-USV_MODE = os.environ.get('USV_MODE', 'test')
 
 # --- GLOBAL DURUM ---
 # Şartname Bölüm 6: lat, lon, hız, roll, pitch, heading, hız_setpoint, yön_setpoint
@@ -36,7 +45,7 @@ telemetry_data = {
     "Speed_Setpoint": 0, "Heading_Setpoint": 0,  # Şartname 6 zorunlu alanları
     "STM_Date": "--:--:--", "Env_Temp": 0, "Env_Hum": 0, "Rain_Val": 0, "Rain_Status": "DRY",
     "Sys_CPU": 0, "Sys_RAM": 0, "Sys_Temp": 0,
-    "RC1": 0, "RC2": 0, "RC3": 0, "RC4": 0,
+    "RC1": 0, "RC2": 0, "RC3": 0, "RC4": 0, "RC7": 0,
     "Out1": 0, "Out3": 0
 }
 COLUMNS = list(telemetry_data.keys())
@@ -51,7 +60,6 @@ mission_data = {
     "start_time": 0,    # time.time() başlangıç
     "target": "--",     # Hedef açıklama
     "wp_info": "-- / --",  # Waypoint bilgisi
-    "next_parkur_requested": False,  # Dashboard'dan "sonraki parkur" isteği
     "start_requested": False,  # Görev başlat isteği
     "stop_requested": False,   # Acil durdur isteği
 }
@@ -61,6 +69,7 @@ import logging
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR) # Gereksiz logları kapat
 app = Flask(__name__)
+st = None
 
 # --- DASHBOARD ARAYÜZÜ (HTML/CSS/JS) ---
 HTML_PAGE = """
@@ -178,7 +187,7 @@ HTML_PAGE = """
 <body>
     <header>
         <div class="h-left">
-            <span class="logo">⚓ CELEBILER USV</span>
+            <span class="logo">âš“ CELEBILER USV</span>
             <span class="mode-badge {% if usv_mode == 'race' %}mode-race{% else %}mode-test{% endif %}">
                 {% if usv_mode == 'race' %}🏁 YARIŞMA{% else %}🔧 TEST{% endif %}
             </span>
@@ -214,9 +223,8 @@ HTML_PAGE = """
                 <div class="m-wp">Hedef: <b id="m_target">--</b></div>
 
                 <div class="m-btns">
-                    <button class="btn btn-start" id="btn_start" onclick="cmdStart()">▶ Görevi Başlat</button>
-                    <button class="btn btn-next" id="btn_next" onclick="cmdNext()" disabled>⏭ Sonraki Parkur</button>
-                    <button class="btn btn-stop" id="btn_stop" onclick="cmdStop()">⛔ Acil Durdur</button>
+                    <button class="btn btn-start" id="btn_start" onclick="cmdStart()" {% if usv_mode == 'race' %}disabled{% endif %}>▶ Görevi Başlat</button>
+                    <button class="btn btn-stop" id="btn_stop" onclick="cmdStop()">â›” Acil Durdur</button>
                 </div>
             </div>
         </div>
@@ -382,8 +390,7 @@ HTML_PAGE = """
                         }
 
                         // Buttons
-                        document.getElementById('btn_start').disabled = d.mission_active;
-                        document.getElementById('btn_next').disabled = !d.mission_active || d.usv_mode === 'race';
+                        document.getElementById('btn_start').disabled = d.mission_active || d.usv_mode === 'race';
                         document.getElementById('btn_stop').disabled = !d.mission_active;
 
                         // Mission dot
@@ -416,10 +423,9 @@ HTML_PAGE = """
 
         // Commands
         function cmdStart() { fetch('/api/start_mission', {method:'POST'}).then(()=>{missionRunning=true;}); }
-        function cmdNext() { fetch('/api/next_parkur', {method:'POST'}); }
         function cmdStop() { fetch('/api/emergency_stop', {method:'POST'}).then(()=>{missionRunning=false;}); }
 
-        setInterval(updateStats, 1000);
+        setInterval(updateStats, 200);
         setInterval(updateTimer, 1000);
 
         // Load feeds (test mode only)
@@ -452,6 +458,8 @@ class SmartTelemetry:
         
         self.running = True
         self.lock = threading.Lock()
+        self.boot_monotonic = time.monotonic()
+        self.last_gnss_epoch = 0.0
         
         # Simülasyon Değişkenleri
         self.sim_lat = 38.4192
@@ -469,6 +477,34 @@ class SmartTelemetry:
         # Motor Kontrolcüsünü Başlat
         self.motor_ctrl = MotorController(self)
 
+    def _csv_timestamp(self):
+        """GNSS zamanını önceliklendir, yoksa monotonic fallback kullan."""
+        if self.last_gnss_epoch > 0:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(self.last_gnss_epoch))
+        return f"MONO+{(time.monotonic() - self.boot_monotonic):.3f}"
+
+    def force_estop_relay(self):
+        """YKİ E-stop tetiklenince RC7'yi kesme seviyesine zorla."""
+        if not self.pixhawk:
+            return False
+        try:
+            for _ in range(6):
+                rc_override = [65535] * 8
+                rc_override[6] = RC7_ESTOP_FORCE_PWM
+                self.pixhawk.mav.rc_channels_override_send(
+                    self.target_system_id if getattr(self, "target_system_id", None) else 1,
+                    self.pixhawk.target_component,
+                    *rc_override
+                )
+                time.sleep(0.04)
+            with self.lock:
+                telemetry_data["RC7"] = RC7_ESTOP_FORCE_PWM
+            print("🚨 [ESTOP] RC7 force gönderildi")
+            return True
+        except Exception as e:
+            print(f"⚠️ [ESTOP] RC7 force hatası: {e}")
+            return False
+
     def csv_logger(self):
         """Şartname Bölüm 6: Telemetri CSV 1 Hz kayıt"""
         import csv as csv_mod
@@ -477,6 +513,8 @@ class SmartTelemetry:
                 if time.time() - self.last_csv_log_time >= CSV_LOG_INTERVAL:
                     with self.lock:
                         row = [telemetry_data.get(k, '') for k in COLUMNS]
+                        if row:
+                            row[0] = self._csv_timestamp()
                     with open(CSV_FILE, 'a', newline='') as f:
                         csv_mod.writer(f).writerow(row)
                     self.last_csv_log_time = time.time()
@@ -576,7 +614,7 @@ class SmartTelemetry:
                     try:
                         line = s.readline().decode('utf-8', errors='ignore').strip()
                         if "tarih" in line and "temp" in line:
-                            print(f"✅ STM32 Bulundu: {port} @ {baud}")
+                            print(f"âœ… STM32 Bulundu: {port} @ {baud}")
                             with self.lock:
                                 self.stm32 = s
                                 self.stm32_port = port
@@ -594,7 +632,7 @@ class SmartTelemetry:
         try:
             master = mavutil.mavlink_connection(port, baud=BAUD_RATE_PIXHAWK)
             if master.wait_heartbeat(timeout=1):
-                print(f"✅ Pixhawk Bulundu: {port}")
+                print(f"âœ… Pixhawk Bulundu: {port}")
                 self._request_mavlink_streams(master)
                 with self.lock:
                     self.pixhawk = master
@@ -607,15 +645,15 @@ class SmartTelemetry:
     def _request_mavlink_streams(self, master):
         """Pixhawk'tan gerekli veri akışlarını ister."""
         if not master: return
-        # Genel Veriler (4 Hz)
+        # Genel veriler rapor hedefi: 5 Hz
         master.mav.request_data_stream_send(
             master.target_system, master.target_component,
-            mavutil.mavlink.MAV_DATA_STREAM_ALL, 4, 1
+            mavutil.mavlink.MAV_DATA_STREAM_ALL, GENERAL_TELEMETRY_HZ, 1
         )
-        # RC Kanalları (5 Hz) - Özel İstek
+        # RC kanalları rapor hedefi: 5 Hz
         master.mav.request_data_stream_send(
             master.target_system, master.target_component,
-            mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, 5, 1
+            mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, GENERAL_TELEMETRY_HZ, 1
         )
         print("📨 [MAV] Veri Akış İsteği Gönderildi")
 
@@ -667,7 +705,7 @@ class SmartTelemetry:
         mtype = msg.get_type()
         
         with self.lock:
-            telemetry_data["Timestamp"] = time.strftime("%H:%M:%S")
+            telemetry_data["Timestamp"] = self._csv_timestamp()
             
             if mtype == 'GLOBAL_POSITION_INT':
                 telemetry_data['Lat'] = msg.lat / 1e7
@@ -677,12 +715,19 @@ class SmartTelemetry:
                 mode_str = telemetry_data.get('Mode', '')
                 if 'AUTO' not in mode_str and 'GUIDED' not in mode_str:
                     telemetry_data['Heading_Setpoint'] = msg.hdg / 100.0
+
+            elif mtype == 'GPS_RAW_INT':
+                # time_usec GNSS epoch ise CSV zamanında önceliklidir
+                t_usec = getattr(msg, 'time_usec', 0)
+                if t_usec and t_usec > 1e14:
+                    self.last_gnss_epoch = t_usec / 1e6
                 
             elif mtype == 'RC_CHANNELS':
                 telemetry_data['RC1'] = msg.chan1_raw
                 telemetry_data['RC2'] = msg.chan2_raw
                 telemetry_data['RC3'] = msg.chan3_raw
                 telemetry_data['RC4'] = msg.chan4_raw
+                telemetry_data['RC7'] = getattr(msg, 'chan7_raw', 0)
                 
                 # Motor Kontrolcüsüne Veri Gönder
                 # CH1: Direksiyon, CH3: Gaz Artır/Azalt, CH6: Vites
@@ -691,7 +736,7 @@ class SmartTelemetry:
                 self.motor_ctrl.update_inputs(msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw, rc6)
                 
                 # --- RC DEBUG (Kanal Tespiti) ---
-                # Her 25 mesajda bir (~5 saniyede 1) loga bas — CPU tasarrufu
+                # Her 25 mesajda bir (~5 saniyede 1) loga bas â€” CPU tasarrufu
                 self.rc_debug_counter = getattr(self, 'rc_debug_counter', 0) + 1
                 if self.rc_debug_counter % 25 == 0:
                     gear_stat = telemetry_data.get('Gear', 'N')
@@ -916,7 +961,38 @@ class MotorController:
         while self.active:
             # 25 Hz Döngü (RC data 5Hz, motor smoothing yeterli)
             time.sleep(0.04)
-            
+
+            # Görev aktif/lock/estop durumunda tek komut üreticisi usv_main olmalıdır.
+            state = _read_mission_state()
+            mission_locked = bool(
+                state.get("active", False)
+                or state.get("command_lock", False)
+                or state.get("estop_state", False)
+            )
+            if mission_locked:
+                self.target_pwm = 1500
+                self.current_pwm = 1500
+                self.left_motor_pwm = 1500
+                self.right_motor_pwm = 1500
+                self.gear = "LOCKED"
+                if self.parent.pixhawk:
+                    try:
+                        rc_override = [65535] * 8
+                        rc_override[0] = 1500
+                        rc_override[2] = 1500
+                        self.parent.pixhawk.mav.rc_channels_override_send(
+                            self.parent.target_system_id if self.parent.target_system_id else 1,
+                            self.parent.pixhawk.target_component,
+                            *rc_override
+                        )
+                    except Exception:
+                        pass
+                with self.parent.lock:
+                    telemetry_data["Gear"] = "LOCKED"
+                    telemetry_data["Out1"] = 1500
+                    telemetry_data["Out3"] = 1500
+                continue
+             
             # --- 1. VİTES MANTIĞI (CH6) ---
             # ... (Vites mantığı aynı)
             
@@ -1074,6 +1150,66 @@ def get_data():
     out['mission_active'] = state.get('active', mission_data['active'])
     out['mission_target'] = state.get('target', mission_data['target'])
     out['mission_wp_info'] = state.get('wp_info', mission_data['wp_info'])
+    out['failsafe_state'] = state.get('failsafe_state', '--')
+    out['estop_state'] = state.get('estop_state', False)
+    out['estop_source'] = state.get('estop_source', '--')
+    out['command_lock'] = state.get('command_lock', False)
+    out['gate_count'] = state.get('gate_count', 0)
+    out['health_check'] = state.get('health_check', {})
+    out['ready_state'] = state.get('ready_state', False)
+    out['ready_missing'] = state.get('ready_missing', [])
+    out['heartbeat_age_s'] = state.get('heartbeat_age_s', 0.0)
+    out['camera_ready'] = state.get('camera_ready', False)
+    out['lidar_ready'] = state.get('lidar_ready', False)
+    out['active_parkur'] = state.get('active_parkur', '--')
+    out['telemetry_profile'] = {
+        'general_hz': GENERAL_TELEMETRY_HZ,
+        'obstacle_hz': OBSTACLE_TELEMETRY_HZ,
+        'lidar_processing_hz': LIDAR_PROCESSING_HZ,
+        'critical_events': 'event',
+    }
+    out['report_groups'] = REPORT_TELEMETRY_GROUPS
+    out['link_topology'] = LINK_TOPOLOGY
+    out['comms_policy'] = COMMS_POLICY
+
+    # Report section 3.4 grouped projection for YKI consumers.
+    out['report_view'] = {
+        'mode_state': {
+            'usv_mode': USV_MODE,
+            'vehicle_mode': telemetry_data.get('Mode', '--'),
+            'mission_state': out['mission_state'],
+            'active_parkur': out['active_parkur'],
+        },
+        'mission_progress': {
+            'target': out['mission_target'],
+            'wp_info': out['mission_wp_info'],
+            'gate_count': out['gate_count'],
+        },
+        'event_flags': {
+            'gate_gecildi': bool(out['gate_count'] > 0),
+            'failsafe_state': out['failsafe_state'],
+            'estop_state': out['estop_state'],
+        },
+        'navigation_health': {
+            'camera_ready': out['camera_ready'],
+            'lidar_ready': out['lidar_ready'],
+            'heartbeat_age_s': out['heartbeat_age_s'],
+        },
+        'link_health': {
+            'rc_link_active': bool(900 <= telemetry_data.get('RC1', 0) <= 2100 or 900 <= telemetry_data.get('RC3', 0) <= 2100),
+            'telemetry_heartbeat_age_s': out['heartbeat_age_s'],
+        },
+        'safety': {
+            'command_lock': out['command_lock'],
+            'estop_state': out['estop_state'],
+            'estop_source': out['estop_source'],
+            'health_ready': out['ready_state'],
+            'health_missing': out['ready_missing'],
+        },
+        'energy': {
+            'battery_v': telemetry_data.get('Battery', 0),
+        },
+    }
     return jsonify(out)
 
 @app.route('/api/mission_status')
@@ -1088,23 +1224,11 @@ def mission_status():
         'elapsed': elapsed
     })
 
-@app.route('/api/next_parkur', methods=['POST'])
-def next_parkur():
-    """Test modunda sonraki parkura geçiş isteği."""
-    if USV_MODE != 'test':
-        return jsonify({'error': 'Sadece test modunda kullanılabilir'}), 403
-    mission_data['next_parkur_requested'] = True
-    try:
-        os.makedirs(CONTROL_DIR, exist_ok=True)
-        open(FLAG_NEXT, 'w').close()
-    except Exception:
-        pass
-    print("📡 [DASHBOARD] Sonraki parkur isteği alındı")
-    return jsonify({'ok': True})
-
 @app.route('/api/start_mission', methods=['POST'])
 def start_mission():
     """Görevi başlat (usv_main dosya IPC ile algılar)."""
+    if USV_MODE == USV_MODE_RACE:
+        return jsonify({'error': 'Race modda start komutu kabul edilmez'}), 403
     mission_data['start_requested'] = True
     try:
         os.makedirs(CONTROL_DIR, exist_ok=True)
@@ -1123,6 +1247,11 @@ def emergency_stop():
         open(FLAG_STOP, 'w').close()
     except Exception:
         pass
+    try:
+        if st is not None:
+            st.force_estop_relay()
+    except Exception:
+        pass
     print("🚨 [DASHBOARD] ACİL DURDUR isteği alındı")
     return jsonify({'ok': True})
 
@@ -1130,4 +1259,3 @@ if __name__ == "__main__":
     clean_port(WEB_PORT)
     st = SmartTelemetry()
     st.start()
-
