@@ -1420,6 +1420,8 @@ def get_data():
     out['sensor_fusion'] = sensor_fusion if isinstance(sensor_fusion, dict) else {}
     dynamic_speed_profile = state.get('dynamic_speed_profile', {})
     out['dynamic_speed_profile'] = dynamic_speed_profile if isinstance(dynamic_speed_profile, dict) else {}
+    wind_assist = state.get('wind_assist', {})
+    out['wind_assist'] = wind_assist if isinstance(wind_assist, dict) else {}
     out['telemetry_profile'] = {
         'general_hz': GENERAL_TELEMETRY_HZ,
         'obstacle_hz': OBSTACLE_TELEMETRY_HZ,
@@ -1452,6 +1454,18 @@ def get_data():
         'base_speed_mps': float(out['dynamic_speed_profile'].get('base_speed_mps', 0.0) or 0.0),
         'output_speed_mps': float(out['dynamic_speed_profile'].get('output_speed_mps', 0.0) or 0.0),
     }
+    wind_assist_summary = {
+        'enabled': bool(out['wind_assist'].get('enabled', False)),
+        'mode': out['wind_assist'].get('mode', '--'),
+        'scope': out['wind_assist'].get('scope', []),
+        'active': bool(out['wind_assist'].get('active', False)),
+        'reason': out['wind_assist'].get('reason', '--'),
+        'i_gain': float(out['wind_assist'].get('i_gain', 0.0) or 0.0),
+        'bias_deg': float(out['wind_assist'].get('bias_deg', 0.0) or 0.0),
+        'bias_max_deg': float(out['wind_assist'].get('bias_max_deg', 0.0) or 0.0),
+        'heading_error_abs_deg': float(out['wind_assist'].get('heading_error_abs_deg', 0.0) or 0.0),
+        'corrected_heading_error_deg': float(out['wind_assist'].get('corrected_heading_error_deg', 0.0) or 0.0),
+    }
 
     # Report section 3.4 grouped projection for YKI consumers.
     out['report_view'] = {
@@ -1480,6 +1494,7 @@ def get_data():
             'state_age_s': out['state_age_s'],
             'sensor_fusion': fusion_summary,
             'dynamic_speed_profile': dyn_speed_summary,
+            'wind_assist': wind_assist_summary,
         },
         'link_health': {
             'rc_link_active': bool(900 <= telemetry_data.get('RC1', 0) <= 2100 or 900 <= telemetry_data.get('RC3', 0) <= 2100),

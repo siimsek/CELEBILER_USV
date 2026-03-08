@@ -164,9 +164,16 @@ Tek sayfa Mission Control arayüzü:
   - `/api/data` ve `report_view.navigation_health.dynamic_speed_profile` ile profil görünürlüğü sağlanmıştır.
   - Konsolda throttle'lı `[DYN_SPEED]` logları ile hız kararları izlenebilir.
 
+- **Akıntı ve Rüzgar Düzeltme Asistanı (Integral Crab Steering)**:
+  - Parkur 1 ve Parkur 2'de kalıcı yön sapmalarını telafi etmek için `heading_error` üzerine integral tabanlı `crab angle bias` eklenir.
+  - Aktivasyon yalnızca güvenli koşullarda çalışır (mission aktif, failsafe normal, hız > 0, center obstacle yok, hata eşiği içinde).
+  - Aktivasyon dışı durumda birikim durur, bias kontrollü sönümlenir; bias değeri `±WIND_ASSIST_BIAS_MAX_DEG` ile sınırlandırılır (anti-windup).
+  - Uygulama sırası: P2 engel yön düzeltmesi -> wind-assist heading düzeltmesi -> dinamik hız profili -> center obstacle hız clamp (`FAILSAFE_SLOW_MPS`).
+  - Görev durumuna `wind_assist` bloğu eklenmiştir: `enabled`, `mode`, `scope`, `active`, `reason`, `i_gain`, `bias_deg`, `bias_max_deg`, `heading_error_abs_deg`, `corrected_heading_error_deg`.
+  - `/api/data` ve `report_view.navigation_health.wind_assist` ile görünürdür; throttle'lı `[WIND]` logları (`active/decay/clamped`) üretilir.
+
 ### 🧪 Sıradaki İnovasyon Adayları
 
-- **Akıntı ve Rüzgar Düzeltme Asistanı** (integral tabanlı crab steering)
 - **Termal ve Enerji Hayatta Kalma Modu** (ECO/Limp)
 - **Lidar Kendi-Gövdesini Gizleme** (self-masking / ignore zone)
 - **Geo-Fence & Safe-Halt Virtual Anchor** (sanal çit + bağlantı kaybında pozisyon tutma)
@@ -175,7 +182,7 @@ Tek sayfa Mission Control arayüzü:
 
 | Endpoint | Yöntem | Açıklama |
 |----------|--------|----------|
-| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` + `dynamic_speed_profile` alanları |
+| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` + `dynamic_speed_profile` + `wind_assist` alanları |
 | `/api/mission_status` | GET | Görev aktiflik ve geçen süre |
 | `/api/events` | GET | Kritik olay akışı (long-poll) |
 | `/api/start_mission` | POST | Test modunda görev başlatma |

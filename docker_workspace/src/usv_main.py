@@ -66,6 +66,13 @@ from compliance_profile import (
     T_HOLD_S,
     USV_MODE,
     USV_MODE_RACE,
+    WIND_ASSIST_ACTIVE_ERR_MAX_DEG,
+    WIND_ASSIST_BIAS_MAX_DEG,
+    WIND_ASSIST_DECAY_PER_S,
+    WIND_ASSIST_ENABLED,
+    WIND_ASSIST_I_GAIN,
+    WIND_ASSIST_LOG_PERIOD_S,
+    WIND_ASSIST_SCOPE,
     evaluate_readiness_flags,
     evaluate_storage_health,
 )
@@ -184,6 +191,21 @@ class USVStateMachine:
             "base_speed_mps": 0.0,
             "output_speed_mps": 0.0,
         }
+        self._wind_i_state_deg_s = 0.0
+        self._wind_bias_deg = 0.0
+        self._wind_last_ts = time.monotonic()
+        self.wind_assist = {
+            "enabled": bool(WIND_ASSIST_ENABLED),
+            "mode": "integral_crab_bias",
+            "scope": list(WIND_ASSIST_SCOPE),
+            "active": False,
+            "reason": "idle",
+            "i_gain": float(WIND_ASSIST_I_GAIN),
+            "bias_deg": 0.0,
+            "bias_max_deg": float(WIND_ASSIST_BIAS_MAX_DEG),
+            "heading_error_abs_deg": 0.0,
+            "corrected_heading_error_deg": 0.0,
+        }
 
         self.last_heartbeat_time = time.monotonic()
         self.heartbeat_age_s = 0.0
@@ -289,6 +311,9 @@ class USVStateMachine:
     def _dyn_speed_log(self, key, message):
         self._warn_throttled(f"dyn_speed_{key}", message, period_s=DYN_SPEED_LOG_PERIOD_S)
 
+    def _wind_log(self, key, message):
+        self._warn_throttled(f"wind_{key}", message, period_s=WIND_ASSIST_LOG_PERIOD_S)
+
     def _resolve_dynamic_speed_band(self, heading_error_abs_deg):
         err = max(0.0, float(heading_error_abs_deg))
         if err <= DYN_SPEED_BAND_SOFT_DEG:
@@ -358,6 +383,119 @@ class USVStateMachine:
             "base_speed_mps": 0.0,
             "output_speed_mps": 0.0,
         }
+
+    def _set_wind_assist_idle(self):
+        self._wind_i_state_deg_s = 0.0
+        self._wind_bias_deg = 0.0
+        self._wind_last_ts = time.monotonic()
+        self.wind_assist = {
+            "enabled": bool(WIND_ASSIST_ENABLED),
+            "mode": "integral_crab_bias",
+            "scope": list(WIND_ASSIST_SCOPE),
+            "active": False,
+            "reason": "idle",
+            "i_gain": float(WIND_ASSIST_I_GAIN),
+            "bias_deg": 0.0,
+            "bias_max_deg": float(WIND_ASSIST_BIAS_MAX_DEG),
+            "heading_error_abs_deg": 0.0,
+            "corrected_heading_error_deg": 0.0,
+        }
+
+    def _apply_wind_assist(self, heading_err_deg, parkur_label, speed_mps, center_obstacle=False):
+        try:
+            heading_err = float(heading_err_deg)
+        except (TypeError, ValueError):
+            heading_err = 0.0
+        try:
+            speed = max(0.0, float(speed_mps))
+        except (TypeError, ValueError):
+            speed = 0.0
+
+        now = time.monotonic()
+        dt = max(0.0, min(1.0, now - self._wind_last_ts))
+        self._wind_last_ts = now
+
+        heading_abs = abs(heading_err)
+        active = False
+        reason = "active"
+        if not WIND_ASSIST_ENABLED:
+            reason = "disabled"
+        elif parkur_label not in WIND_ASSIST_SCOPE:
+            reason = "out_of_scope"
+        elif not self.mission_active:
+            reason = "mission_inactive"
+        elif speed <= 0.0:
+            reason = "zero_speed"
+        elif self.failsafe_state != "normal":
+            reason = "failsafe"
+        elif center_obstacle:
+            reason = "center_obstacle"
+        elif heading_abs > WIND_ASSIST_ACTIVE_ERR_MAX_DEG:
+            reason = "err_too_large"
+        else:
+            active = True
+
+        if active:
+            self._wind_i_state_deg_s += heading_err * dt
+            raw_bias = float(WIND_ASSIST_I_GAIN) * self._wind_i_state_deg_s
+            clamped_bias = clamp(raw_bias, -WIND_ASSIST_BIAS_MAX_DEG, WIND_ASSIST_BIAS_MAX_DEG)
+            clamped = abs(raw_bias - clamped_bias) > 1e-6
+            self._wind_bias_deg = float(clamped_bias)
+            if abs(WIND_ASSIST_I_GAIN) > 1e-9:
+                self._wind_i_state_deg_s = self._wind_bias_deg / float(WIND_ASSIST_I_GAIN)
+            corrected_heading_err = heading_err + self._wind_bias_deg
+            if clamped:
+                self._wind_log(
+                    f"{parkur_label}_clamped",
+                    (
+                        f"[WIND] clamped {parkur_label} heading_error={heading_err:.1f}deg "
+                        f"bias={self._wind_bias_deg:.2f}deg limit={WIND_ASSIST_BIAS_MAX_DEG:.1f}deg"
+                    ),
+                )
+                reason = "clamped"
+            else:
+                self._wind_log(
+                    f"{parkur_label}_active",
+                    (
+                        f"[WIND] active {parkur_label} heading_error={heading_err:.1f}deg "
+                        f"bias={self._wind_bias_deg:.2f}deg corrected={corrected_heading_err:.1f}deg"
+                    ),
+                )
+        else:
+            previous_bias = self._wind_bias_deg
+            decay_step = float(WIND_ASSIST_DECAY_PER_S) * dt
+            if self._wind_bias_deg > 0.0:
+                self._wind_bias_deg = max(0.0, self._wind_bias_deg - decay_step)
+            elif self._wind_bias_deg < 0.0:
+                self._wind_bias_deg = min(0.0, self._wind_bias_deg + decay_step)
+            self._wind_bias_deg = float(clamp(self._wind_bias_deg, -WIND_ASSIST_BIAS_MAX_DEG, WIND_ASSIST_BIAS_MAX_DEG))
+            if abs(WIND_ASSIST_I_GAIN) > 1e-9:
+                self._wind_i_state_deg_s = self._wind_bias_deg / float(WIND_ASSIST_I_GAIN)
+            else:
+                self._wind_i_state_deg_s = 0.0
+            corrected_heading_err = heading_err + self._wind_bias_deg
+            if abs(previous_bias - self._wind_bias_deg) > 1e-6:
+                self._wind_log(
+                    f"{parkur_label}_decay",
+                    (
+                        f"[WIND] decay {parkur_label} reason={reason} "
+                        f"bias={previous_bias:.2f}->{self._wind_bias_deg:.2f}deg"
+                    ),
+                )
+
+        self.wind_assist = {
+            "enabled": bool(WIND_ASSIST_ENABLED),
+            "mode": "integral_crab_bias",
+            "scope": list(WIND_ASSIST_SCOPE),
+            "active": bool(active),
+            "reason": reason,
+            "i_gain": float(WIND_ASSIST_I_GAIN),
+            "bias_deg": round(float(self._wind_bias_deg), 3),
+            "bias_max_deg": float(WIND_ASSIST_BIAS_MAX_DEG),
+            "heading_error_abs_deg": round(float(heading_abs), 3),
+            "corrected_heading_error_deg": round(float(corrected_heading_err), 3),
+        }
+        return float(corrected_heading_err)
 
     def _fuse_visual_detection(
         self,
@@ -549,6 +687,19 @@ class USVStateMachine:
                 "base_speed_mps": round(float(dyn_speed_state.get("base_speed_mps", 0.0)), 3),
                 "output_speed_mps": round(float(dyn_speed_state.get("output_speed_mps", 0.0)), 3),
             }
+            wind_state = self.wind_assist if isinstance(self.wind_assist, dict) else {}
+            wind_payload = {
+                "enabled": bool(wind_state.get("enabled", WIND_ASSIST_ENABLED)),
+                "mode": str(wind_state.get("mode", "integral_crab_bias")),
+                "scope": list(wind_state.get("scope", list(WIND_ASSIST_SCOPE))),
+                "active": bool(wind_state.get("active", False)),
+                "reason": str(wind_state.get("reason", "idle")),
+                "i_gain": float(wind_state.get("i_gain", WIND_ASSIST_I_GAIN)),
+                "bias_deg": round(float(wind_state.get("bias_deg", 0.0)), 3),
+                "bias_max_deg": float(wind_state.get("bias_max_deg", WIND_ASSIST_BIAS_MAX_DEG)),
+                "heading_error_abs_deg": round(float(wind_state.get("heading_error_abs_deg", 0.0)), 3),
+                "corrected_heading_error_deg": round(float(wind_state.get("corrected_heading_error_deg", 0.0)), 3),
+            }
             fusion_payload = {
                 "enabled": bool(FUSION_ENABLED),
                 "policy": self.fusion_policy,
@@ -602,6 +753,7 @@ class USVStateMachine:
                 "comms_policy": COMMS_POLICY,
                 "sensor_fusion": fusion_payload,
                 "dynamic_speed_profile": dyn_speed_payload,
+                "wind_assist": wind_payload,
             }
 
             now = time.monotonic()
@@ -626,7 +778,8 @@ class USVStateMachine:
                     old.get('camera_ready') == payload['camera_ready'] and
                     old.get('lidar_ready') == payload['lidar_ready'] and
                     old.get('sensor_fusion') == payload['sensor_fusion'] and
-                    old.get('dynamic_speed_profile') == payload['dynamic_speed_profile']):
+                    old.get('dynamic_speed_profile') == payload['dynamic_speed_profile'] and
+                    old.get('wind_assist') == payload['wind_assist']):
                     logical_state_changed = False
             
             # Write only if logical state changed or 1 second heartbeat timeout exceeded
@@ -1142,6 +1295,7 @@ class USVStateMachine:
         self.v_target = 0.0
         self.heading_target = self.current_heading
         self._set_dynamic_speed_idle()
+        self._set_wind_assist_idle()
         self.stop_motors()
         self._set_mode("HOLD")
         if reason.startswith("FAILSAFE"):
@@ -1244,6 +1398,7 @@ class USVStateMachine:
         self.command_lock = True
         self.state = self.STATE_PARKUR1
         self.failsafe_state = "normal"
+        self._set_wind_assist_idle()
         self.gate_count = 0
         self.timeout_count = 0
         self._gate_event_start = None
@@ -1297,8 +1452,9 @@ class USVStateMachine:
             else:
                 hold_start = None
                 base_speed = P1_SPEED_APPROACH_MPS if dist < 8.0 else P1_SPEED_CRUISE_MPS
-                speed = self._apply_dynamic_speed(base_speed, heading_err, "P1")
-                self._command_speed_heading(speed, heading_err)
+                corrected_heading_err = self._apply_wind_assist(heading_err, "P1", base_speed, center_obstacle=False)
+                speed = self._apply_dynamic_speed(base_speed, corrected_heading_err, "P1")
+                self._command_speed_heading(speed, corrected_heading_err)
             self._write_state()
             time.sleep(LOOP_DT)
         return False
@@ -1383,11 +1539,17 @@ class USVStateMachine:
             elif right_d < D_MIN_M:
                 heading_err += 18.0
 
-            speed = self._apply_dynamic_speed(base_speed, heading_err, "P2")
+            corrected_heading_err = self._apply_wind_assist(
+                heading_err,
+                "P2",
+                base_speed,
+                center_obstacle=center_obstacle,
+            )
+            speed = self._apply_dynamic_speed(base_speed, corrected_heading_err, "P2")
             if center_obstacle:
                 speed = min(speed, FAILSAFE_SLOW_MPS)
 
-            self._command_speed_heading(speed, heading_err)
+            self._command_speed_heading(speed, corrected_heading_err)
             self._write_state()
             time.sleep(LOOP_DT)
         return False
@@ -1507,8 +1669,17 @@ class USVStateMachine:
                 heading_err = float(self.camera_status.get("gate_center_bearing_deg", 0.0))
             else:
                 heading_err = 0.0
-            speed = self._apply_dynamic_speed(P2_WAIT_SPEED_MPS, heading_err, "P2")
-            self._command_speed_heading(speed, heading_err)
+            center_obstacle = self.lidar_center_dist < D_MIN_M
+            corrected_heading_err = self._apply_wind_assist(
+                heading_err,
+                "P2",
+                P2_WAIT_SPEED_MPS,
+                center_obstacle=center_obstacle,
+            )
+            speed = self._apply_dynamic_speed(P2_WAIT_SPEED_MPS, corrected_heading_err, "P2")
+            if center_obstacle:
+                speed = min(speed, FAILSAFE_SLOW_MPS)
+            self._command_speed_heading(speed, corrected_heading_err)
             self._write_state()
             time.sleep(LOOP_DT)
 
@@ -1524,6 +1695,7 @@ class USVStateMachine:
         print("=" * 52)
         self.state = self.STATE_PARKUR3
         self._set_dynamic_speed_idle()
+        self._set_wind_assist_idle()
         if not self._set_mode("GUIDED"):
             print("❌ [P3] GUIDED moda gecilemedi")
             return False
@@ -1585,6 +1757,7 @@ class USVStateMachine:
             self._wp_info = "-- / --"
         self.mission_active = False
         self._set_dynamic_speed_idle()
+        self._set_wind_assist_idle()
         if not self.estop_latched:
             self.command_lock = False
         self.stop_motors()
