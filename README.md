@@ -156,9 +156,16 @@ Tek sayfa Mission Control arayüzü:
   - Görev durumuna `sensor_fusion` bloğu eklenmiştir: `enabled`, `policy`, `ghost_gate_count`, `ghost_target_count`, `last_confirmed_gate_dist_m`, `last_confirmed_target_dist_m`, `lidar_ready`.
   - `/api/data` çıktısına `sensor_fusion` alanı ve `report_view.navigation_health.sensor_fusion` özeti eklenmiştir.
 
+- **Dinamik Hız Profillemesi (Dynamic Speed Profiling / Trajectory Planning)**:
+  - Parkur 1 ve Parkur 2'de hız, `heading_error` şiddetine göre bantlı profil ile otomatik düşürülür (`straight/soft/medium/hard`).
+  - Dönüş bantlarında parkura göre minimum hız tabanı uygulanır (stall önleme), ancak hız hiçbir zaman base komutunu aşmaz.
+  - P2'de merkez engel/failsafe hız limiti korunur ve dinamik profil çıktısından sonra `FAILSAFE_SLOW_MPS` ile sınırlandırılır.
+  - Görev durumuna `dynamic_speed_profile` bloğu eklenmiştir: `enabled`, `mode`, `scope`, `active`, `band`, `factor`, `heading_error_abs_deg`, `base_speed_mps`, `output_speed_mps`.
+  - `/api/data` ve `report_view.navigation_health.dynamic_speed_profile` ile profil görünürlüğü sağlanmıştır.
+  - Konsolda throttle'lı `[DYN_SPEED]` logları ile hız kararları izlenebilir.
+
 ### 🧪 Sıradaki İnovasyon Adayları
 
-- **Dinamik Hız Profillemesi** (heading error temelli hız azalt/arttır)
 - **Akıntı ve Rüzgar Düzeltme Asistanı** (integral tabanlı crab steering)
 - **Termal ve Enerji Hayatta Kalma Modu** (ECO/Limp)
 - **Lidar Kendi-Gövdesini Gizleme** (self-masking / ignore zone)
@@ -168,7 +175,7 @@ Tek sayfa Mission Control arayüzü:
 
 | Endpoint | Yöntem | Açıklama |
 |----------|--------|----------|
-| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` alanları |
+| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` + `dynamic_speed_profile` alanları |
 | `/api/mission_status` | GET | Görev aktiflik ve geçen süre |
 | `/api/events` | GET | Kritik olay akışı (long-poll) |
 | `/api/start_mission` | POST | Test modunda görev başlatma |

@@ -19,6 +19,18 @@ from compliance_profile import (
     CONTROL_HZ,
     CONTROL_DIR,
     D_MIN_M,
+    DYN_SPEED_BAND_HARD_DEG,
+    DYN_SPEED_BAND_MEDIUM_DEG,
+    DYN_SPEED_BAND_SOFT_DEG,
+    DYN_SPEED_ENABLED,
+    DYN_SPEED_FACTOR_HARD,
+    DYN_SPEED_FACTOR_MEDIUM,
+    DYN_SPEED_FACTOR_SOFT,
+    DYN_SPEED_FACTOR_STRAIGHT,
+    DYN_SPEED_LOG_PERIOD_S,
+    DYN_SPEED_MIN_MPS_P1,
+    DYN_SPEED_MIN_MPS_P2,
+    DYN_SPEED_SCOPE,
     FAILSAFE_SLOW_MPS,
     FUSION_BEARING_WINDOW_DEG,
     FUSION_CONFIRM_HOLD_S,
@@ -161,6 +173,17 @@ class USVStateMachine:
         self._target_fusion_hold_since = None
         self._gate_ghost_latched = False
         self._target_ghost_latched = False
+        self.dynamic_speed_profile = {
+            "enabled": bool(DYN_SPEED_ENABLED),
+            "mode": "banded",
+            "scope": list(DYN_SPEED_SCOPE),
+            "active": False,
+            "band": "straight",
+            "factor": float(DYN_SPEED_FACTOR_STRAIGHT),
+            "heading_error_abs_deg": 0.0,
+            "base_speed_mps": 0.0,
+            "output_speed_mps": 0.0,
+        }
 
         self.last_heartbeat_time = time.monotonic()
         self.heartbeat_age_s = 0.0
@@ -262,6 +285,79 @@ class USVStateMachine:
 
     def _fusion_log(self, key, message):
         self._warn_throttled(f"fusion_{key}", message, period_s=FUSION_LOG_PERIOD_S)
+
+    def _dyn_speed_log(self, key, message):
+        self._warn_throttled(f"dyn_speed_{key}", message, period_s=DYN_SPEED_LOG_PERIOD_S)
+
+    def _resolve_dynamic_speed_band(self, heading_error_abs_deg):
+        err = max(0.0, float(heading_error_abs_deg))
+        if err <= DYN_SPEED_BAND_SOFT_DEG:
+            return "straight", float(DYN_SPEED_FACTOR_STRAIGHT)
+        if err <= DYN_SPEED_BAND_MEDIUM_DEG:
+            return "soft", float(DYN_SPEED_FACTOR_SOFT)
+        if err <= DYN_SPEED_BAND_HARD_DEG:
+            return "medium", float(DYN_SPEED_FACTOR_MEDIUM)
+        return "hard", float(DYN_SPEED_FACTOR_HARD)
+
+    def _apply_dynamic_speed(self, base_speed_mps, heading_error_deg, parkur_label):
+        try:
+            base_speed = max(0.0, float(base_speed_mps))
+        except (TypeError, ValueError):
+            base_speed = 0.0
+        try:
+            heading_abs = abs(float(heading_error_deg))
+        except (TypeError, ValueError):
+            heading_abs = 0.0
+
+        band, factor = self._resolve_dynamic_speed_band(heading_abs)
+        active = bool(DYN_SPEED_ENABLED and parkur_label in DYN_SPEED_SCOPE and base_speed > 0.0)
+        output_speed = base_speed
+
+        if active:
+            candidate_speed = base_speed * factor
+            turn_floor = 0.0
+            if band != "straight":
+                if parkur_label == "P1":
+                    turn_floor = DYN_SPEED_MIN_MPS_P1
+                elif parkur_label == "P2":
+                    turn_floor = DYN_SPEED_MIN_MPS_P2
+            output_speed = min(base_speed, max(candidate_speed, turn_floor))
+            self._dyn_speed_log(
+                f"{parkur_label}_{band}",
+                (
+                    f"[DYN_SPEED] {parkur_label} band={band} "
+                    f"heading_error={heading_abs:.1f}deg base={base_speed:.2f}mps output={output_speed:.2f}mps"
+                ),
+            )
+        else:
+            band = "straight"
+            factor = float(DYN_SPEED_FACTOR_STRAIGHT)
+
+        self.dynamic_speed_profile = {
+            "enabled": bool(DYN_SPEED_ENABLED),
+            "mode": "banded",
+            "scope": list(DYN_SPEED_SCOPE),
+            "active": bool(active),
+            "band": band,
+            "factor": round(float(factor), 3),
+            "heading_error_abs_deg": round(float(heading_abs), 3),
+            "base_speed_mps": round(float(base_speed), 3),
+            "output_speed_mps": round(float(output_speed), 3),
+        }
+        return float(output_speed)
+
+    def _set_dynamic_speed_idle(self):
+        self.dynamic_speed_profile = {
+            "enabled": bool(DYN_SPEED_ENABLED),
+            "mode": "banded",
+            "scope": list(DYN_SPEED_SCOPE),
+            "active": False,
+            "band": "straight",
+            "factor": float(DYN_SPEED_FACTOR_STRAIGHT),
+            "heading_error_abs_deg": 0.0,
+            "base_speed_mps": 0.0,
+            "output_speed_mps": 0.0,
+        }
 
     def _fuse_visual_detection(
         self,
@@ -441,6 +537,18 @@ class USVStateMachine:
     def _write_state(self):
         try:
             os.makedirs(CONTROL_DIR, exist_ok=True)
+            dyn_speed_state = self.dynamic_speed_profile if isinstance(self.dynamic_speed_profile, dict) else {}
+            dyn_speed_payload = {
+                "enabled": bool(dyn_speed_state.get("enabled", DYN_SPEED_ENABLED)),
+                "mode": str(dyn_speed_state.get("mode", "banded")),
+                "scope": list(dyn_speed_state.get("scope", list(DYN_SPEED_SCOPE))),
+                "active": bool(dyn_speed_state.get("active", False)),
+                "band": str(dyn_speed_state.get("band", "straight")),
+                "factor": round(float(dyn_speed_state.get("factor", DYN_SPEED_FACTOR_STRAIGHT)), 3),
+                "heading_error_abs_deg": round(float(dyn_speed_state.get("heading_error_abs_deg", 0.0)), 3),
+                "base_speed_mps": round(float(dyn_speed_state.get("base_speed_mps", 0.0)), 3),
+                "output_speed_mps": round(float(dyn_speed_state.get("output_speed_mps", 0.0)), 3),
+            }
             fusion_payload = {
                 "enabled": bool(FUSION_ENABLED),
                 "policy": self.fusion_policy,
@@ -493,6 +601,7 @@ class USVStateMachine:
                 "link_topology": LINK_TOPOLOGY,
                 "comms_policy": COMMS_POLICY,
                 "sensor_fusion": fusion_payload,
+                "dynamic_speed_profile": dyn_speed_payload,
             }
 
             now = time.monotonic()
@@ -516,7 +625,8 @@ class USVStateMachine:
                     old.get('timeout_count') == payload['timeout_count'] and
                     old.get('camera_ready') == payload['camera_ready'] and
                     old.get('lidar_ready') == payload['lidar_ready'] and
-                    old.get('sensor_fusion') == payload['sensor_fusion']):
+                    old.get('sensor_fusion') == payload['sensor_fusion'] and
+                    old.get('dynamic_speed_profile') == payload['dynamic_speed_profile']):
                     logical_state_changed = False
             
             # Write only if logical state changed or 1 second heartbeat timeout exceeded
@@ -1031,6 +1141,7 @@ class USVStateMachine:
         self.mission_active = False
         self.v_target = 0.0
         self.heading_target = self.current_heading
+        self._set_dynamic_speed_idle()
         self.stop_motors()
         self._set_mode("HOLD")
         if reason.startswith("FAILSAFE"):
@@ -1185,7 +1296,8 @@ class USVStateMachine:
                     return True
             else:
                 hold_start = None
-                speed = P1_SPEED_APPROACH_MPS if dist < 8.0 else P1_SPEED_CRUISE_MPS
+                base_speed = P1_SPEED_APPROACH_MPS if dist < 8.0 else P1_SPEED_CRUISE_MPS
+                speed = self._apply_dynamic_speed(base_speed, heading_err, "P1")
                 self._command_speed_heading(speed, heading_err)
             self._write_state()
             time.sleep(LOOP_DT)
@@ -1251,7 +1363,7 @@ class USVStateMachine:
                 self.stop_motors()
                 return True
 
-            speed = P2_CRUISE_MPS if dist >= 8.0 else P2_WAIT_SPEED_MPS
+            base_speed = P2_CRUISE_MPS if dist >= 8.0 else P2_WAIT_SPEED_MPS
             heading_err = gps_heading_err
 
             gate_detected = bool(self.camera_status.get("gate_detected", False))
@@ -1263,13 +1375,17 @@ class USVStateMachine:
             center_d = self.lidar_center_dist
             right_d = self.lidar_right_dist
 
-            if center_d < D_MIN_M:
-                speed = min(speed, FAILSAFE_SLOW_MPS)
+            center_obstacle = center_d < D_MIN_M
+            if center_obstacle:
                 heading_err = 35.0 if left_d > right_d else -35.0
             elif left_d < D_MIN_M:
                 heading_err -= 18.0
             elif right_d < D_MIN_M:
                 heading_err += 18.0
+
+            speed = self._apply_dynamic_speed(base_speed, heading_err, "P2")
+            if center_obstacle:
+                speed = min(speed, FAILSAFE_SLOW_MPS)
 
             self._command_speed_heading(speed, heading_err)
             self._write_state()
@@ -1391,7 +1507,8 @@ class USVStateMachine:
                 heading_err = float(self.camera_status.get("gate_center_bearing_deg", 0.0))
             else:
                 heading_err = 0.0
-            self._command_speed_heading(P2_WAIT_SPEED_MPS, heading_err)
+            speed = self._apply_dynamic_speed(P2_WAIT_SPEED_MPS, heading_err, "P2")
+            self._command_speed_heading(speed, heading_err)
             self._write_state()
             time.sleep(LOOP_DT)
 
@@ -1406,6 +1523,7 @@ class USVStateMachine:
         print("  [PARKUR-3] HSV HEDEFLEME + ANGAJMAN")
         print("=" * 52)
         self.state = self.STATE_PARKUR3
+        self._set_dynamic_speed_idle()
         if not self._set_mode("GUIDED"):
             print("❌ [P3] GUIDED moda gecilemedi")
             return False
@@ -1466,6 +1584,7 @@ class USVStateMachine:
             self._wp_target = "TAMAMLANDI"
             self._wp_info = "-- / --"
         self.mission_active = False
+        self._set_dynamic_speed_idle()
         if not self.estop_latched:
             self.command_lock = False
         self.stop_motors()

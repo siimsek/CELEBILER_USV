@@ -1418,6 +1418,8 @@ def get_data():
     out['active_parkur'] = state.get('active_parkur', '--')
     sensor_fusion = state.get('sensor_fusion', {})
     out['sensor_fusion'] = sensor_fusion if isinstance(sensor_fusion, dict) else {}
+    dynamic_speed_profile = state.get('dynamic_speed_profile', {})
+    out['dynamic_speed_profile'] = dynamic_speed_profile if isinstance(dynamic_speed_profile, dict) else {}
     out['telemetry_profile'] = {
         'general_hz': GENERAL_TELEMETRY_HZ,
         'obstacle_hz': OBSTACLE_TELEMETRY_HZ,
@@ -1438,6 +1440,17 @@ def get_data():
         'ghost_gate_count': int(out['sensor_fusion'].get('ghost_gate_count', 0) or 0),
         'ghost_target_count': int(out['sensor_fusion'].get('ghost_target_count', 0) or 0),
         'lidar_ready': bool(out['sensor_fusion'].get('lidar_ready', out['lidar_ready'])),
+    }
+    dyn_speed_summary = {
+        'enabled': bool(out['dynamic_speed_profile'].get('enabled', False)),
+        'mode': out['dynamic_speed_profile'].get('mode', '--'),
+        'scope': out['dynamic_speed_profile'].get('scope', []),
+        'active': bool(out['dynamic_speed_profile'].get('active', False)),
+        'band': out['dynamic_speed_profile'].get('band', '--'),
+        'factor': float(out['dynamic_speed_profile'].get('factor', 1.0) or 1.0),
+        'heading_error_abs_deg': float(out['dynamic_speed_profile'].get('heading_error_abs_deg', 0.0) or 0.0),
+        'base_speed_mps': float(out['dynamic_speed_profile'].get('base_speed_mps', 0.0) or 0.0),
+        'output_speed_mps': float(out['dynamic_speed_profile'].get('output_speed_mps', 0.0) or 0.0),
     }
 
     # Report section 3.4 grouped projection for YKI consumers.
@@ -1466,6 +1479,7 @@ def get_data():
             'link_heartbeat_age_s': out['link_heartbeat_age_s'],
             'state_age_s': out['state_age_s'],
             'sensor_fusion': fusion_summary,
+            'dynamic_speed_profile': dyn_speed_summary,
         },
         'link_health': {
             'rc_link_active': bool(900 <= telemetry_data.get('RC1', 0) <= 2100 or 900 <= telemetry_data.get('RC3', 0) <= 2100),
