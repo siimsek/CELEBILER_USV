@@ -51,6 +51,13 @@ HEARTBEAT_FAIL_S = 30.0
 FAILSAFE_SLOW_MPS = 0.3
 CAMERA_FRAME_TIMEOUT_S = 1.0
 LIDAR_READY_TIMEOUT_S = 1.0
+FUSION_ENABLED = True
+FUSION_BEARING_WINDOW_DEG = 10.0
+FUSION_LIDAR_MIN_VALID_M = 0.4
+FUSION_LIDAR_CONFIRM_MAX_M = 12.0
+FUSION_CONFIRM_HOLD_S = 0.3
+FUSION_GATE_EVENT_CONFIRM_WINDOW_S = 1.2
+FUSION_LOG_PERIOD_S = 2.0
 
 
 # Safety / IO
@@ -176,4 +183,3 @@ def evaluate_readiness_flags(
 
     missing = [key for key in required_keys if not flags.get(key, False)]
     return flags, missing
-

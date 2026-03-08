@@ -20,6 +20,13 @@ from compliance_profile import (
     CONTROL_DIR,
     D_MIN_M,
     FAILSAFE_SLOW_MPS,
+    FUSION_BEARING_WINDOW_DEG,
+    FUSION_CONFIRM_HOLD_S,
+    FUSION_ENABLED,
+    FUSION_GATE_EVENT_CONFIRM_WINDOW_S,
+    FUSION_LIDAR_CONFIRM_MAX_M,
+    FUSION_LIDAR_MIN_VALID_M,
+    FUSION_LOG_PERIOD_S,
     HEARTBEAT_FAIL_S,
     HEARTBEAT_WARN_S,
     LIDAR_READY_TIMEOUT_S,
@@ -141,6 +148,19 @@ class USVStateMachine:
         self.min_obstacle_distance = 99.0
         self.obstacle_detected = False
         self._map_points = []
+        self._lidar_front_samples = []
+
+        self.fusion_policy = "reject_if_lidar_unavailable"
+        self.ghost_gate_count = 0
+        self.ghost_target_count = 0
+        self.last_confirmed_gate_dist_m = None
+        self.last_confirmed_target_dist_m = None
+        self._last_gate_confirm_ts = 0.0
+        self._last_target_confirm_ts = 0.0
+        self._gate_fusion_hold_since = None
+        self._target_fusion_hold_since = None
+        self._gate_ghost_latched = False
+        self._target_ghost_latched = False
 
         self.last_heartbeat_time = time.monotonic()
         self.heartbeat_age_s = 0.0
@@ -221,6 +241,142 @@ class USVStateMachine:
         if message:
             self._warn_throttled(f"err_{key}", f"{message} (count={self.error_counters[key]})", period_s=period_s)
 
+    def _camera_bearing_to_lidar_angle(self, camera_bearing_deg):
+        # Camera uses +right, lidar callback uses +left.
+        return -float(camera_bearing_deg)
+
+    def _nearest_lidar_distance_for_camera_bearing(self, camera_bearing_deg):
+        if not self._lidar_front_samples:
+            return None
+        lidar_angle_deg = self._camera_bearing_to_lidar_angle(camera_bearing_deg)
+        half_window = max(0.1, float(FUSION_BEARING_WINDOW_DEG))
+        nearest = None
+        for angle_deg, distance_m in self._lidar_front_samples:
+            if abs(angle_deg - lidar_angle_deg) > half_window:
+                continue
+            if not (FUSION_LIDAR_MIN_VALID_M <= distance_m <= FUSION_LIDAR_CONFIRM_MAX_M):
+                continue
+            if nearest is None or distance_m < nearest:
+                nearest = distance_m
+        return nearest
+
+    def _fusion_log(self, key, message):
+        self._warn_throttled(f"fusion_{key}", message, period_s=FUSION_LOG_PERIOD_S)
+
+    def _fuse_visual_detection(
+        self,
+        *,
+        label,
+        raw_detected,
+        raw_bearing_deg,
+        hold_attr,
+        ghost_latch_attr,
+        ghost_count_attr,
+        confirm_ts_attr,
+        last_dist_attr,
+    ):
+        now = time.monotonic()
+        if not bool(raw_detected):
+            setattr(self, hold_attr, None)
+            setattr(self, ghost_latch_attr, False)
+            return False, None
+
+        if self.simulation_mode:
+            setattr(self, hold_attr, now)
+            setattr(self, ghost_latch_attr, False)
+            setattr(self, confirm_ts_attr, now)
+            setattr(self, last_dist_attr, 1.0)
+            return True, 1.0
+
+        if not self.lidar_ready:
+            setattr(self, hold_attr, None)
+            self._fusion_log(
+                f"{label}_lidar_not_ready",
+                f"[FUSION] {label} lidar_not_ready raw_detection_ignored",
+            )
+            return False, None
+
+        nearest = self._nearest_lidar_distance_for_camera_bearing(raw_bearing_deg)
+        if nearest is None:
+            setattr(self, hold_attr, None)
+            if not bool(getattr(self, ghost_latch_attr)):
+                setattr(self, ghost_latch_attr, True)
+                current_count = int(getattr(self, ghost_count_attr))
+                setattr(self, ghost_count_attr, current_count + 1)
+            self._fusion_log(
+                f"{label}_ghost_rejected",
+                f"[FUSION] {label} ghost_rejected cam_bearing={raw_bearing_deg:.1f}",
+            )
+            return False, None
+
+        setattr(self, ghost_latch_attr, False)
+        hold_since = getattr(self, hold_attr)
+        if hold_since is None:
+            hold_since = now
+            setattr(self, hold_attr, hold_since)
+        if (now - hold_since) < FUSION_CONFIRM_HOLD_S:
+            return False, nearest
+
+        setattr(self, confirm_ts_attr, now)
+        setattr(self, last_dist_attr, float(nearest))
+        self._fusion_log(
+            f"{label}_confirmed",
+            f"[FUSION] {label} confirmed lidar={nearest:.2f}m cam_bearing={raw_bearing_deg:.1f}",
+        )
+        return True, nearest
+
+    def _apply_camera_lidar_fusion(self, camera_data):
+        fused = dict(camera_data)
+
+        gate_raw_detected = bool(camera_data.get("gate_detected_raw", camera_data.get("gate_detected", False)))
+        target_raw_detected = bool(camera_data.get("target_detected_raw", camera_data.get("target_detected", False)))
+        try:
+            gate_bearing_raw = float(
+                camera_data.get("gate_center_bearing_deg_raw", camera_data.get("gate_center_bearing_deg", 0.0))
+            )
+        except (TypeError, ValueError):
+            gate_bearing_raw = 0.0
+        try:
+            target_bearing_raw = float(
+                camera_data.get("target_bearing_error_deg_raw", camera_data.get("target_bearing_error_deg", 0.0))
+            )
+        except (TypeError, ValueError):
+            target_bearing_raw = 0.0
+
+        gate_detected, _ = self._fuse_visual_detection(
+            label="gate",
+            raw_detected=gate_raw_detected,
+            raw_bearing_deg=gate_bearing_raw,
+            hold_attr="_gate_fusion_hold_since",
+            ghost_latch_attr="_gate_ghost_latched",
+            ghost_count_attr="ghost_gate_count",
+            confirm_ts_attr="_last_gate_confirm_ts",
+            last_dist_attr="last_confirmed_gate_dist_m",
+        )
+        target_detected, _ = self._fuse_visual_detection(
+            label="target",
+            raw_detected=target_raw_detected,
+            raw_bearing_deg=target_bearing_raw,
+            hold_attr="_target_fusion_hold_since",
+            ghost_latch_attr="_target_ghost_latched",
+            ghost_count_attr="ghost_target_count",
+            confirm_ts_attr="_last_target_confirm_ts",
+            last_dist_attr="last_confirmed_target_dist_m",
+        )
+
+        fused["gate_detected"] = gate_detected
+        if not gate_detected:
+            fused["gate_stable_s"] = 0.0
+            fused["gate_center_bearing_deg"] = 0.0
+            fused["gate_passed_event"] = False
+
+        fused["target_detected"] = target_detected
+        if not target_detected:
+            fused["target_bearing_error_deg"] = 0.0
+            fused["target_area_norm"] = 0.0
+
+        return fused
+
     def _refresh_link_heartbeat(self):
         onboard_age = max(0.0, time.monotonic() - self.last_heartbeat_time)
         if self.simulation_mode or not self.master:
@@ -285,6 +441,23 @@ class USVStateMachine:
     def _write_state(self):
         try:
             os.makedirs(CONTROL_DIR, exist_ok=True)
+            fusion_payload = {
+                "enabled": bool(FUSION_ENABLED),
+                "policy": self.fusion_policy,
+                "ghost_gate_count": int(self.ghost_gate_count),
+                "ghost_target_count": int(self.ghost_target_count),
+                "last_confirmed_gate_dist_m": (
+                    round(float(self.last_confirmed_gate_dist_m), 3)
+                    if self.last_confirmed_gate_dist_m is not None
+                    else None
+                ),
+                "last_confirmed_target_dist_m": (
+                    round(float(self.last_confirmed_target_dist_m), 3)
+                    if self.last_confirmed_target_dist_m is not None
+                    else None
+                ),
+                "lidar_ready": bool(self.lidar_ready),
+            }
             payload = {
                 "ts_monotonic": round(time.monotonic(), 3),
                 "state": self.state,
@@ -319,6 +492,7 @@ class USVStateMachine:
                 "telemetry_groups": REPORT_TELEMETRY_GROUPS,
                 "link_topology": LINK_TOPOLOGY,
                 "comms_policy": COMMS_POLICY,
+                "sensor_fusion": fusion_payload,
             }
 
             now = time.monotonic()
@@ -341,7 +515,8 @@ class USVStateMachine:
                     old.get('heading_target') == payload['heading_target'] and
                     old.get('timeout_count') == payload['timeout_count'] and
                     old.get('camera_ready') == payload['camera_ready'] and
-                    old.get('lidar_ready') == payload['lidar_ready']):
+                    old.get('lidar_ready') == payload['lidar_ready'] and
+                    old.get('sensor_fusion') == payload['sensor_fusion']):
                     logical_state_changed = False
             
             # Write only if logical state changed or 1 second heartbeat timeout exceeded
@@ -526,6 +701,7 @@ class USVStateMachine:
                     center = 99.0
                     right = 99.0
                     points = []
+                    front_samples = []
                     angle = msg.angle_min
                     for rng in msg.ranges:
                         if 0.15 < rng < 20.0:
@@ -534,6 +710,7 @@ class USVStateMachine:
                                 x_m = rng * math.cos(angle)
                                 y_m = rng * math.sin(angle)
                                 points.append((x_m, y_m))
+                                front_samples.append((deg, float(rng)))
                                 if deg > 20:
                                     left = min(left, rng)
                                 elif deg < -20:
@@ -547,6 +724,7 @@ class USVStateMachine:
                     self.parent.min_obstacle_distance = min(left, center, right)
                     self.parent.obstacle_detected = center < D_MIN_M
                     self.parent._map_points = points
+                    self.parent._lidar_front_samples = front_samples
 
             node = _LidarNode(self)
 
@@ -749,8 +927,23 @@ class USVStateMachine:
         except Exception as exc:
             self._bump_error("camera_state_read_error", f"[WARN] [CAM] Status okuma hatasi: {exc}")
             data = default
-        self.camera_status = data
-        self.camera_ready = bool(data.get("frame_age_s", 999.0) < CAMERA_FRAME_TIMEOUT_S)
+
+        for key in (
+            "gate_detected",
+            "gate_stable_s",
+            "gate_center_bearing_deg",
+            "gate_passed_event",
+            "target_detected",
+            "target_bearing_error_deg",
+            "target_area_norm",
+        ):
+            data[f"{key}_raw"] = data.get(key, default.get(key))
+
+        try:
+            frame_age_s = float(data.get("frame_age_s", 999.0))
+        except (TypeError, ValueError):
+            frame_age_s = 999.0
+        self.camera_ready = bool(frame_age_s < CAMERA_FRAME_TIMEOUT_S)
         if self.simulation_mode:
             self.camera_ready = True
             self.lidar_ready = True
@@ -758,6 +951,17 @@ class USVStateMachine:
             self.lidar_ready = bool(
                 self.lidar_available and (time.monotonic() - self.last_lidar_time) < LIDAR_READY_TIMEOUT_S
             )
+
+        fusion_scope_active = bool(FUSION_ENABLED and self.state in (self.STATE_PARKUR2, self.STATE_PARKUR3))
+        if fusion_scope_active:
+            data = self._apply_camera_lidar_fusion(data)
+        else:
+            self._gate_fusion_hold_since = None
+            self._target_fusion_hold_since = None
+            self._gate_ghost_latched = False
+            self._target_ghost_latched = False
+
+        self.camera_status = data
 
     def _update_watchdog(self):
         if self.simulation_mode or not self.master:
@@ -1008,7 +1212,13 @@ class USVStateMachine:
         return False
 
     def _track_gate_event(self):
-        event_active = bool(self.camera_status.get("gate_passed_event", False))
+        event_active_raw = bool(self.camera_status.get("gate_passed_event", False))
+        event_active = event_active_raw
+        if FUSION_ENABLED:
+            gate_confirm_recent = (time.monotonic() - self._last_gate_confirm_ts) <= FUSION_GATE_EVENT_CONFIRM_WINDOW_S
+            if event_active_raw and not gate_confirm_recent:
+                self._fusion_log("gate_event_ghost_rejected", "[FUSION] gate_event ghost_rejected no_recent_confirm")
+            event_active = event_active_raw and gate_confirm_recent
         if event_active:
             if self._gate_event_start is None:
                 self._gate_event_start = time.monotonic()

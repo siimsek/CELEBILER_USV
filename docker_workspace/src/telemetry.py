@@ -1416,6 +1416,8 @@ def get_data():
     out['camera_ready'] = state.get('camera_ready', False)
     out['lidar_ready'] = state.get('lidar_ready', False)
     out['active_parkur'] = state.get('active_parkur', '--')
+    sensor_fusion = state.get('sensor_fusion', {})
+    out['sensor_fusion'] = sensor_fusion if isinstance(sensor_fusion, dict) else {}
     out['telemetry_profile'] = {
         'general_hz': GENERAL_TELEMETRY_HZ,
         'obstacle_hz': OBSTACLE_TELEMETRY_HZ,
@@ -1430,6 +1432,13 @@ def get_data():
     except (TypeError, ValueError):
         state_ts = 0.0
     out['state_age_s'] = round(max(0.0, time.monotonic() - state_ts), 3) if state_ts > 0.0 else 999.0
+    fusion_summary = {
+        'enabled': bool(out['sensor_fusion'].get('enabled', False)),
+        'policy': out['sensor_fusion'].get('policy', '--'),
+        'ghost_gate_count': int(out['sensor_fusion'].get('ghost_gate_count', 0) or 0),
+        'ghost_target_count': int(out['sensor_fusion'].get('ghost_target_count', 0) or 0),
+        'lidar_ready': bool(out['sensor_fusion'].get('lidar_ready', out['lidar_ready'])),
+    }
 
     # Report section 3.4 grouped projection for YKI consumers.
     out['report_view'] = {
@@ -1456,6 +1465,7 @@ def get_data():
             'heartbeat_age_s': out['heartbeat_age_s'],
             'link_heartbeat_age_s': out['link_heartbeat_age_s'],
             'state_age_s': out['state_age_s'],
+            'sensor_fusion': fusion_summary,
         },
         'link_health': {
             'rc_link_active': bool(900 <= telemetry_data.get('RC1', 0) <= 2100 or 900 <= telemetry_data.get('RC3', 0) <= 2100),

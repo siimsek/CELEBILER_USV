@@ -144,11 +144,31 @@ Tek sayfa Mission Control arayüzü:
 - **Uyumluluk kontrolleri**: `check_compliance_static.py` ve `check_compliance_behavior.py`.
 - **Windows terminal desteği**: `console_utils.py` ile UTF-8, okunabilir zaman damgalı ve renkli log formatı.
 
+## 🌟 İnovasyonlar
+
+### ✅ Entegre Edilen İnovasyon
+
+- **Sensör Füzyonu (Kamera + Lidar Hayalet Hedef Koruması)**:
+  - Parkur 2 ve Parkur 3 kararlarında kamera tespitleri, aynı doğrultuda Lidar doğrulaması olmadan kullanılmaz.
+  - Lidar doğrulaması yoksa (veya veri stale ise) tespit fail-safe olarak reddedilir.
+  - Kamera tarafındaki ham alanlar korunur (`*_raw`), otonom kararlar fused alanlar üzerinden yürür.
+  - `gate_passed_event` sayımı için yakın zamanda fused gate doğrulaması şartı vardır (yalancı kapı geçişlerini azaltır).
+  - Görev durumuna `sensor_fusion` bloğu eklenmiştir: `enabled`, `policy`, `ghost_gate_count`, `ghost_target_count`, `last_confirmed_gate_dist_m`, `last_confirmed_target_dist_m`, `lidar_ready`.
+  - `/api/data` çıktısına `sensor_fusion` alanı ve `report_view.navigation_health.sensor_fusion` özeti eklenmiştir.
+
+### 🧪 Sıradaki İnovasyon Adayları
+
+- **Dinamik Hız Profillemesi** (heading error temelli hız azalt/arttır)
+- **Akıntı ve Rüzgar Düzeltme Asistanı** (integral tabanlı crab steering)
+- **Termal ve Enerji Hayatta Kalma Modu** (ECO/Limp)
+- **Lidar Kendi-Gövdesini Gizleme** (self-masking / ignore zone)
+- **Geo-Fence & Safe-Halt Virtual Anchor** (sanal çit + bağlantı kaybında pozisyon tutma)
+
 ## 🔌 API Özeti
 
 | Endpoint | Yöntem | Açıklama |
 |----------|--------|----------|
-| `/api/data` | GET | Dashboard verisi + report_view + health alanları |
+| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` alanları |
 | `/api/mission_status` | GET | Görev aktiflik ve geçen süre |
 | `/api/events` | GET | Kritik olay akışı (long-poll) |
 | `/api/start_mission` | POST | Test modunda görev başlatma |
