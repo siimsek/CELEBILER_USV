@@ -146,6 +146,8 @@ Tek sayfa Mission Control arayüzü:
 
 ## 🌟 İnovasyonlar
 
+Not: Entegre inovasyonların tamamı `docker_workspace/src/compliance_profile.py` içindeki `INNOVATION_SWITCHES` sözlüğünden tek noktadan açılıp kapatılabilir. Sorun durumunda sistemi başlatmadan ilgili anahtarı `False` yapmanız yeterlidir.
+
 ### ✅ Entegre Edilen İnovasyon
 
 - **Sensör Füzyonu (Kamera + Lidar Hayalet Hedef Koruması)**:
