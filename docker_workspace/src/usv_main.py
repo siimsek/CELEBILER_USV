@@ -79,6 +79,15 @@ from compliance_profile import (
     RC_RACE_START_PWM,
     REPORT_TELEMETRY_GROUPS,
     T_HOLD_S,
+    TRUST_BAR_ENABLED,
+    TRUST_GOOD_THRESHOLD,
+    TRUST_LIDAR_POINTS_FULL,
+    TRUST_LOG_PERIOD_S,
+    TRUST_WARN_THRESHOLD,
+    TRUST_WEIGHT_CAMERA,
+    TRUST_WEIGHT_GPS,
+    TRUST_WEIGHT_LIDAR,
+    TRUST_WEIGHT_RC,
     USV_MODE,
     USV_MODE_RACE,
     WIND_ASSIST_ACTIVE_ERR_MAX_DEG,
@@ -168,6 +177,8 @@ class USVStateMachine:
         self.current_heading = 0.0
         self.current_roll_deg = 0.0
         self.current_pitch_deg = 0.0
+        self.gps_satellites_visible = 0
+        self.gps_fix_type = 0
         self.rc_channels = {f"ch{i}": 0 for i in range(1, 9)}
 
         self.v_target = 0.0
@@ -275,6 +286,32 @@ class USVStateMachine:
             "roll_gain": float(HORIZON_LOCK_ROLL_GAIN),
             "pitch_gain": float(HORIZON_LOCK_PITCH_GAIN),
             "max_correction_deg": float(HORIZON_LOCK_MAX_CORRECTION_DEG),
+        }
+        self.autonomy_health = {
+            "enabled": bool(TRUST_BAR_ENABLED),
+            "trust_score": 0.0,
+            "level": "low",
+            "color": "red",
+            "label": "DUSUK",
+            "advisory": "Otonomi guveni dusuk, RC kumandayi ele alin.",
+            "failsafe_state": "normal",
+            "gps_satellites_visible": 0,
+            "gps_fix_type": 0,
+            "camera_mode": "normal",
+            "lidar_point_count": 0,
+            "rc_link_active": False,
+            "component_scores": {
+                "gps": 0.0,
+                "camera": 0.0,
+                "lidar": 0.0,
+                "rc": 0.0,
+            },
+            "weights": {
+                "gps": float(TRUST_WEIGHT_GPS),
+                "camera": float(TRUST_WEIGHT_CAMERA),
+                "lidar": float(TRUST_WEIGHT_LIDAR),
+                "rc": float(TRUST_WEIGHT_RC),
+            },
         }
 
         self.last_heartbeat_time = time.monotonic()
@@ -389,6 +426,143 @@ class USVStateMachine:
 
     def _horizon_log(self, key, message):
         self._warn_throttled(f"horizon_{key}", message, period_s=HORIZON_LOCK_LOG_PERIOD_S)
+
+    def _trust_log(self, key, message):
+        self._warn_throttled(f"trust_{key}", message, period_s=TRUST_LOG_PERIOD_S)
+
+    def _update_autonomy_health(self):
+        if not TRUST_BAR_ENABLED:
+            self.autonomy_health = {
+                "enabled": False,
+                "trust_score": 0.0,
+                "level": "off",
+                "color": "gray",
+                "label": "KAPALI",
+                "advisory": "Trust bar devre disi.",
+                "failsafe_state": self.failsafe_state,
+                "gps_satellites_visible": int(self.gps_satellites_visible),
+                "gps_fix_type": int(self.gps_fix_type),
+                "camera_mode": str(self.camera_adaptation.get("mode", "normal")),
+                "lidar_point_count": int(len(self._lidar_front_samples)),
+                "rc_link_active": bool(self._rc_link_active()),
+                "component_scores": {"gps": 0.0, "camera": 0.0, "lidar": 0.0, "rc": 0.0},
+                "weights": {
+                    "gps": float(TRUST_WEIGHT_GPS),
+                    "camera": float(TRUST_WEIGHT_CAMERA),
+                    "lidar": float(TRUST_WEIGHT_LIDAR),
+                    "rc": float(TRUST_WEIGHT_RC),
+                },
+            }
+            return
+
+        sat = max(0, int(self.gps_satellites_visible or 0))
+        fix = max(0, int(self.gps_fix_type or 0))
+        rc_active = bool(self._rc_link_active())
+        lidar_points = int(len(self._lidar_front_samples))
+        cam_mode = str(self.camera_adaptation.get("mode", "normal"))
+
+        if self.simulation_mode:
+            sat = max(sat, 12)
+            fix = max(fix, 4)
+            gps_q = camera_q = lidar_q = rc_q = 1.0
+        else:
+            sat_norm = clamp((float(sat) - 4.0) / 8.0, 0.0, 1.0)
+            if fix >= 4:
+                fix_norm = 1.0
+            elif fix == 3:
+                fix_norm = 0.8
+            elif fix == 2:
+                fix_norm = 0.45
+            else:
+                fix_norm = 0.1
+            pos_valid = 1.0 if self._gps_position_valid() else 0.0
+            gps_q = clamp((0.55 * sat_norm) + (0.35 * fix_norm) + (0.10 * pos_valid), 0.0, 1.0)
+
+            if not self.camera_ready:
+                camera_q = 0.0
+            else:
+                if cam_mode == "normal":
+                    mode_score = 1.0
+                elif cam_mode in ("dark", "bright"):
+                    mode_score = 0.72
+                else:
+                    mode_score = 0.85
+                luma = float(self.camera_adaptation.get("luma_mean", 0.0) or 0.0)
+                if luma <= 0.0:
+                    luma_score = 0.4
+                else:
+                    luma_score = clamp(1.0 - abs(luma - 128.0) / 128.0, 0.0, 1.0)
+                camera_q = clamp((0.60 * mode_score) + (0.40 * luma_score), 0.0, 1.0)
+
+            if not self.lidar_ready:
+                lidar_q = 0.0
+            else:
+                points_score = clamp(float(lidar_points) / float(max(1, TRUST_LIDAR_POINTS_FULL)), 0.0, 1.0)
+                lidar_q = clamp(0.55 + (0.45 * points_score), 0.0, 1.0)
+
+            if not rc_active:
+                rc_q = 0.0
+            else:
+                age_score = clamp(1.0 - (float(self.link_heartbeat_age_s) / float(max(1.0, HEARTBEAT_WARN_S))), 0.0, 1.0)
+                rc_q = clamp(0.40 + (0.60 * age_score), 0.0, 1.0)
+
+        base_score = (
+            float(TRUST_WEIGHT_GPS) * gps_q
+            + float(TRUST_WEIGHT_CAMERA) * camera_q
+            + float(TRUST_WEIGHT_LIDAR) * lidar_q
+            + float(TRUST_WEIGHT_RC) * rc_q
+        )
+        safety_factor = 1.0
+        if self.failsafe_state == "warning":
+            safety_factor = 0.75
+        elif self.failsafe_state in ("triggered", "hold"):
+            safety_factor = 0.40
+        trust_score = clamp(base_score * safety_factor * 100.0, 0.0, 100.0)
+
+        if trust_score >= float(TRUST_GOOD_THRESHOLD):
+            level, color, label = "high", "green", "YUKSEK"
+            advisory = "Otonomi guveni yuksek."
+        elif trust_score >= float(TRUST_WARN_THRESHOLD):
+            level, color, label = "medium", "yellow", "ORTA"
+            advisory = "Dikkat: Otonomi guveni orta, RC kumandayi hazir tutun."
+        else:
+            level, color, label = "low", "red", "DUSUK"
+            advisory = "Otonomi guveni dusuk, RC kumandayi ele alin."
+
+        self.autonomy_health = {
+            "enabled": True,
+            "trust_score": round(float(trust_score), 2),
+            "level": level,
+            "color": color,
+            "label": label,
+            "advisory": advisory,
+            "failsafe_state": self.failsafe_state,
+            "gps_satellites_visible": int(sat),
+            "gps_fix_type": int(fix),
+            "camera_mode": cam_mode,
+            "lidar_point_count": int(lidar_points),
+            "rc_link_active": bool(rc_active),
+            "component_scores": {
+                "gps": round(float(gps_q * 100.0), 2),
+                "camera": round(float(camera_q * 100.0), 2),
+                "lidar": round(float(lidar_q * 100.0), 2),
+                "rc": round(float(rc_q * 100.0), 2),
+            },
+            "weights": {
+                "gps": float(TRUST_WEIGHT_GPS),
+                "camera": float(TRUST_WEIGHT_CAMERA),
+                "lidar": float(TRUST_WEIGHT_LIDAR),
+                "rc": float(TRUST_WEIGHT_RC),
+            },
+        }
+
+        self._trust_log(
+            level,
+            (
+                f"[TRUST] score={trust_score:.1f} level={label} "
+                f"gps={gps_q*100:.0f} cam={camera_q*100:.0f} lidar={lidar_q*100:.0f} rc={rc_q*100:.0f}"
+            ),
+        )
 
     def _set_horizon_lock_idle(self, reason="idle", channel="none"):
         self.horizon_lock = {
@@ -999,6 +1173,7 @@ class USVStateMachine:
         self.health_storage = storage_health
         self.health_ready = not missing
         self.health_checked_at = round(time.monotonic(), 3)
+        self._update_autonomy_health()
 
     def _write_state(self):
         try:
@@ -1056,6 +1231,23 @@ class USVStateMachine:
                 "hsv_v_shift": int(camera_adapt_state.get("hsv_v_shift", 0) or 0),
                 "hsv_profile": str(camera_adapt_state.get("hsv_profile", "base")),
             }
+            autonomy_health_state = self.autonomy_health if isinstance(self.autonomy_health, dict) else {}
+            autonomy_health_payload = {
+                "enabled": bool(autonomy_health_state.get("enabled", TRUST_BAR_ENABLED)),
+                "trust_score": round(float(autonomy_health_state.get("trust_score", 0.0) or 0.0), 2),
+                "level": str(autonomy_health_state.get("level", "low")),
+                "color": str(autonomy_health_state.get("color", "red")),
+                "label": str(autonomy_health_state.get("label", "DUSUK")),
+                "advisory": str(autonomy_health_state.get("advisory", "--")),
+                "failsafe_state": str(autonomy_health_state.get("failsafe_state", self.failsafe_state)),
+                "gps_satellites_visible": int(autonomy_health_state.get("gps_satellites_visible", self.gps_satellites_visible) or 0),
+                "gps_fix_type": int(autonomy_health_state.get("gps_fix_type", self.gps_fix_type) or 0),
+                "camera_mode": str(autonomy_health_state.get("camera_mode", self.camera_adaptation.get("mode", "normal"))),
+                "lidar_point_count": int(autonomy_health_state.get("lidar_point_count", len(self._lidar_front_samples)) or 0),
+                "rc_link_active": bool(autonomy_health_state.get("rc_link_active", self._rc_link_active())),
+                "component_scores": dict(autonomy_health_state.get("component_scores", {})),
+                "weights": dict(autonomy_health_state.get("weights", {})),
+            }
             virtual_anchor_state = self.virtual_anchor if isinstance(self.virtual_anchor, dict) else {}
             virtual_anchor_payload = {
                 "enabled": bool(virtual_anchor_state.get("enabled", GEOFENCE_ENABLED)),
@@ -1110,6 +1302,8 @@ class USVStateMachine:
                 "lidar_ready": self.lidar_ready,
                 "roll_deg": round(self.current_roll_deg, 3),
                 "pitch_deg": round(self.current_pitch_deg, 3),
+                "gps_satellites_visible": int(self.gps_satellites_visible),
+                "gps_fix_type": int(self.gps_fix_type),
                 "heartbeat_age_s": round(self.heartbeat_age_s, 3),
                 "link_heartbeat_age_s": round(self.link_heartbeat_age_s, 3),
                 "link_heartbeat_source": self.link_heartbeat_source,
@@ -1134,6 +1328,7 @@ class USVStateMachine:
                 "wind_assist": wind_payload,
                 "horizon_lock": horizon_payload,
                 "camera_adaptation": camera_adapt_payload,
+                "autonomy_health": autonomy_health_payload,
                 "virtual_anchor": virtual_anchor_payload,
             }
 
@@ -1164,6 +1359,7 @@ class USVStateMachine:
                     old.get('wind_assist') == payload['wind_assist'] and
                     old.get('horizon_lock') == payload['horizon_lock'] and
                     old.get('camera_adaptation') == payload['camera_adaptation'] and
+                    old.get('autonomy_health') == payload['autonomy_health'] and
                     old.get('virtual_anchor') == payload['virtual_anchor']):
                     logical_state_changed = False
             
@@ -1537,6 +1733,9 @@ class USVStateMachine:
                     self.current_lat = msg.lat / 1e7
                     self.current_lon = msg.lon / 1e7
                     self.current_heading = msg.hdg / 100.0
+                elif mtype == "GPS_RAW_INT":
+                    self.gps_satellites_visible = int(getattr(msg, "satellites_visible", 0) or 0)
+                    self.gps_fix_type = int(getattr(msg, "fix_type", 0) or 0)
                 elif mtype == "ATTITUDE":
                     self.current_roll_deg = math.degrees(getattr(msg, "roll", 0.0))
                     self.current_pitch_deg = math.degrees(getattr(msg, "pitch", 0.0))

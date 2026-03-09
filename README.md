@@ -196,6 +196,13 @@ Tek sayfa Mission Control arayüzü:
   - Bu blok `mission_state` içine taşınır ve `/api/data` ile `report_view.navigation_health.camera_adaptation` altında görünür.
   - Konsolda throttle'lı `[CAM_ADAPT]` logları üretilir.
 
+- **Bilişsel Sağlık İndeksi (Autonomy Health Scoring / Trust Bar)**:
+  - Otonomi güveni, çoklu bileşenlerden ağırlıklı skorla hesaplanır: GPS kalitesi, kamera ışık/stabilite durumu, Lidar yoğunluğu/hazırlığı ve RC link sağlığı.
+  - Skor `0-100` aralığına normalize edilip `YUKSEK/ORTA/DUSUK` trust bar seviyesi ve renk (`green/yellow/red`) üretilir.
+  - Failsafe `warning/hold` durumlarında güven skoru emniyet katsayısı ile düşürülür ve operatöre daha erken müdahale uyarısı verilir.
+  - Görev durumuna `autonomy_health` bloğu eklenmiştir: `trust_score`, `level`, `label`, `advisory`, bileşen skorları ve ağırlıklar.
+  - `/api/data` ve `report_view.navigation_health.autonomy_health` üzerinden canlı izlenir; throttle'lı `[TRUST]` logları üretilir.
+
 ### 🧪 Sıradaki İnovasyon Adayları
 
 - **Termal ve Enerji Hayatta Kalma Modu (Eco/Limp Mode)**
@@ -205,13 +212,12 @@ Tek sayfa Mission Control arayüzü:
 - **Karar Ağaçlı Dalga Patern Kestirimi (Sea-State Estimation & Surf Mode)**
 - **Asimetrik Motor Hasar Toleransı (Thrust Vectoring Fallback)**
 - **Sintine / Gemi İçi Su Acil Durum Tespiti (Hull Breach Failsafe)**
-- **Bilişsel Sağlık İndeksi Algoritması (Autonomy Health Scoring)**
 
 ## 🔌 API Özeti
 
 | Endpoint | Yöntem | Açıklama |
 |----------|--------|----------|
-| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` + `dynamic_speed_profile` + `wind_assist` + `horizon_lock` + `camera_adaptation` + `virtual_anchor` alanları |
+| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` + `dynamic_speed_profile` + `wind_assist` + `horizon_lock` + `camera_adaptation` + `autonomy_health` + `virtual_anchor` alanları |
 | `/api/mission_status` | GET | Görev aktiflik ve geçen süre |
 | `/api/events` | GET | Kritik olay akışı (long-poll) |
 | `/api/start_mission` | POST | Test modunda görev başlatma |

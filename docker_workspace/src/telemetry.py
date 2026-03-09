@@ -1426,6 +1426,8 @@ def get_data():
     out['horizon_lock'] = horizon_lock if isinstance(horizon_lock, dict) else {}
     camera_adaptation = state.get('camera_adaptation', {})
     out['camera_adaptation'] = camera_adaptation if isinstance(camera_adaptation, dict) else {}
+    autonomy_health = state.get('autonomy_health', {})
+    out['autonomy_health'] = autonomy_health if isinstance(autonomy_health, dict) else {}
     virtual_anchor = state.get('virtual_anchor', {})
     out['virtual_anchor'] = virtual_anchor if isinstance(virtual_anchor, dict) else {}
     out['telemetry_profile'] = {
@@ -1495,6 +1497,22 @@ def get_data():
         'hsv_v_shift': int(out['camera_adaptation'].get('hsv_v_shift', 0) or 0),
         'hsv_profile': out['camera_adaptation'].get('hsv_profile', '--'),
     }
+    autonomy_health_summary = {
+        'enabled': bool(out['autonomy_health'].get('enabled', False)),
+        'trust_score': float(out['autonomy_health'].get('trust_score', 0.0) or 0.0),
+        'level': out['autonomy_health'].get('level', '--'),
+        'color': out['autonomy_health'].get('color', '--'),
+        'label': out['autonomy_health'].get('label', '--'),
+        'advisory': out['autonomy_health'].get('advisory', '--'),
+        'failsafe_state': out['autonomy_health'].get('failsafe_state', '--'),
+        'gps_satellites_visible': int(out['autonomy_health'].get('gps_satellites_visible', 0) or 0),
+        'gps_fix_type': int(out['autonomy_health'].get('gps_fix_type', 0) or 0),
+        'camera_mode': out['autonomy_health'].get('camera_mode', '--'),
+        'lidar_point_count': int(out['autonomy_health'].get('lidar_point_count', 0) or 0),
+        'rc_link_active': bool(out['autonomy_health'].get('rc_link_active', False)),
+        'component_scores': out['autonomy_health'].get('component_scores', {}),
+        'weights': out['autonomy_health'].get('weights', {}),
+    }
     virtual_anchor_summary = {
         'enabled': bool(out['virtual_anchor'].get('enabled', False)),
         'mode': out['virtual_anchor'].get('mode', '--'),
@@ -1541,6 +1559,7 @@ def get_data():
             'wind_assist': wind_assist_summary,
             'horizon_lock': horizon_lock_summary,
             'camera_adaptation': camera_adaptation_summary,
+            'autonomy_health': autonomy_health_summary,
             'virtual_anchor': virtual_anchor_summary,
         },
         'link_health': {
