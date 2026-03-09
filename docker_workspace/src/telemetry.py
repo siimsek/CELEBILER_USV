@@ -1422,6 +1422,8 @@ def get_data():
     out['dynamic_speed_profile'] = dynamic_speed_profile if isinstance(dynamic_speed_profile, dict) else {}
     wind_assist = state.get('wind_assist', {})
     out['wind_assist'] = wind_assist if isinstance(wind_assist, dict) else {}
+    virtual_anchor = state.get('virtual_anchor', {})
+    out['virtual_anchor'] = virtual_anchor if isinstance(virtual_anchor, dict) else {}
     out['telemetry_profile'] = {
         'general_hz': GENERAL_TELEMETRY_HZ,
         'obstacle_hz': OBSTACLE_TELEMETRY_HZ,
@@ -1466,6 +1468,21 @@ def get_data():
         'heading_error_abs_deg': float(out['wind_assist'].get('heading_error_abs_deg', 0.0) or 0.0),
         'corrected_heading_error_deg': float(out['wind_assist'].get('corrected_heading_error_deg', 0.0) or 0.0),
     }
+    virtual_anchor_summary = {
+        'enabled': bool(out['virtual_anchor'].get('enabled', False)),
+        'mode': out['virtual_anchor'].get('mode', '--'),
+        'active': bool(out['virtual_anchor'].get('active', False)),
+        'reason': out['virtual_anchor'].get('reason', '--'),
+        'fence_radius_m': float(out['virtual_anchor'].get('fence_radius_m', 0.0) or 0.0),
+        'drift_trigger_m': float(out['virtual_anchor'].get('drift_trigger_m', 0.0) or 0.0),
+        'drift_from_center_m': float(out['virtual_anchor'].get('drift_from_center_m', 0.0) or 0.0),
+        'inside_fence': bool(out['virtual_anchor'].get('inside_fence', True)),
+        'anchor_set': bool(out['virtual_anchor'].get('anchor_set', False)),
+        'pulse_speed_mps': float(out['virtual_anchor'].get('pulse_speed_mps', 0.0) or 0.0),
+        'pulse_heading_error_deg': float(out['virtual_anchor'].get('pulse_heading_error_deg', 0.0) or 0.0),
+        'pulse_count': int(out['virtual_anchor'].get('pulse_count', 0) or 0),
+        'breach_count': int(out['virtual_anchor'].get('breach_count', 0) or 0),
+    }
 
     # Report section 3.4 grouped projection for YKI consumers.
     out['report_view'] = {
@@ -1495,6 +1512,7 @@ def get_data():
             'sensor_fusion': fusion_summary,
             'dynamic_speed_profile': dyn_speed_summary,
             'wind_assist': wind_assist_summary,
+            'virtual_anchor': virtual_anchor_summary,
         },
         'link_health': {
             'rc_link_active': bool(900 <= telemetry_data.get('RC1', 0) <= 2100 or 900 <= telemetry_data.get('RC3', 0) <= 2100),

@@ -39,6 +39,14 @@ from compliance_profile import (
     FUSION_LIDAR_CONFIRM_MAX_M,
     FUSION_LIDAR_MIN_VALID_M,
     FUSION_LOG_PERIOD_S,
+    GEOFENCE_ANCHOR_COOLDOWN_S,
+    GEOFENCE_ANCHOR_PULSE_S,
+    GEOFENCE_ANCHOR_SPEED_MPS,
+    GEOFENCE_DRIFT_TRIGGER_M,
+    GEOFENCE_ENABLED,
+    GEOFENCE_FAILSAFE_ONLY,
+    GEOFENCE_LOG_PERIOD_S,
+    GEOFENCE_RADIUS_M,
     HEARTBEAT_FAIL_S,
     HEARTBEAT_WARN_S,
     LIDAR_READY_TIMEOUT_S,
@@ -206,6 +214,33 @@ class USVStateMachine:
             "heading_error_abs_deg": 0.0,
             "corrected_heading_error_deg": 0.0,
         }
+        self.hold_reason = "NONE"
+        self._anchor_center_lat = None
+        self._anchor_center_lon = None
+        self._anchor_pulse_until_ts = 0.0
+        self._anchor_last_pulse_ts = 0.0
+        self._anchor_last_heading_err_deg = 0.0
+        self._anchor_breach_count = 0
+        self._anchor_pulse_count = 0
+        self._anchor_was_inside_fence = True
+        self.virtual_anchor = {
+            "enabled": bool(GEOFENCE_ENABLED),
+            "mode": "geofence_virtual_anchor",
+            "active": False,
+            "reason": "idle",
+            "failsafe_only": bool(GEOFENCE_FAILSAFE_ONLY),
+            "fence_radius_m": float(GEOFENCE_RADIUS_M),
+            "drift_trigger_m": float(GEOFENCE_DRIFT_TRIGGER_M),
+            "drift_from_center_m": 0.0,
+            "inside_fence": True,
+            "anchor_set": False,
+            "anchor_lat": None,
+            "anchor_lon": None,
+            "pulse_speed_mps": 0.0,
+            "pulse_heading_error_deg": 0.0,
+            "pulse_count": 0,
+            "breach_count": 0,
+        }
 
         self.last_heartbeat_time = time.monotonic()
         self.heartbeat_age_s = 0.0
@@ -313,6 +348,21 @@ class USVStateMachine:
 
     def _wind_log(self, key, message):
         self._warn_throttled(f"wind_{key}", message, period_s=WIND_ASSIST_LOG_PERIOD_S)
+
+    def _geo_log(self, key, message):
+        self._warn_throttled(f"geo_{key}", message, period_s=GEOFENCE_LOG_PERIOD_S)
+
+    def _gps_position_valid(self):
+        try:
+            lat = float(self.current_lat)
+            lon = float(self.current_lon)
+        except (TypeError, ValueError):
+            return False
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return False
+        if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+            return False
+        return True
 
     def _resolve_dynamic_speed_band(self, heading_error_abs_deg):
         err = max(0.0, float(heading_error_abs_deg))
@@ -496,6 +546,150 @@ class USVStateMachine:
             "corrected_heading_error_deg": round(float(corrected_heading_err), 3),
         }
         return float(corrected_heading_err)
+
+    def _set_virtual_anchor_idle(self, reason="idle", clear_center=False):
+        if clear_center:
+            self._anchor_center_lat = None
+            self._anchor_center_lon = None
+        self._anchor_pulse_until_ts = 0.0
+        self._anchor_last_heading_err_deg = 0.0
+        self._anchor_was_inside_fence = True
+        self.virtual_anchor = {
+            "enabled": bool(GEOFENCE_ENABLED),
+            "mode": "geofence_virtual_anchor",
+            "active": False,
+            "reason": str(reason),
+            "failsafe_only": bool(GEOFENCE_FAILSAFE_ONLY),
+            "fence_radius_m": float(GEOFENCE_RADIUS_M),
+            "drift_trigger_m": float(GEOFENCE_DRIFT_TRIGGER_M),
+            "drift_from_center_m": 0.0,
+            "inside_fence": True,
+            "anchor_set": bool(self._anchor_center_lat is not None and self._anchor_center_lon is not None),
+            "anchor_lat": self._anchor_center_lat,
+            "anchor_lon": self._anchor_center_lon,
+            "pulse_speed_mps": 0.0,
+            "pulse_heading_error_deg": 0.0,
+            "pulse_count": int(self._anchor_pulse_count),
+            "breach_count": int(self._anchor_breach_count),
+        }
+
+    def _arm_virtual_anchor_center(self):
+        if not self._gps_position_valid():
+            return False
+        self._anchor_center_lat = float(self.current_lat)
+        self._anchor_center_lon = float(self.current_lon)
+        self._anchor_pulse_until_ts = 0.0
+        self._anchor_last_pulse_ts = 0.0
+        self._anchor_last_heading_err_deg = 0.0
+        self._anchor_was_inside_fence = True
+        self._geo_log(
+            "armed",
+            (
+                f"[GEOFENCE] anchor_armed lat={self._anchor_center_lat:.7f} "
+                f"lon={self._anchor_center_lon:.7f} radius={GEOFENCE_RADIUS_M:.1f}m"
+            ),
+        )
+        return True
+
+    def _run_virtual_anchor_step(self):
+        if not GEOFENCE_ENABLED:
+            self._set_virtual_anchor_idle(reason="disabled", clear_center=True)
+            self._command_speed_heading(0.0, 0.0)
+            return
+
+        if self.state != self.STATE_HOLD or self.mission_active:
+            self._set_virtual_anchor_idle(reason="hold_inactive", clear_center=False)
+            self._command_speed_heading(0.0, 0.0)
+            return
+        if self.estop_latched:
+            self._set_virtual_anchor_idle(reason="estop_latched", clear_center=False)
+            self._command_speed_heading(0.0, 0.0)
+            return
+        if GEOFENCE_FAILSAFE_ONLY and not str(self.hold_reason).startswith("FAILSAFE"):
+            self._set_virtual_anchor_idle(reason="not_failsafe_hold", clear_center=False)
+            self._command_speed_heading(0.0, 0.0)
+            return
+        if self.failsafe_state != "hold":
+            self._set_virtual_anchor_idle(reason="failsafe_recovered", clear_center=False)
+            self._command_speed_heading(0.0, 0.0)
+            return
+        if not self._gps_position_valid():
+            self._set_virtual_anchor_idle(reason="gps_invalid", clear_center=False)
+            self._geo_log("gps_invalid", "[GEOFENCE] gps_invalid virtual_anchor_idle")
+            self._command_speed_heading(0.0, 0.0)
+            return
+
+        if self._anchor_center_lat is None or self._anchor_center_lon is None:
+            if not self._arm_virtual_anchor_center():
+                self._set_virtual_anchor_idle(reason="anchor_arm_failed", clear_center=True)
+                self._command_speed_heading(0.0, 0.0)
+                return
+
+        center_lat = float(self._anchor_center_lat)
+        center_lon = float(self._anchor_center_lon)
+        drift_m = haversine_distance(self.current_lat, self.current_lon, center_lat, center_lon)
+        inside_fence = bool(drift_m <= float(GEOFENCE_RADIUS_M))
+        needs_correction = bool(drift_m >= float(GEOFENCE_DRIFT_TRIGGER_M))
+        now = time.monotonic()
+
+        if (not inside_fence) and self._anchor_was_inside_fence:
+            self._anchor_breach_count += 1
+            self._geo_log(
+                "fence_breach",
+                f"[GEOFENCE] fence_breach drift={drift_m:.2f}m radius={GEOFENCE_RADIUS_M:.1f}m",
+            )
+        self._anchor_was_inside_fence = inside_fence
+
+        pulse_speed = 0.0
+        heading_err = 0.0
+        reason = "holding"
+        active = False
+
+        if needs_correction:
+            reason = "correcting"
+            target_bearing = calculate_bearing(self.current_lat, self.current_lon, center_lat, center_lon)
+            heading_err = normalize_heading_error(target_bearing - self.current_heading)
+            self._anchor_last_heading_err_deg = float(heading_err)
+            pulse_ready = (now - self._anchor_last_pulse_ts) >= float(GEOFENCE_ANCHOR_COOLDOWN_S)
+            pulse_active = now <= self._anchor_pulse_until_ts
+            if pulse_ready and not pulse_active:
+                self._anchor_last_pulse_ts = now
+                self._anchor_pulse_until_ts = now + float(GEOFENCE_ANCHOR_PULSE_S)
+                self._anchor_pulse_count += 1
+                pulse_active = True
+                self._geo_log(
+                    "correcting",
+                    (
+                        f"[GEOFENCE] correcting drift={drift_m:.2f}m "
+                        f"heading_error={heading_err:.1f}deg speed={GEOFENCE_ANCHOR_SPEED_MPS:.2f}mps"
+                    ),
+                )
+            if pulse_active:
+                pulse_speed = float(GEOFENCE_ANCHOR_SPEED_MPS)
+                active = True
+        else:
+            self._anchor_pulse_until_ts = 0.0
+            self._anchor_last_heading_err_deg = 0.0
+
+        self._command_speed_heading(pulse_speed, heading_err if pulse_speed > 0.0 else 0.0)
+        self.virtual_anchor = {
+            "enabled": bool(GEOFENCE_ENABLED),
+            "mode": "geofence_virtual_anchor",
+            "active": bool(active),
+            "reason": reason,
+            "failsafe_only": bool(GEOFENCE_FAILSAFE_ONLY),
+            "fence_radius_m": float(GEOFENCE_RADIUS_M),
+            "drift_trigger_m": float(GEOFENCE_DRIFT_TRIGGER_M),
+            "drift_from_center_m": round(float(drift_m), 3),
+            "inside_fence": bool(inside_fence),
+            "anchor_set": True,
+            "anchor_lat": round(center_lat, 7),
+            "anchor_lon": round(center_lon, 7),
+            "pulse_speed_mps": round(float(pulse_speed), 3),
+            "pulse_heading_error_deg": round(float(self._anchor_last_heading_err_deg if pulse_speed > 0.0 else 0.0), 3),
+            "pulse_count": int(self._anchor_pulse_count),
+            "breach_count": int(self._anchor_breach_count),
+        }
 
     def _fuse_visual_detection(
         self,
@@ -700,6 +894,25 @@ class USVStateMachine:
                 "heading_error_abs_deg": round(float(wind_state.get("heading_error_abs_deg", 0.0)), 3),
                 "corrected_heading_error_deg": round(float(wind_state.get("corrected_heading_error_deg", 0.0)), 3),
             }
+            virtual_anchor_state = self.virtual_anchor if isinstance(self.virtual_anchor, dict) else {}
+            virtual_anchor_payload = {
+                "enabled": bool(virtual_anchor_state.get("enabled", GEOFENCE_ENABLED)),
+                "mode": str(virtual_anchor_state.get("mode", "geofence_virtual_anchor")),
+                "active": bool(virtual_anchor_state.get("active", False)),
+                "reason": str(virtual_anchor_state.get("reason", "idle")),
+                "failsafe_only": bool(virtual_anchor_state.get("failsafe_only", GEOFENCE_FAILSAFE_ONLY)),
+                "fence_radius_m": round(float(virtual_anchor_state.get("fence_radius_m", GEOFENCE_RADIUS_M)), 3),
+                "drift_trigger_m": round(float(virtual_anchor_state.get("drift_trigger_m", GEOFENCE_DRIFT_TRIGGER_M)), 3),
+                "drift_from_center_m": round(float(virtual_anchor_state.get("drift_from_center_m", 0.0)), 3),
+                "inside_fence": bool(virtual_anchor_state.get("inside_fence", True)),
+                "anchor_set": bool(virtual_anchor_state.get("anchor_set", False)),
+                "anchor_lat": virtual_anchor_state.get("anchor_lat"),
+                "anchor_lon": virtual_anchor_state.get("anchor_lon"),
+                "pulse_speed_mps": round(float(virtual_anchor_state.get("pulse_speed_mps", 0.0)), 3),
+                "pulse_heading_error_deg": round(float(virtual_anchor_state.get("pulse_heading_error_deg", 0.0)), 3),
+                "pulse_count": int(virtual_anchor_state.get("pulse_count", 0) or 0),
+                "breach_count": int(virtual_anchor_state.get("breach_count", 0) or 0),
+            }
             fusion_payload = {
                 "enabled": bool(FUSION_ENABLED),
                 "policy": self.fusion_policy,
@@ -722,6 +935,7 @@ class USVStateMachine:
                 "state": self.state,
                 "active": self.mission_active,
                 "start_time": self.mission_start_time,
+                "hold_reason": self.hold_reason,
                 "target": self._wp_target,
                 "wp_info": self._wp_info,
                 "active_parkur": self._active_parkur_label(),
@@ -754,6 +968,7 @@ class USVStateMachine:
                 "sensor_fusion": fusion_payload,
                 "dynamic_speed_profile": dyn_speed_payload,
                 "wind_assist": wind_payload,
+                "virtual_anchor": virtual_anchor_payload,
             }
 
             now = time.monotonic()
@@ -765,6 +980,7 @@ class USVStateMachine:
                 # Check critical functional elements
                 if (old.get('state') == payload['state'] and
                     old.get('active') == payload['active'] and
+                    old.get('hold_reason') == payload['hold_reason'] and
                     old.get('target') == payload['target'] and
                     old.get('wp_info') == payload['wp_info'] and
                     old.get('gate_count') == payload['gate_count'] and
@@ -779,7 +995,8 @@ class USVStateMachine:
                     old.get('lidar_ready') == payload['lidar_ready'] and
                     old.get('sensor_fusion') == payload['sensor_fusion'] and
                     old.get('dynamic_speed_profile') == payload['dynamic_speed_profile'] and
-                    old.get('wind_assist') == payload['wind_assist']):
+                    old.get('wind_assist') == payload['wind_assist'] and
+                    old.get('virtual_anchor') == payload['virtual_anchor']):
                     logical_state_changed = False
             
             # Write only if logical state changed or 1 second heartbeat timeout exceeded
@@ -1292,6 +1509,7 @@ class USVStateMachine:
     def _enter_hold(self, reason):
         self.state = self.STATE_HOLD
         self.mission_active = False
+        self.hold_reason = str(reason or "UNKNOWN")
         self.v_target = 0.0
         self.heading_target = self.current_heading
         self._set_dynamic_speed_idle()
@@ -1300,6 +1518,12 @@ class USVStateMachine:
         self._set_mode("HOLD")
         if reason.startswith("FAILSAFE"):
             self.failsafe_state = "hold"
+            if self._arm_virtual_anchor_center():
+                self._set_virtual_anchor_idle(reason="armed", clear_center=False)
+            else:
+                self._set_virtual_anchor_idle(reason="anchor_arm_failed", clear_center=True)
+        else:
+            self._set_virtual_anchor_idle(reason="hold_non_failsafe", clear_center=True)
         self._refresh_health_check()
         self._write_state()
 
@@ -1397,8 +1621,11 @@ class USVStateMachine:
         self.mission_start_time = time.time()
         self.command_lock = True
         self.state = self.STATE_PARKUR1
+        self.hold_reason = "NONE"
         self.failsafe_state = "normal"
+        self._set_dynamic_speed_idle()
         self._set_wind_assist_idle()
+        self._set_virtual_anchor_idle(reason="mission_active", clear_center=True)
         self.gate_count = 0
         self.timeout_count = 0
         self._gate_event_start = None
@@ -1758,6 +1985,10 @@ class USVStateMachine:
         self.mission_active = False
         self._set_dynamic_speed_idle()
         self._set_wind_assist_idle()
+        if self.state == self.STATE_HOLD and str(self.hold_reason).startswith("FAILSAFE"):
+            self._set_virtual_anchor_idle(reason="armed", clear_center=False)
+        else:
+            self._set_virtual_anchor_idle(reason="mission_end", clear_center=True)
         if not self.estop_latched:
             self.command_lock = False
         self.stop_motors()
@@ -1788,6 +2019,8 @@ if __name__ == "__main__":
                 usv._trigger_estop("YKI", force_rc7=True)
 
             if not usv.mission_active:
+                if usv.state == usv.STATE_HOLD:
+                    usv._run_virtual_anchor_step()
                 if USV_MODE == USV_MODE_RACE and os.path.exists(FLAG_START):
                     usv._consume_flag(FLAG_START)
                     if (time.monotonic() - usv._last_race_flag_purge_log) >= 2.0:

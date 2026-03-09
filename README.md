@@ -172,17 +172,32 @@ Tek sayfa Mission Control arayüzü:
   - Görev durumuna `wind_assist` bloğu eklenmiştir: `enabled`, `mode`, `scope`, `active`, `reason`, `i_gain`, `bias_deg`, `bias_max_deg`, `heading_error_abs_deg`, `corrected_heading_error_deg`.
   - `/api/data` ve `report_view.navigation_health.wind_assist` ile görünürdür; throttle'lı `[WIND]` logları (`active/decay/clamped`) üretilir.
 
+- **Etrafı Savunmalı Sanal Çit Koruması (Geo-Fence & Safe-Halt Virtual Anchor)**:
+  - Failsafe nedeniyle HOLD durumuna geçildiğinde, mevcut GPS konumu anchor merkezi olarak armlanır.
+  - Araç bu merkezden sürüklenirse, sanal çit içinde kalmak için küçük rölanti düzeltme darbeleri uygulanır (pulse tabanlı virtual anchor).
+  - Aktivasyon yalnızca güvenli bağlamda çalışır: HOLD + failsafe hold + estop yok + geçerli GPS.
+  - Drift `GEOFENCE_DRIFT_TRIGGER_M` üstüne çıktığında düzeltme başlar; `GEOFENCE_RADIUS_M` aşımlarında breach sayaç/log üretilir.
+  - Görev durumuna `virtual_anchor` bloğu eklenmiştir: `active`, `reason`, `drift_from_center_m`, `inside_fence`, `pulse_count`, `breach_count` ve ilgili eşik/parametre alanları.
+  - `/api/data` ve `report_view.navigation_health.virtual_anchor` ile izlenebilir; throttle'lı `[GEOFENCE]` logları (`anchor_armed/correcting/fence_breach`) üretilir.
+
 ### 🧪 Sıradaki İnovasyon Adayları
 
-- **Termal ve Enerji Hayatta Kalma Modu** (ECO/Limp)
-- **Lidar Kendi-Gövdesini Gizleme** (self-masking / ignore zone)
-- **Geo-Fence & Safe-Halt Virtual Anchor** (sanal çit + bağlantı kaybında pozisyon tutma)
+- **Termal ve Enerji Hayatta Kalma Modu (Eco/Limp Mode)**
+- **Lidar Kendi-Gövdesini Gizleme (Lidar Self-Masking)**
+- **Lidar Tabanlı Acil Çarpışma Refleksi (Reactive Collision Avoidance)**
+- **IMU Tabanlı Ufuk Çizgisi Sabitlemesi (Horizon-Locked Targeting)**
+- **Akıllı Bant Genişliği ve Telemetri Kısılması (Bandwidth-Aware Telemetry)**
+- **Kamera Gündüz/Gece Güneş Körü Adaptasyonu (Dynamic Exposure Tuning)**
+- **Karar Ağaçlı Dalga Patern Kestirimi (Sea-State Estimation & Surf Mode)**
+- **Asimetrik Motor Hasar Toleransı (Thrust Vectoring Fallback)**
+- **Sintine / Gemi İçi Su Acil Durum Tespiti (Hull Breach Failsafe)**
+- **Bilişsel Sağlık İndeksi Algoritması (Autonomy Health Scoring)**
 
 ## 🔌 API Özeti
 
 | Endpoint | Yöntem | Açıklama |
 |----------|--------|----------|
-| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` + `dynamic_speed_profile` + `wind_assist` alanları |
+| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` + `dynamic_speed_profile` + `wind_assist` + `virtual_anchor` alanları |
 | `/api/mission_status` | GET | Görev aktiflik ve geçen süre |
 | `/api/events` | GET | Kritik olay akışı (long-poll) |
 | `/api/start_mission` | POST | Test modunda görev başlatma |
