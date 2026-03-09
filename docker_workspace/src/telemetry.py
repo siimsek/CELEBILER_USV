@@ -1424,6 +1424,8 @@ def get_data():
     out['wind_assist'] = wind_assist if isinstance(wind_assist, dict) else {}
     horizon_lock = state.get('horizon_lock', {})
     out['horizon_lock'] = horizon_lock if isinstance(horizon_lock, dict) else {}
+    camera_adaptation = state.get('camera_adaptation', {})
+    out['camera_adaptation'] = camera_adaptation if isinstance(camera_adaptation, dict) else {}
     virtual_anchor = state.get('virtual_anchor', {})
     out['virtual_anchor'] = virtual_anchor if isinstance(virtual_anchor, dict) else {}
     out['telemetry_profile'] = {
@@ -1483,6 +1485,16 @@ def get_data():
         'correction_deg': float(out['horizon_lock'].get('correction_deg', 0.0) or 0.0),
         'corrected_bearing_deg': float(out['horizon_lock'].get('corrected_bearing_deg', 0.0) or 0.0),
     }
+    camera_adaptation_summary = {
+        'enabled': bool(out['camera_adaptation'].get('enabled', False)),
+        'mode': out['camera_adaptation'].get('mode', '--'),
+        'luma_mean': float(out['camera_adaptation'].get('luma_mean', 0.0) or 0.0),
+        'exposure_gain': float(out['camera_adaptation'].get('exposure_gain', 1.0) or 1.0),
+        'exposure_beta': float(out['camera_adaptation'].get('exposure_beta', 0.0) or 0.0),
+        'hsv_s_shift': int(out['camera_adaptation'].get('hsv_s_shift', 0) or 0),
+        'hsv_v_shift': int(out['camera_adaptation'].get('hsv_v_shift', 0) or 0),
+        'hsv_profile': out['camera_adaptation'].get('hsv_profile', '--'),
+    }
     virtual_anchor_summary = {
         'enabled': bool(out['virtual_anchor'].get('enabled', False)),
         'mode': out['virtual_anchor'].get('mode', '--'),
@@ -1528,6 +1540,7 @@ def get_data():
             'dynamic_speed_profile': dyn_speed_summary,
             'wind_assist': wind_assist_summary,
             'horizon_lock': horizon_lock_summary,
+            'camera_adaptation': camera_adaptation_summary,
             'virtual_anchor': virtual_anchor_summary,
         },
         'link_health': {

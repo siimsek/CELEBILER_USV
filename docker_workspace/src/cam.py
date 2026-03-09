@@ -10,7 +10,22 @@ import numpy as np
 from flask import Flask, Response
 
 from console_utils import make_console_printer
-from compliance_profile import USV_MODE, USV_MODE_RACE
+from compliance_profile import (
+    CAM_ADAPT_BRIGHT_BETA,
+    CAM_ADAPT_ENABLED,
+    CAM_ADAPT_EXPOSURE_MAX_GAIN,
+    CAM_ADAPT_EXPOSURE_MIN_GAIN,
+    CAM_ADAPT_HSV_BRIGHT_S_SHIFT,
+    CAM_ADAPT_HSV_BRIGHT_V_SHIFT,
+    CAM_ADAPT_HSV_DARK_S_RELAX,
+    CAM_ADAPT_HSV_DARK_V_RELAX,
+    CAM_ADAPT_LOG_PERIOD_S,
+    CAM_ADAPT_LUMA_BRIGHT_THRESHOLD,
+    CAM_ADAPT_LUMA_DARK_THRESHOLD,
+    CAM_ADAPT_DARK_BETA,
+    USV_MODE,
+    USV_MODE_RACE,
+)
 
 def clamp(value, min_val, max_val):
     return max(min_val, min(value, max_val))
@@ -83,6 +98,16 @@ class VideoCamera:
             "target_detected": False,
             "target_bearing_error_deg": 0.0,
             "target_area_norm": 0.0,
+            "camera_adaptation": {
+                "enabled": bool(CAM_ADAPT_ENABLED),
+                "mode": "normal",
+                "luma_mean": 0.0,
+                "exposure_gain": 1.0,
+                "exposure_beta": 0.0,
+                "hsv_s_shift": 0,
+                "hsv_v_shift": 0,
+                "hsv_profile": "base",
+            },
         }
         
         # IO Caching state
@@ -121,6 +146,79 @@ class VideoCamera:
                 f"{message} (count={self.error_counters[key]})",
                 period_s=period_s,
             )
+
+    def _adapt_log(self, key, message):
+        self._warn_throttled(f"cam_adapt_{key}", message, period_s=CAM_ADAPT_LOG_PERIOD_S)
+
+    def _shift_hsv_lower(self, lower_arr, s_shift, v_shift):
+        shifted = lower_arr.astype(np.int16)
+        shifted[1] = int(clamp(int(shifted[1]) + int(s_shift), 0, 255))
+        shifted[2] = int(clamp(int(shifted[2]) + int(v_shift), 0, 255))
+        return shifted.astype(lower_arr.dtype)
+
+    def _resolve_adaptation_profile(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        luma_mean = float(np.mean(gray))
+
+        profile = {
+            "enabled": bool(CAM_ADAPT_ENABLED),
+            "mode": "normal",
+            "luma_mean": round(luma_mean, 2),
+            "exposure_gain": 1.0,
+            "exposure_beta": 0.0,
+            "hsv_s_shift": 0,
+            "hsv_v_shift": 0,
+            "hsv_profile": "base",
+        }
+
+        if not CAM_ADAPT_ENABLED:
+            return profile
+
+        dark_th = float(CAM_ADAPT_LUMA_DARK_THRESHOLD)
+        bright_th = float(CAM_ADAPT_LUMA_BRIGHT_THRESHOLD)
+
+        if luma_mean <= dark_th:
+            strength = clamp((dark_th - luma_mean) / max(1.0, dark_th), 0.0, 1.0)
+            gain = 1.0 + (float(CAM_ADAPT_EXPOSURE_MAX_GAIN) - 1.0) * strength
+            beta = float(CAM_ADAPT_DARK_BETA) * strength
+            s_shift = -int(round(float(CAM_ADAPT_HSV_DARK_S_RELAX) * strength))
+            v_shift = -int(round(float(CAM_ADAPT_HSV_DARK_V_RELAX) * strength))
+            profile.update(
+                {
+                    "mode": "dark",
+                    "exposure_gain": round(float(gain), 3),
+                    "exposure_beta": round(float(beta), 3),
+                    "hsv_s_shift": int(s_shift),
+                    "hsv_v_shift": int(v_shift),
+                    "hsv_profile": "dark_relaxed",
+                }
+            )
+        elif luma_mean >= bright_th:
+            strength = clamp((luma_mean - bright_th) / max(1.0, 255.0 - bright_th), 0.0, 1.0)
+            gain = 1.0 - (1.0 - float(CAM_ADAPT_EXPOSURE_MIN_GAIN)) * strength
+            beta = -float(CAM_ADAPT_BRIGHT_BETA) * strength
+            s_shift = int(round(float(CAM_ADAPT_HSV_BRIGHT_S_SHIFT) * strength))
+            v_shift = int(round(float(CAM_ADAPT_HSV_BRIGHT_V_SHIFT) * strength))
+            profile.update(
+                {
+                    "mode": "bright",
+                    "exposure_gain": round(float(gain), 3),
+                    "exposure_beta": round(float(beta), 3),
+                    "hsv_s_shift": int(s_shift),
+                    "hsv_v_shift": int(v_shift),
+                    "hsv_profile": "bright_guard",
+                }
+            )
+
+        self._adapt_log(
+            profile["mode"],
+            (
+                f"[CAM_ADAPT] mode={profile['mode']} luma={profile['luma_mean']:.1f} "
+                f"gain={profile['exposure_gain']:.2f} beta={profile['exposure_beta']:.1f} "
+                f"hsv_shift=({profile['hsv_s_shift']},{profile['hsv_v_shift']})"
+            ),
+        )
+        return profile
 
     def start(self):
         threading.Thread(target=self.update, daemon=True).start()
@@ -169,12 +267,22 @@ class VideoCamera:
             
             if self._last_written_status is not None:
                 old = self._last_written_status
+                old_adapt = old.get("camera_adaptation", {}) if isinstance(old.get("camera_adaptation", {}), dict) else {}
+                new_adapt = (
+                    self.status.get("camera_adaptation", {})
+                    if isinstance(self.status.get("camera_adaptation", {}), dict)
+                    else {}
+                )
                 if (old.get('gate_detected') == self.status['gate_detected'] and
                     old.get('gate_passed_event') == self.status['gate_passed_event'] and
                     old.get('target_detected') == self.status['target_detected'] and
                     abs(old.get('gate_center_bearing_deg', 0) - self.status['gate_center_bearing_deg']) < 0.1 and
                     abs(old.get('target_bearing_error_deg', 0) - self.status['target_bearing_error_deg']) < 0.1 and
-                    abs(old.get('target_area_norm', 0) - self.status['target_area_norm']) < 0.01):
+                    abs(old.get('target_area_norm', 0) - self.status['target_area_norm']) < 0.01 and
+                    old_adapt.get("mode") == new_adapt.get("mode") and
+                    abs(float(old_adapt.get("exposure_gain", 1.0)) - float(new_adapt.get("exposure_gain", 1.0))) < 0.02 and
+                    int(old_adapt.get("hsv_s_shift", 0)) == int(new_adapt.get("hsv_s_shift", 0)) and
+                    int(old_adapt.get("hsv_v_shift", 0)) == int(new_adapt.get("hsv_v_shift", 0))):
                     logical_state_changed = False
 
             if logical_state_changed or (now - self._last_status_write_time >= 1.0):
@@ -189,15 +297,19 @@ class VideoCamera:
         except Exception as exc:
             self._bump_error("status_write_error", f"[WARN] [CAM] Status yazma hatasi: {exc}")
 
-    def _extract_detections(self, frame):
+    def _extract_detections(self, frame, adapt_profile):
         small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
         hsv = cv2.cvtColor(cv2.GaussianBlur(small, (5, 5), 0), cv2.COLOR_BGR2HSV)
         detections = []
+        s_shift = int(adapt_profile.get("hsv_s_shift", 0))
+        v_shift = int(adapt_profile.get("hsv_v_shift", 0))
 
         for name, params in COLOR_RANGES.items():
-            mask = cv2.inRange(hsv, params["lower"], params["upper"])
+            lower = self._shift_hsv_lower(params["lower"], s_shift, v_shift)
+            mask = cv2.inRange(hsv, lower, params["upper"])
             if "lower2" in params:
-                mask2 = cv2.inRange(hsv, params["lower2"], params["upper2"])
+                lower2 = self._shift_hsv_lower(params["lower2"], s_shift, v_shift)
+                mask2 = cv2.inRange(hsv, lower2, params["upper2"])
                 mask = cv2.bitwise_or(mask, mask2)
             kernel = np.ones((3, 3), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
@@ -227,7 +339,15 @@ class VideoCamera:
     def process_frame(self, frame):
         now = time.monotonic()
         h, w = frame.shape[:2]
-        detections = self._extract_detections(frame)
+        adapt_profile = self._resolve_adaptation_profile(frame)
+        detect_frame = frame
+        if CAM_ADAPT_ENABLED:
+            detect_frame = cv2.convertScaleAbs(
+                frame,
+                alpha=float(adapt_profile.get("exposure_gain", 1.0)),
+                beta=float(adapt_profile.get("exposure_beta", 0.0)),
+            )
+        detections = self._extract_detections(detect_frame, adapt_profile)
 
         for det in detections:
             color = COLOR_RANGES.get(det["name"], {}).get("color", (255, 255, 255))
@@ -282,12 +402,35 @@ class VideoCamera:
             "target_detected": target_detected,
             "target_bearing_error_deg": round(target_bearing, 3),
             "target_area_norm": round(target_area_norm, 4),
+            "camera_adaptation": {
+                "enabled": bool(adapt_profile.get("enabled", False)),
+                "mode": str(adapt_profile.get("mode", "normal")),
+                "luma_mean": round(float(adapt_profile.get("luma_mean", 0.0)), 2),
+                "exposure_gain": round(float(adapt_profile.get("exposure_gain", 1.0)), 3),
+                "exposure_beta": round(float(adapt_profile.get("exposure_beta", 0.0)), 3),
+                "hsv_s_shift": int(adapt_profile.get("hsv_s_shift", 0)),
+                "hsv_v_shift": int(adapt_profile.get("hsv_v_shift", 0)),
+                "hsv_profile": str(adapt_profile.get("hsv_profile", "base")),
+            },
         }
         self._write_status()
 
         ts_label = time.strftime("%H:%M:%S")
         cv2.rectangle(frame, (0, 0), (w, 36), (0, 0, 0), -1)
         cv2.putText(frame, f"REC {ts_label} | FILE1", (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(
+            frame,
+            (
+                f"ADAPT {adapt_profile['mode']} "
+                f"L:{adapt_profile['luma_mean']:.0f} "
+                f"G:{adapt_profile['exposure_gain']:.2f}"
+            ),
+            (440, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (180, 220, 255),
+            2,
+        )
         cv2.line(frame, (w // 2 - 20, h // 2), (w // 2 + 20, h // 2), (200, 200, 200), 2)
         cv2.line(frame, (w // 2, h // 2 - 20), (w // 2, h // 2 + 20), (200, 200, 200), 2)
 
@@ -354,4 +497,3 @@ if __name__ == "__main__":
         pass
     finally:
         camera_stream.close()
-

@@ -174,6 +174,16 @@ class USVStateMachine:
         self.heading_target = 0.0
 
         self.camera_status = {}
+        self.camera_adaptation = {
+            "enabled": False,
+            "mode": "normal",
+            "luma_mean": 0.0,
+            "exposure_gain": 1.0,
+            "exposure_beta": 0.0,
+            "hsv_s_shift": 0,
+            "hsv_v_shift": 0,
+            "hsv_profile": "base",
+        }
         self.camera_ready = False
         self.lidar_available = False
         self.lidar_ready = False
@@ -1035,6 +1045,17 @@ class USVStateMachine:
                 "pitch_gain": float(horizon_state.get("pitch_gain", HORIZON_LOCK_PITCH_GAIN)),
                 "max_correction_deg": float(horizon_state.get("max_correction_deg", HORIZON_LOCK_MAX_CORRECTION_DEG)),
             }
+            camera_adapt_state = self.camera_adaptation if isinstance(self.camera_adaptation, dict) else {}
+            camera_adapt_payload = {
+                "enabled": bool(camera_adapt_state.get("enabled", False)),
+                "mode": str(camera_adapt_state.get("mode", "normal")),
+                "luma_mean": round(float(camera_adapt_state.get("luma_mean", 0.0) or 0.0), 2),
+                "exposure_gain": round(float(camera_adapt_state.get("exposure_gain", 1.0) or 1.0), 3),
+                "exposure_beta": round(float(camera_adapt_state.get("exposure_beta", 0.0) or 0.0), 3),
+                "hsv_s_shift": int(camera_adapt_state.get("hsv_s_shift", 0) or 0),
+                "hsv_v_shift": int(camera_adapt_state.get("hsv_v_shift", 0) or 0),
+                "hsv_profile": str(camera_adapt_state.get("hsv_profile", "base")),
+            }
             virtual_anchor_state = self.virtual_anchor if isinstance(self.virtual_anchor, dict) else {}
             virtual_anchor_payload = {
                 "enabled": bool(virtual_anchor_state.get("enabled", GEOFENCE_ENABLED)),
@@ -1112,6 +1133,7 @@ class USVStateMachine:
                 "dynamic_speed_profile": dyn_speed_payload,
                 "wind_assist": wind_payload,
                 "horizon_lock": horizon_payload,
+                "camera_adaptation": camera_adapt_payload,
                 "virtual_anchor": virtual_anchor_payload,
             }
 
@@ -1141,6 +1163,7 @@ class USVStateMachine:
                     old.get('dynamic_speed_profile') == payload['dynamic_speed_profile'] and
                     old.get('wind_assist') == payload['wind_assist'] and
                     old.get('horizon_lock') == payload['horizon_lock'] and
+                    old.get('camera_adaptation') == payload['camera_adaptation'] and
                     old.get('virtual_anchor') == payload['virtual_anchor']):
                     logical_state_changed = False
             
@@ -1545,6 +1568,7 @@ class USVStateMachine:
             "target_detected": False,
             "target_bearing_error_deg": 0.0,
             "target_area_norm": 0.0,
+            "camera_adaptation": dict(self.camera_adaptation),
         }
         data = default
         try:
@@ -1637,6 +1661,20 @@ class USVStateMachine:
             self._gate_ghost_latched = False
             self._target_ghost_latched = False
 
+        adapt = data.get("camera_adaptation", {})
+        if not isinstance(adapt, dict):
+            adapt = {}
+        self.camera_adaptation = {
+            "enabled": bool(adapt.get("enabled", False)),
+            "mode": str(adapt.get("mode", "normal")),
+            "luma_mean": round(float(adapt.get("luma_mean", 0.0) or 0.0), 2),
+            "exposure_gain": round(float(adapt.get("exposure_gain", 1.0) or 1.0), 3),
+            "exposure_beta": round(float(adapt.get("exposure_beta", 0.0) or 0.0), 3),
+            "hsv_s_shift": int(adapt.get("hsv_s_shift", 0) or 0),
+            "hsv_v_shift": int(adapt.get("hsv_v_shift", 0) or 0),
+            "hsv_profile": str(adapt.get("hsv_profile", "base")),
+        }
+        data["camera_adaptation"] = dict(self.camera_adaptation)
         self.camera_status = data
 
     def _update_watchdog(self):
