@@ -49,6 +49,13 @@ from compliance_profile import (
     GEOFENCE_RADIUS_M,
     HEARTBEAT_FAIL_S,
     HEARTBEAT_WARN_S,
+    HORIZON_LOCK_ENABLED,
+    HORIZON_LOCK_LOG_PERIOD_S,
+    HORIZON_LOCK_MAX_CORRECTION_DEG,
+    HORIZON_LOCK_MIN_TILT_DEG,
+    HORIZON_LOCK_PITCH_GAIN,
+    HORIZON_LOCK_ROLL_GAIN,
+    HORIZON_LOCK_SCOPE,
     LIDAR_READY_TIMEOUT_S,
     LINK_TOPOLOGY,
     LOG_DIR,
@@ -159,6 +166,8 @@ class USVStateMachine:
         self.current_lat = 0.0
         self.current_lon = 0.0
         self.current_heading = 0.0
+        self.current_roll_deg = 0.0
+        self.current_pitch_deg = 0.0
         self.rc_channels = {f"ch{i}": 0 for i in range(1, 9)}
 
         self.v_target = 0.0
@@ -240,6 +249,22 @@ class USVStateMachine:
             "pulse_heading_error_deg": 0.0,
             "pulse_count": 0,
             "breach_count": 0,
+        }
+        self.horizon_lock = {
+            "enabled": bool(HORIZON_LOCK_ENABLED),
+            "mode": "imu_horizon_lock",
+            "scope": list(HORIZON_LOCK_SCOPE),
+            "active": False,
+            "reason": "idle",
+            "channel": "none",
+            "roll_deg": 0.0,
+            "pitch_deg": 0.0,
+            "raw_bearing_deg": 0.0,
+            "correction_deg": 0.0,
+            "corrected_bearing_deg": 0.0,
+            "roll_gain": float(HORIZON_LOCK_ROLL_GAIN),
+            "pitch_gain": float(HORIZON_LOCK_PITCH_GAIN),
+            "max_correction_deg": float(HORIZON_LOCK_MAX_CORRECTION_DEG),
         }
 
         self.last_heartbeat_time = time.monotonic()
@@ -351,6 +376,99 @@ class USVStateMachine:
 
     def _geo_log(self, key, message):
         self._warn_throttled(f"geo_{key}", message, period_s=GEOFENCE_LOG_PERIOD_S)
+
+    def _horizon_log(self, key, message):
+        self._warn_throttled(f"horizon_{key}", message, period_s=HORIZON_LOCK_LOG_PERIOD_S)
+
+    def _set_horizon_lock_idle(self, reason="idle", channel="none"):
+        self.horizon_lock = {
+            "enabled": bool(HORIZON_LOCK_ENABLED),
+            "mode": "imu_horizon_lock",
+            "scope": list(HORIZON_LOCK_SCOPE),
+            "active": False,
+            "reason": str(reason),
+            "channel": str(channel),
+            "roll_deg": round(float(self.current_roll_deg), 3),
+            "pitch_deg": round(float(self.current_pitch_deg), 3),
+            "raw_bearing_deg": 0.0,
+            "correction_deg": 0.0,
+            "corrected_bearing_deg": 0.0,
+            "roll_gain": float(HORIZON_LOCK_ROLL_GAIN),
+            "pitch_gain": float(HORIZON_LOCK_PITCH_GAIN),
+            "max_correction_deg": float(HORIZON_LOCK_MAX_CORRECTION_DEG),
+        }
+
+    def _apply_horizon_lock_to_bearing(self, raw_bearing_deg, parkur_label, channel, detected, update_state=True):
+        try:
+            raw_bearing = float(raw_bearing_deg)
+        except (TypeError, ValueError):
+            raw_bearing = 0.0
+        roll_deg = float(self.current_roll_deg)
+        pitch_deg = float(self.current_pitch_deg)
+
+        active = False
+        reason = "active"
+        correction_deg = 0.0
+        corrected_bearing = raw_bearing
+
+        if not HORIZON_LOCK_ENABLED:
+            reason = "disabled"
+        elif parkur_label not in HORIZON_LOCK_SCOPE:
+            reason = "out_of_scope"
+        elif not self.mission_active:
+            reason = "mission_inactive"
+        elif not bool(detected):
+            reason = "no_detection"
+        elif max(abs(roll_deg), abs(pitch_deg)) < float(HORIZON_LOCK_MIN_TILT_DEG):
+            reason = "tilt_small"
+        else:
+            raw_correction = (-(roll_deg * float(HORIZON_LOCK_ROLL_GAIN))) - (
+                pitch_deg * float(HORIZON_LOCK_PITCH_GAIN)
+            )
+            correction_deg = float(
+                clamp(raw_correction, -float(HORIZON_LOCK_MAX_CORRECTION_DEG), float(HORIZON_LOCK_MAX_CORRECTION_DEG))
+            )
+            corrected_bearing = raw_bearing + correction_deg
+            active = True
+            clamped = abs(raw_correction - correction_deg) > 1e-6
+            if clamped:
+                reason = "clamped"
+                if update_state:
+                    self._horizon_log(
+                        f"{parkur_label}_{channel}_clamped",
+                        (
+                            f"[HORIZON] {parkur_label}/{channel} clamped "
+                            f"roll={roll_deg:.1f} pitch={pitch_deg:.1f} raw={raw_bearing:.1f} corr={correction_deg:.1f}"
+                        ),
+                    )
+            else:
+                if update_state:
+                    self._horizon_log(
+                        f"{parkur_label}_{channel}_active",
+                        (
+                            f"[HORIZON] {parkur_label}/{channel} active "
+                            f"roll={roll_deg:.1f} pitch={pitch_deg:.1f} raw={raw_bearing:.1f} corrected={corrected_bearing:.1f}"
+                        ),
+                    )
+
+        if update_state:
+            self.horizon_lock = {
+                "enabled": bool(HORIZON_LOCK_ENABLED),
+                "mode": "imu_horizon_lock",
+                "scope": list(HORIZON_LOCK_SCOPE),
+                "active": bool(active),
+                "reason": reason,
+                "channel": str(channel),
+                "roll_deg": round(float(roll_deg), 3),
+                "pitch_deg": round(float(pitch_deg), 3),
+                "raw_bearing_deg": round(float(raw_bearing), 3),
+                "correction_deg": round(float(correction_deg), 3),
+                "corrected_bearing_deg": round(float(corrected_bearing), 3),
+                "roll_gain": float(HORIZON_LOCK_ROLL_GAIN),
+                "pitch_gain": float(HORIZON_LOCK_PITCH_GAIN),
+                "max_correction_deg": float(HORIZON_LOCK_MAX_CORRECTION_DEG),
+            }
+        return float(corrected_bearing)
 
     def _gps_position_valid(self):
         try:
@@ -760,13 +878,19 @@ class USVStateMachine:
         target_raw_detected = bool(camera_data.get("target_detected_raw", camera_data.get("target_detected", False)))
         try:
             gate_bearing_raw = float(
-                camera_data.get("gate_center_bearing_deg_raw", camera_data.get("gate_center_bearing_deg", 0.0))
+                camera_data.get(
+                    "gate_center_bearing_deg_imu_corrected",
+                    camera_data.get("gate_center_bearing_deg", 0.0),
+                )
             )
         except (TypeError, ValueError):
             gate_bearing_raw = 0.0
         try:
             target_bearing_raw = float(
-                camera_data.get("target_bearing_error_deg_raw", camera_data.get("target_bearing_error_deg", 0.0))
+                camera_data.get(
+                    "target_bearing_error_deg_imu_corrected",
+                    camera_data.get("target_bearing_error_deg", 0.0),
+                )
             )
         except (TypeError, ValueError):
             target_bearing_raw = 0.0
@@ -894,6 +1018,23 @@ class USVStateMachine:
                 "heading_error_abs_deg": round(float(wind_state.get("heading_error_abs_deg", 0.0)), 3),
                 "corrected_heading_error_deg": round(float(wind_state.get("corrected_heading_error_deg", 0.0)), 3),
             }
+            horizon_state = self.horizon_lock if isinstance(self.horizon_lock, dict) else {}
+            horizon_payload = {
+                "enabled": bool(horizon_state.get("enabled", HORIZON_LOCK_ENABLED)),
+                "mode": str(horizon_state.get("mode", "imu_horizon_lock")),
+                "scope": list(horizon_state.get("scope", list(HORIZON_LOCK_SCOPE))),
+                "active": bool(horizon_state.get("active", False)),
+                "reason": str(horizon_state.get("reason", "idle")),
+                "channel": str(horizon_state.get("channel", "none")),
+                "roll_deg": round(float(horizon_state.get("roll_deg", self.current_roll_deg)), 3),
+                "pitch_deg": round(float(horizon_state.get("pitch_deg", self.current_pitch_deg)), 3),
+                "raw_bearing_deg": round(float(horizon_state.get("raw_bearing_deg", 0.0)), 3),
+                "correction_deg": round(float(horizon_state.get("correction_deg", 0.0)), 3),
+                "corrected_bearing_deg": round(float(horizon_state.get("corrected_bearing_deg", 0.0)), 3),
+                "roll_gain": float(horizon_state.get("roll_gain", HORIZON_LOCK_ROLL_GAIN)),
+                "pitch_gain": float(horizon_state.get("pitch_gain", HORIZON_LOCK_PITCH_GAIN)),
+                "max_correction_deg": float(horizon_state.get("max_correction_deg", HORIZON_LOCK_MAX_CORRECTION_DEG)),
+            }
             virtual_anchor_state = self.virtual_anchor if isinstance(self.virtual_anchor, dict) else {}
             virtual_anchor_payload = {
                 "enabled": bool(virtual_anchor_state.get("enabled", GEOFENCE_ENABLED)),
@@ -946,6 +1087,8 @@ class USVStateMachine:
                 "estop_source": self.estop_source or "--",
                 "camera_ready": self.camera_ready,
                 "lidar_ready": self.lidar_ready,
+                "roll_deg": round(self.current_roll_deg, 3),
+                "pitch_deg": round(self.current_pitch_deg, 3),
                 "heartbeat_age_s": round(self.heartbeat_age_s, 3),
                 "link_heartbeat_age_s": round(self.link_heartbeat_age_s, 3),
                 "link_heartbeat_source": self.link_heartbeat_source,
@@ -968,6 +1111,7 @@ class USVStateMachine:
                 "sensor_fusion": fusion_payload,
                 "dynamic_speed_profile": dyn_speed_payload,
                 "wind_assist": wind_payload,
+                "horizon_lock": horizon_payload,
                 "virtual_anchor": virtual_anchor_payload,
             }
 
@@ -996,6 +1140,7 @@ class USVStateMachine:
                     old.get('sensor_fusion') == payload['sensor_fusion'] and
                     old.get('dynamic_speed_profile') == payload['dynamic_speed_profile'] and
                     old.get('wind_assist') == payload['wind_assist'] and
+                    old.get('horizon_lock') == payload['horizon_lock'] and
                     old.get('virtual_anchor') == payload['virtual_anchor']):
                     logical_state_changed = False
             
@@ -1369,6 +1514,9 @@ class USVStateMachine:
                     self.current_lat = msg.lat / 1e7
                     self.current_lon = msg.lon / 1e7
                     self.current_heading = msg.hdg / 100.0
+                elif mtype == "ATTITUDE":
+                    self.current_roll_deg = math.degrees(getattr(msg, "roll", 0.0))
+                    self.current_pitch_deg = math.degrees(getattr(msg, "pitch", 0.0))
                 elif mtype == "HEARTBEAT":
                     if msg.get_srcSystem() == self.master.target_system:
                         self.last_heartbeat_time = time.monotonic()
@@ -1418,6 +1566,54 @@ class USVStateMachine:
             "target_area_norm",
         ):
             data[f"{key}_raw"] = data.get(key, default.get(key))
+
+        parkur_label = self._active_parkur_label()
+        gate_detected_raw = bool(data.get("gate_detected_raw", False))
+        target_detected_raw = bool(data.get("target_detected_raw", False))
+        try:
+            gate_bearing_raw = float(data.get("gate_center_bearing_deg_raw", 0.0))
+        except (TypeError, ValueError):
+            gate_bearing_raw = 0.0
+        try:
+            target_bearing_raw = float(data.get("target_bearing_error_deg_raw", 0.0))
+        except (TypeError, ValueError):
+            target_bearing_raw = 0.0
+        gate_bearing_corrected = self._apply_horizon_lock_to_bearing(
+            gate_bearing_raw,
+            parkur_label,
+            "gate",
+            gate_detected_raw,
+            update_state=False,
+        )
+        target_bearing_corrected = self._apply_horizon_lock_to_bearing(
+            target_bearing_raw,
+            parkur_label,
+            "target",
+            target_detected_raw,
+            update_state=False,
+        )
+        data["gate_center_bearing_deg_imu_corrected"] = gate_bearing_corrected
+        data["target_bearing_error_deg_imu_corrected"] = target_bearing_corrected
+        data["gate_center_bearing_deg"] = gate_bearing_corrected
+        data["target_bearing_error_deg"] = target_bearing_corrected
+        if target_detected_raw:
+            self._apply_horizon_lock_to_bearing(
+                target_bearing_raw,
+                parkur_label,
+                "target",
+                True,
+                update_state=True,
+            )
+        elif gate_detected_raw:
+            self._apply_horizon_lock_to_bearing(
+                gate_bearing_raw,
+                parkur_label,
+                "gate",
+                True,
+                update_state=True,
+            )
+        else:
+            self._set_horizon_lock_idle(reason="no_detection", channel="none")
 
         try:
             frame_age_s = float(data.get("frame_age_s", 999.0))
@@ -1514,6 +1710,7 @@ class USVStateMachine:
         self.heading_target = self.current_heading
         self._set_dynamic_speed_idle()
         self._set_wind_assist_idle()
+        self._set_horizon_lock_idle(reason="hold", channel="none")
         self.stop_motors()
         self._set_mode("HOLD")
         if reason.startswith("FAILSAFE"):
@@ -1625,6 +1822,7 @@ class USVStateMachine:
         self.failsafe_state = "normal"
         self._set_dynamic_speed_idle()
         self._set_wind_assist_idle()
+        self._set_horizon_lock_idle(reason="mission_active", channel="none")
         self._set_virtual_anchor_idle(reason="mission_active", clear_center=True)
         self.gate_count = 0
         self.timeout_count = 0
@@ -1985,6 +2183,7 @@ class USVStateMachine:
         self.mission_active = False
         self._set_dynamic_speed_idle()
         self._set_wind_assist_idle()
+        self._set_horizon_lock_idle(reason="mission_end", channel="none")
         if self.state == self.STATE_HOLD and str(self.hold_reason).startswith("FAILSAFE"):
             self._set_virtual_anchor_idle(reason="armed", clear_center=False)
         else:

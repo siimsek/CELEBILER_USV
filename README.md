@@ -172,6 +172,14 @@ Tek sayfa Mission Control arayüzü:
   - Görev durumuna `wind_assist` bloğu eklenmiştir: `enabled`, `mode`, `scope`, `active`, `reason`, `i_gain`, `bias_deg`, `bias_max_deg`, `heading_error_abs_deg`, `corrected_heading_error_deg`.
   - `/api/data` ve `report_view.navigation_health.wind_assist` ile görünürdür; throttle'lı `[WIND]` logları (`active/decay/clamped`) üretilir.
 
+- **IMU Tabanlı Ufuk Çizgisi Sabitlemesi (Horizon-Locked Targeting)**:
+  - Parkur 2 ve Parkur 3'te kamera bearing hataları, Pixhawk IMU `roll/pitch` verisi ile ters yönde düzeltilir (ufuk kilitleme).
+  - Ham kamera alanları korunur (`*_raw`), karar döngüsünde IMU ile düzeltilmiş bearing alanları kullanılır.
+  - Lidar füzyon penceresi de düzeltilmiş bearing ile beslendiği için yalpa anlarında doğrultu eşleşmesi daha kararlı hale gelir.
+  - Düzeltme miktarı tilt eşiği altında devreye girmez, üstünde clamp ile sınırlandırılır (`HORIZON_LOCK_MAX_CORRECTION_DEG`).
+  - Görev durumuna `horizon_lock` bloğu eklenmiştir: `active`, `reason`, `channel`, `roll_deg`, `pitch_deg`, `raw_bearing_deg`, `correction_deg`, `corrected_bearing_deg`.
+  - `/api/data` ve `report_view.navigation_health.horizon_lock` ile görünürdür; throttle'lı `[HORIZON]` logları üretilir.
+
 - **Etrafı Savunmalı Sanal Çit Koruması (Geo-Fence & Safe-Halt Virtual Anchor)**:
   - Failsafe nedeniyle HOLD durumuna geçildiğinde, mevcut GPS konumu anchor merkezi olarak armlanır.
   - Araç bu merkezden sürüklenirse, sanal çit içinde kalmak için küçük rölanti düzeltme darbeleri uygulanır (pulse tabanlı virtual anchor).
@@ -185,7 +193,6 @@ Tek sayfa Mission Control arayüzü:
 - **Termal ve Enerji Hayatta Kalma Modu (Eco/Limp Mode)**
 - **Lidar Kendi-Gövdesini Gizleme (Lidar Self-Masking)**
 - **Lidar Tabanlı Acil Çarpışma Refleksi (Reactive Collision Avoidance)**
-- **IMU Tabanlı Ufuk Çizgisi Sabitlemesi (Horizon-Locked Targeting)**
 - **Akıllı Bant Genişliği ve Telemetri Kısılması (Bandwidth-Aware Telemetry)**
 - **Kamera Gündüz/Gece Güneş Körü Adaptasyonu (Dynamic Exposure Tuning)**
 - **Karar Ağaçlı Dalga Patern Kestirimi (Sea-State Estimation & Surf Mode)**
@@ -197,7 +204,7 @@ Tek sayfa Mission Control arayüzü:
 
 | Endpoint | Yöntem | Açıklama |
 |----------|--------|----------|
-| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` + `dynamic_speed_profile` + `wind_assist` + `virtual_anchor` alanları |
+| `/api/data` | GET | Dashboard verisi + report_view + health + `sensor_fusion` + `dynamic_speed_profile` + `wind_assist` + `horizon_lock` + `virtual_anchor` alanları |
 | `/api/mission_status` | GET | Görev aktiflik ve geçen süre |
 | `/api/events` | GET | Kritik olay akışı (long-poll) |
 | `/api/start_mission` | POST | Test modunda görev başlatma |

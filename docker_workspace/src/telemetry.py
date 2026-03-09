@@ -1422,6 +1422,8 @@ def get_data():
     out['dynamic_speed_profile'] = dynamic_speed_profile if isinstance(dynamic_speed_profile, dict) else {}
     wind_assist = state.get('wind_assist', {})
     out['wind_assist'] = wind_assist if isinstance(wind_assist, dict) else {}
+    horizon_lock = state.get('horizon_lock', {})
+    out['horizon_lock'] = horizon_lock if isinstance(horizon_lock, dict) else {}
     virtual_anchor = state.get('virtual_anchor', {})
     out['virtual_anchor'] = virtual_anchor if isinstance(virtual_anchor, dict) else {}
     out['telemetry_profile'] = {
@@ -1468,6 +1470,19 @@ def get_data():
         'heading_error_abs_deg': float(out['wind_assist'].get('heading_error_abs_deg', 0.0) or 0.0),
         'corrected_heading_error_deg': float(out['wind_assist'].get('corrected_heading_error_deg', 0.0) or 0.0),
     }
+    horizon_lock_summary = {
+        'enabled': bool(out['horizon_lock'].get('enabled', False)),
+        'mode': out['horizon_lock'].get('mode', '--'),
+        'scope': out['horizon_lock'].get('scope', []),
+        'active': bool(out['horizon_lock'].get('active', False)),
+        'reason': out['horizon_lock'].get('reason', '--'),
+        'channel': out['horizon_lock'].get('channel', '--'),
+        'roll_deg': float(out['horizon_lock'].get('roll_deg', 0.0) or 0.0),
+        'pitch_deg': float(out['horizon_lock'].get('pitch_deg', 0.0) or 0.0),
+        'raw_bearing_deg': float(out['horizon_lock'].get('raw_bearing_deg', 0.0) or 0.0),
+        'correction_deg': float(out['horizon_lock'].get('correction_deg', 0.0) or 0.0),
+        'corrected_bearing_deg': float(out['horizon_lock'].get('corrected_bearing_deg', 0.0) or 0.0),
+    }
     virtual_anchor_summary = {
         'enabled': bool(out['virtual_anchor'].get('enabled', False)),
         'mode': out['virtual_anchor'].get('mode', '--'),
@@ -1512,6 +1527,7 @@ def get_data():
             'sensor_fusion': fusion_summary,
             'dynamic_speed_profile': dyn_speed_summary,
             'wind_assist': wind_assist_summary,
+            'horizon_lock': horizon_lock_summary,
             'virtual_anchor': virtual_anchor_summary,
         },
         'link_health': {
