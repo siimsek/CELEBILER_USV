@@ -1,0 +1,273 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="water_world">
+    <!--
+      USV: 1.62 m x 0.81 m
+      P1 zigzag koridor: 8 m genişlik, 1 m duba aralığı, 3 kıvrım
+      P2 engel kaçınma: sarı dubalar rastgele, turuncu sınır
+      P3 hedef seçimi: kırmızı/yeşil/siyah hedef dubalar
+    -->
+
+    <!-- FIX: Improved physics for stable floating boat (less vibration, better damping) -->
+    <physics name="4ms" type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <gravity>0 0 -9.81</gravity>
+      <ode>
+        <!-- Remove preset="quick" (not supported in Gazebo Fortress) - use standard parameters instead -->
+        <solver>
+          <type>quick</type>
+          <iters>50</iters>
+          <precon_iters>0</precon_iters>
+          <sor>1.3</sor>
+          <use_dynamic_moi_rescaling>true</use_dynamic_moi_rescaling>
+        </solver>
+        <constraints>
+          <cfm>0.01</cfm>
+          <erp>0.8</erp>
+          <contact_max_correcting_vel>1.0</contact_max_correcting_vel>
+          <contact_surface_layer>0.01</contact_surface_layer>
+        </constraints>
+      </ode>
+    </physics>
+
+    <plugin filename="libignition-gazebo-physics-system.so" name="ignition::gazebo::systems::Physics"/>
+    <plugin filename="libignition-gazebo-user-commands-system.so" name="ignition::gazebo::systems::UserCommands"/>
+    <plugin filename="libignition-gazebo-scene-broadcaster-system.so" name="ignition::gazebo::systems::SceneBroadcaster"/>
+    <plugin filename="libignition-gazebo-sensors-system.so" name="ignition::gazebo::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <!--
+      Su yüzeyi: uniform_fluid_density TÜM hacmi sürekli tam batmış sayar (V*rho*g >> mg) ve tekneyi yukarı fırlatır.
+      graded_buoyancy: z=0 üzeri hava (~1 kg/m³), altı su (1000) — yüzeyde gerçekçi yüzdürme.
+      Ayrıntı: https://gazebosim.org/api/sim/8/theory_buoyancy.html
+    -->
+    <plugin filename="libignition-gazebo-buoyancy-system.so" name="ignition::gazebo::systems::Buoyancy">
+      <graded_buoyancy>
+        <default_density>1000</default_density>
+        <density_change>
+          <above_depth>0</above_depth>
+          <density>1</density>
+        </density_change>
+      </graded_buoyancy>
+      <!-- Buoyancy yalnızca duba modelleri; usv_model yok (SetEntityPose ile çakışmayı önler) -->
+      <enable>boundary_buoy_orange_01</enable>
+      <enable>usv_model</enable>
+      <enable>boundary_buoy_orange_02</enable>
+      <enable>boundary_buoy_orange_03</enable>
+      <enable>boundary_buoy_orange_04</enable>
+      <enable>boundary_buoy_orange_05</enable>
+      <enable>boundary_buoy_orange_06</enable>
+      <enable>boundary_buoy_orange_07</enable>
+      <enable>boundary_buoy_orange_08</enable>
+      <enable>boundary_buoy_orange_09</enable>
+      <enable>boundary_buoy_orange_10</enable>
+      <enable>boundary_buoy_orange_11</enable>
+      <enable>boundary_buoy_orange_12</enable>
+      <enable>boundary_buoy_orange_13</enable>
+      <enable>boundary_buoy_orange_14</enable>
+      <enable>boundary_buoy_orange_15</enable>
+      <enable>boundary_buoy_orange_16</enable>
+      <enable>boundary_buoy_orange_17</enable>
+      <enable>boundary_buoy_orange_18</enable>
+      <enable>boundary_buoy_orange_19</enable>
+      <enable>boundary_buoy_orange_20</enable>
+      <enable>boundary_buoy_orange_21</enable>
+      <enable>boundary_buoy_orange_22</enable>
+      <enable>boundary_buoy_orange_23</enable>
+      <enable>boundary_buoy_orange_24</enable>
+      <enable>boundary_buoy_orange_25</enable>
+      <enable>boundary_buoy_orange_26</enable>
+      <enable>boundary_buoy_orange_27</enable>
+      <enable>boundary_buoy_orange_28</enable>
+      <enable>boundary_buoy_orange_29</enable>
+      <enable>boundary_buoy_orange_30</enable>
+      <enable>boundary_buoy_orange_67</enable>
+      <enable>boundary_buoy_orange_68</enable>
+      <enable>boundary_buoy_orange_69</enable>
+      <enable>boundary_buoy_orange_70</enable>
+      <enable>boundary_buoy_orange_71</enable>
+      <enable>boundary_buoy_orange_72</enable>
+      <enable>boundary_buoy_orange_73</enable>
+      <enable>boundary_buoy_orange_74</enable>
+      <enable>boundary_buoy_orange_75</enable>
+      <enable>boundary_buoy_orange_76</enable>
+      <enable>boundary_buoy_orange_77</enable>
+      <enable>boundary_buoy_orange_78</enable>
+      <enable>boundary_buoy_orange_79</enable>
+      <enable>boundary_buoy_orange_80</enable>
+      <enable>boundary_buoy_orange_81</enable>
+      <enable>boundary_buoy_orange_82</enable>
+      <enable>boundary_buoy_orange_83</enable>
+      <enable>boundary_buoy_orange_84</enable>
+      <enable>obstacle_buoy_yellow_01</enable>
+      <enable>obstacle_buoy_yellow_02</enable>
+      <enable>obstacle_buoy_yellow_03</enable>
+      <enable>obstacle_buoy_yellow_04</enable>
+      <enable>obstacle_buoy_yellow_05</enable>
+      <enable>obstacle_buoy_yellow_06</enable>
+      <enable>obstacle_buoy_yellow_07</enable>
+      <enable>obstacle_buoy_yellow_08</enable>
+      <enable>obstacle_buoy_yellow_09</enable>
+      <enable>obstacle_buoy_yellow_10</enable>
+      <enable>obstacle_buoy_yellow_11</enable>
+      <enable>obstacle_buoy_yellow_12</enable>
+      <enable>obstacle_buoy_yellow_13</enable>
+      <enable>obstacle_buoy_yellow_14</enable>
+      <enable>target_buoy_red</enable>
+      <enable>target_buoy_green</enable>
+      <enable>target_buoy_black</enable>
+    </plugin>
+
+    <scene>
+      <ambient>0.72 0.77 0.82 1</ambient>
+      <background>0.80 0.89 0.98 1</background>
+      <shadows>false</shadows>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>false</cast_shadows>
+      <pose>0 0 16 0 0 0</pose>
+      <diffuse>0.92 0.92 0.92 1</diffuse>
+      <specular>0.18 0.18 0.18 1</specular>
+      <attenuation>
+        <range>1200</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.35 -0.15 -0.92</direction>
+    </light>
+
+    <model name="water_plane">
+      <static>true</static>
+      <link name="link">
+        <!-- FIX: Improved water plane contact physics for boat floating stability -->
+        <collision name="collision">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>80 80</size></plane>
+          </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>0.1</mu>
+                <mu2>0.1</mu2>
+              </ode>
+            </friction>
+            <contact>
+              <ode>
+                <soft_cfm>0.001</soft_cfm>
+                <soft_erp>0.9</soft_erp>
+                <max_vel>0.1</max_vel>
+              </ode>
+            </contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>80 80</size></plane>
+          </geometry>
+          <material>
+            <ambient>0.35 0.67 0.89 1</ambient>
+            <diffuse>0.35 0.67 0.89 1</diffuse>
+            <specular>0.08 0.08 0.08 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================================================ -->
+    <!-- PARKUR 1: Zigzag slalom koridor                  -->
+    <!-- Merkez: (0,0)→(2.5,3.5)→(-2.5,7)→(2.5,10.5)→(0,14) -->
+    <!-- Genişlik: 8 m | Aralık: 1 m | 3 kıvrım          -->
+    <!-- ================================================ -->
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_01</name><pose>-4.00 0.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_02</name><pose>-3.29 1.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_03</name><pose>-2.57 2.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_04</name><pose>-1.86 3.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_05</name><pose>-2.21 4.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_06</name><pose>-3.64 5.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_07</name><pose>-5.07 6.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_08</name><pose>-6.50 7.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_09</name><pose>-5.07 8.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_10</name><pose>-3.64 9.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_11</name><pose>-2.21 10.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_12</name><pose>-1.86 11.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_13</name><pose>-2.57 12.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_14</name><pose>-3.29 13.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_15</name><pose>-4.00 14.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_16</name><pose>4.00 0.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_17</name><pose>4.71 1.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_18</name><pose>5.43 2.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_19</name><pose>6.14 3.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_20</name><pose>5.79 4.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_21</name><pose>4.36 5.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_22</name><pose>2.93 6.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_23</name><pose>1.50 7.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_24</name><pose>2.93 8.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_25</name><pose>4.36 9.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_26</name><pose>5.79 10.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_27</name><pose>6.14 11.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_28</name><pose>5.43 12.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_29</name><pose>4.71 13.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_30</name><pose>4.00 14.00 0 0 0 0</pose></include>
+
+    <!-- Waypoint markers (waypoint_gn1-6) REMOVED per user request - gerek yok, görev noktaları GPS koordinatlardan geliyor -->
+
+    <!-- ================================================ -->
+    <!-- PARKUR 2: Engel kaçınma                         -->
+    <!-- Turuncu sınır dubalar + sarı engel dubalar       -->
+    <!-- ================================================ -->
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_67</name><pose>-5.0 14.8 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_68</name><pose>5.0 14.8 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_69</name><pose>-5.0 16.6 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_70</name><pose>5.0 16.6 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_71</name><pose>-5.0 18.4 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_72</name><pose>5.0 18.4 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_73</name><pose>-5.0 20.2 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_74</name><pose>5.0 20.2 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_75</name><pose>-5.0 22.0 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_76</name><pose>5.0 22.0 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_77</name><pose>-5.0 24.0 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_78</name><pose>5.0 24.0 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_79</name><pose>-5.2 27.0 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_80</name><pose>5.2 27.0 0 0 0 0</pose></include>
+
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_01</name><pose>3.2 15.5 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_02</name><pose>-2.5 15.8 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_03</name><pose>-4.0 16.4 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_04</name><pose>0.0 16.9 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_05</name><pose>4.5 17.3 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_06</name><pose>-3.5 18.0 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_07</name><pose>2.5 18.6 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_08</name><pose>-4.5 19.2 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_09</name><pose>1.0 19.9 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_10</name><pose>4.0 20.5 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_11</name><pose>-2.0 21.2 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_12</name><pose>3.5 22.0 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_13</name><pose>-4.0 23.0 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_14</name><pose>0.8 24.0 0 0 0 0</pose></include>
+
+    <!-- Waypoint marker gn6 REMOVED per user request -->
+
+    <!-- ================================================ -->
+    <!-- PARKUR 3: Hedef seçimi (kamikaze)                -->
+    <!-- Kırmızı / Yeşil / Siyah hedef dubalar           -->
+    <!-- ================================================ -->
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_81</name><pose>-5.0 28.5 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_82</name><pose>5.0 28.5 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_83</name><pose>-5.5 31.2 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_84</name><pose>5.5 31.2 0 0 0 0</pose></include>
+
+    <include><uri>model://target_buoy_red</uri><name>target_buoy_red</name><pose>-3.0 29.8 0 0 0 0</pose></include>
+    <include><uri>model://target_buoy_green</uri><name>target_buoy_green</name><pose>0.0 29.8 0 0 0 0</pose></include>
+    <include><uri>model://target_buoy_black</uri><name>target_buoy_black</name><pose>3.0 29.8 0 0 0 0</pose></include>
+
+    <include>
+      <uri>model://usv_model</uri>
+      <name>usv_model</name>
+      <pose>0 0 0.16 0 0 1.5707963267948966</pose>
+    </include>
+
+  </world>
+</sdf>

@@ -11,13 +11,15 @@ API/akis davranislarini koddan dogrular:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "docker_workspace" / "src"
-REPORT_JSON = ROOT / "documents" / "compliance_behavior_report.json"
-REPORT_MD = ROOT / "documents" / "compliance_behavior_report.md"
+REPORT_DIR = Path(os.environ.get("COMPLIANCE_REPORT_DIR", str(ROOT / "logs" / "system" / "compliance")))
+REPORT_JSON = REPORT_DIR / "compliance_behavior_report.json"
+REPORT_MD = REPORT_DIR / "compliance_behavior_report.md"
 
 
 def read(path: Path) -> str:
@@ -29,6 +31,8 @@ def has(text: str, needle: str) -> bool:
 
 
 def main() -> int:
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
     usv = read(SRC / "usv_main.py")
     telemetry = read(SRC / "telemetry.py")
     cam = read(SRC / "cam.py")

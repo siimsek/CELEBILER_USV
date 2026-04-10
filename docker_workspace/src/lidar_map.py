@@ -1,7 +1,8 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, HistoryPolicy
+from runtime_debug_log import log_jsonl, setup_component_logger
 import cv2
 import numpy as np
 import math
@@ -33,41 +34,65 @@ cv2.putText(output_frame, "MAP LOADING...", (180, 300), cv2.FONT_HERSHEY_SIMPLEX
 lock = threading.Lock()
 SIMULATION_MODE = False
 
-from rclpy.qos import qos_profile_sensor_data
+_lidar_dbg = setup_component_logger("lidar_map")
+_lidar_dbg.info(
+    "lidar_map module WEB_PORT=%s LOG_DIR=%s",
+    WEB_PORT,
+    os.environ.get("LOG_DIR"),
+)
 
 class LidarMapper(Node):
     def __init__(self):
         super().__init__('lidar_mapper_web')
+        self._scan_cb_n = 0
+        _lidar_dbg.info("LidarMapper node init /scan subscriber")
         
-        # Manuel QoS Profili (En Güvenlisi)
-        # Rplidar genelde: Reliability=BEST_EFFORT, Durability=VOLATILE yayınlar.
-        qos_profile = QoSProfile(
+        # CRITICAL FIX: ros_gz_bridge publishes /scan with BEST_EFFORT + KEEP_LAST=10
+        # Using SENSOR_DATA causes QoS deadlock; must match publisher's policy
+        lidar_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=dict(
-                transient_local=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL,
-                volatile=rclpy.qos.DurabilityPolicy.VOLATILE
-            ).get('volatile', rclpy.qos.DurabilityPolicy.VOLATILE), # Volatile default
             history=HistoryPolicy.KEEP_LAST,
             depth=10
         )
         
         self.subscription = self.create_subscription(
-            LaserScan, 
-            '/scan', 
-            self.scan_callback, 
-            qos_profile
+            LaserScan,
+            '/scan',
+            self.scan_callback,
+            lidar_qos,  # Changed from qos_profile_sensor_data to match ros_gz_bridge
         )
         
         # Boş siyah harita
         self.blank_image = np.zeros((MAP_SIZE, MAP_SIZE, 3), dtype=np.uint8)
-        self.last_msg_time = time.time()
+        # CRITICAL FIX: Initialize last_msg_time with buffer for GPU_lidar plugin init (~3-5 sec)
+        # Without this, first 3 seconds trigger SIMULATION_MODE false negative timeout
+        # By setting to 6.5 seconds ago, we grant 10 total seconds for sensor startup
+        self.last_msg_time = time.time() - 6.5
         
+        _lidar_dbg.info(f"[LIDAR] Subscription created with BEST_EFFORT QoS (match ros_gz_bridge)")
         print(f"🗺️ Lidar Harita Sunucusu Başladı (Port {WEB_PORT})")
 
     def scan_callback(self, msg):
         global output_frame, SIMULATION_MODE
         self.last_msg_time = time.time()
         SIMULATION_MODE = False
+        self._scan_cb_n += 1
+        if self._scan_cb_n <= 3 or self._scan_cb_n % 60 == 0:
+            _lidar_dbg.info(  # Changed from debug to info for first few messages
+                "[LIDAR_CALLBACK] scan n=%s ranges=%s angle_min=%.4f inc=%.6f",
+                self._scan_cb_n,
+                len(msg.ranges),
+                msg.angle_min,
+                msg.angle_increment,
+            )
+        if self._scan_cb_n <= 5 or self._scan_cb_n % 10 == 0:
+            log_jsonl(
+                "lidar_map",
+                False,
+                event="scan",
+                n=self._scan_cb_n,
+                n_ranges=len(msg.ranges),
+            )
         
         # Haritayı Temizle
         img = self.blank_image.copy()
@@ -169,6 +194,7 @@ def ros_thread():
             if time.time() - node.last_msg_time > 3.0:
                 SIMULATION_MODE = True
                 print("⚠️ [LIDAR] Veri akışı yok -> Simülasyon Modu")
+                _lidar_dbg.warning("scan timeout -> simulation mode")
             
             if SIMULATION_MODE:
                 # Debug: Topic List

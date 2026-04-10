@@ -43,10 +43,20 @@ else
 fi
 
 if [ "$USV_MODE" = "race" ]; then
-    echo -e "${YELLOW}⚠️  [ŞARTNAME 3.4] Yarışma modunda Raspberry Pi WiFi kapatılmalıdır.${NC}"
+    echo -e "${YELLOW}⚠️  [ŞARTNAME 3.4] WiFi Kapatma: config/usv_mode.cfg dosyasina 'WIFI_DISABLE=true' yazarak aktiflestirebilirsin.${NC}"
+    WIFI_DISABLE=$(grep -E "^WIFI_DISABLE=" "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d ' ' | tr '[:lower:]' '[:upper:]')
+    if [ "$WIFI_DISABLE" = "TRUE" ] || [ "$WIFI_DISABLE" = "1" ]; then
+        echo -e "${YELLOW}[WIFI]${NC} WiFi devre disi birakiliyor..."
+        sudo nmcli radio wifi off 2>/dev/null || true
+        sudo ip link set wlan0 down 2>/dev/null || true
+        sudo ip link set wlan1 down 2>/dev/null || true
+    fi
 fi
 
 LOG_DIR="$HOME/CELEBILER_USV/logs"
+HOST_LOG_ROOT="${PROJECT_ROOT}/logs"
+mkdir -p "$HOST_LOG_ROOT/host"
+echo "[$(date -Iseconds)] system_start USV_MODE=$USV_MODE PROJECT_ROOT=$PROJECT_ROOT LOG_DIR=$LOG_DIR" >> "$HOST_LOG_ROOT/host/system_start.log"
 echo "🧹 [HOST] Eski loglar temizleniyor..."
 sudo rm -f "$LOG_DIR"/*.log
 sudo rm -f "$LOG_DIR"/docker/*.log
@@ -67,7 +77,11 @@ else
     if [[ "$CURRENT_IPS" != *"$TARGET_IP"* ]]; then
         echo -e "${YELLOW}[AĞ]${NC} Lidar ağı ($ETH_IFACE) için $TARGET_IP atanıyor..."
         sudo ip addr add 192.168.11.5/24 dev $ETH_IFACE > /dev/null 2>&1 || true
-        sleep 1
+        for _ in $(seq 1 10); do
+            CURRENT_IPS=$(hostname -I)
+            [[ "$CURRENT_IPS" == *"$TARGET_IP"* ]] && break
+            sleep 0.1
+        done
         CURRENT_IPS=$(hostname -I) # Güncelle
     else
         echo -e "${GREEN}[AĞ]${NC} Lidar IP ($TARGET_IP) zaten $ETH_IFACE üzerinde aktif."
@@ -127,7 +141,12 @@ sudo fuser -k 8888/tcp > /dev/null 2>&1
 echo -e "${GREEN}[KAMERA]${NC} Port 8888 temizleniyor ve yayın başlatılıyor..."
 sudo pkill -9 rpicam-vid || true
 sudo nice -n -20 rpicam-vid -t 0 --codec mjpeg --inline --listen -o tcp://0.0.0.0:8888 --width 1280 --height 720 --framerate 25 --quality 95 2>&1 | grep --line-buffered -vE "^#|WARN CameraSensor|INFO Camera" > "$LOG_DIR/cam_host.log" &
-sleep 2
+for _ in $(seq 1 20); do
+    if sudo fuser 8888/tcp > /dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
 
 # 4. DOCKER BAŞLATMA
 echo -e "${GREEN}[DOCKER]${NC} Konteyner ($CONTAINER_NAME) Kontrol Ediliyor..."
@@ -163,7 +182,6 @@ tail -n 0 -f "$LOG_DIR/docker/telemetry.log" | while read line; do
 done || true
 
 # 7. FİNAL BİLGİ TABLOSU
-sleep 1
 clear
 echo -e "${CYAN}"
 echo -e "   ██████╗███████╗██╗     ███████╗██████╗ ██╗██╗     ███████╗██████╗     ██╗   ██╗███████╗██╗   ██╗"

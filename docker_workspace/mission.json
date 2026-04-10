@@ -1,4 +1,5 @@
 {
+    "_note": "Docker varsayilan ornek — sim stack sim/configs/mission_parkour_all.json ve MISSION_FILE kullanir.",
     "parkur1": [
         [
             36.88838,

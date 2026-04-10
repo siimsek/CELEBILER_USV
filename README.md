@@ -39,6 +39,14 @@ HOST (Raspberry Pi 4)
    ├─ cam.py (Port 5000, race modunda web kapalı / onboard aktif)
    ├─ lidar_map.py (Port 5001, race modunda açılmaz)
    └─ IPC dosyaları: /root/workspace/control
+
+Simülasyon (host veya geliştirme PC, `./sim/bin/run_sim_stack.sh`)
+├─ Gazebo Fortress (ign gazebo) + water_world.sdf
+├─ ros_gz_bridge (parameter_bridge: /scan, kamera, set_pose, joint cmd)
+├─ ArduPilot SITL (ardurover motorboat-skid)
+├─ sitl_gazebo_bridge.py — tek MAVLink UDP 14551 tüketicisi (poz + motor + JSON)
+├─ ros_to_tcp_cam.py (TCP 8888 JPEG, donanımı taklit)
+└─ Tüm süreç çıktıları ve `*.debug.log` dosyaları `logs/` altında (aşağıdaki tablo)
 ```
 
 ## 🛠️ Teknoloji Yığını
@@ -70,17 +78,41 @@ CELEBILER_USV/
 │   │   ├── telemetry.py              # Dashboard + REST API (8080)
 │   │   ├── cam.py                    # Kamera işleme / web stream (5000)
 │   │   ├── lidar_map.py              # Lidar harita servisi (5001)
+│   │   ├── runtime_debug_log.py      # Merkezi DEBUG dosya loglama (logs/*.debug.log)
 │   │   ├── compliance_profile.py     # Tüm eşik/frekans/mod profili
 │   │   ├── console_utils.py          # UTF-8 + Windows konsol log formatı
 │   │   ├── rc_test.py
 │   │   └── auto_dry_test.py
 │   ├── scripts/internal_start.sh     # Docker içi başlatma
 │   ├── mission.json                  # Görev noktaları
-│   └── logs/                         # CSV, video ve servis logları
+│   └── logs/                         # (Docker içi) CSV, video, servis logları
+├── logs/                             # Proje kökü: simülasyon + sistem + host izleri
+│   ├── system/                       # cam, telemetry, usv_main, lidar_map + *.debug.log
+│   ├── simulation/                   # gazebo, sitl, ros_gz, pose, köprü debug logları
+│   ├── host/                         # system_start ve host_trace (yer istasyonu)
+│   └── terminal.log                  # run_sim_stack ana çıktısı (tee)
+├── sim/
+│   ├── bin/run_sim_stack.sh          # Simülasyon orkestrasyonu
+│   ├── bridges/sitl_gazebo_bridge.py
+│   └── configs/sim.env
 ├── config/usv_mode.cfg               # test | race
 ├── documents/ida_sartname.md
 └── README.md
 ```
+
+### Kayıtlar (`logs/`) ve debug dosyaları
+
+Tüm aktif bileşenler hem konsol/tee çıktısı hem de **rotating** `*.debug.log` dosyalarına detay yazar (`runtime_debug_log.py`). Varsayılan boyut: 10 MB × 5 yedek; ortam: `USV_DEBUG_LOG_MAX_BYTES`, `USV_DEBUG_LOG_BACKUPS`, `USV_LOG_STDERR=1` (stderr’a da INFO).
+
+| Konum | İçerik |
+|--------|--------|
+| `logs/system/` | `cam.log`, `telemetry.log`, `usv_main.log`, `lidar_map.log`, `telemetry.debug.log`, `cam.debug.log`, `usv_main.debug.log`, `lidar_map.debug.log`, CSV/video |
+| `logs/simulation/` | `gazebo.log`, `sitl.log`, `pose.log`, `ros_gz.log`, `cam_bridge.log`, `sitl_gazebo_bridge.debug.log`, `ros_to_tcp_cam.debug.log`, `run_gz_world.trace.log`, `run_sitl.trace.log`, `check_stack.log`, `ros2/` |
+| `logs/terminal.log` | `run_sim_stack.sh` tam akış (tee) |
+| `logs/host/` | `system_start.log`, Docker `host_trace.log` (`internal_start.sh`) |
+| Docker içi `/root/workspace/logs` | Host’ta genelde `logs/docker/` ile eşlenir; aynı `*.debug.log` isimleri |
+
+Dashboard **Loglar** görünümü ve `/api/log_file` uygun dosya adlarıyla bu yolları kullanır (sim ortamında `SIM_LOG_DIR` ile simülasyon debug dosyaları listelenir).
 
 ## 🚀 Hızlı Başlangıç
 
@@ -238,7 +270,7 @@ Notlar:
 | `5001` | HTTP | Lidar haritası (test) |
 | `8888` | TCP | Ham kamera (Host → Docker) |
 | `14550` | UDP/MAVLink | mavproxy → telemetry.py |
-| `14551` | UDP/MAVLink | mavproxy → usv_main.py |
+| `14551` | UDP/MAVLink | mavproxy → usv_main (donanım); **simülasyonda** yalnızca `sitl_gazebo_bridge.py` (SITL serial2) |
 | `20108` | UDP | RPLidar S2E |
 
 ## 📜 Lisans

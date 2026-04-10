@@ -6,6 +6,7 @@ source /opt/ros/humble/setup.bash
 source /root/ros2_ws/install/setup.bash
 export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
 export TZ=Europe/Istanbul
+export USV_PROJECT_ROOT="/root/workspace"
 
 # USV_MODE: test (full web) | race (no image transmission - IDA 3.7)
 USV_MODE="${USV_MODE:-test}"
@@ -13,6 +14,12 @@ export USV_MODE
 
 mkdir -p /root/workspace/logs
 mkdir -p /root/workspace/control
+
+export LOG_DIR="/root/workspace/logs"
+export USV_LOG_ROOT="/root/workspace/logs"
+export CONTROL_DIR="/root/workspace/control"
+export MISSION_FILE="${MISSION_FILE:-/root/workspace/mission.json}"
+echo "[$(date -Iseconds)] internal_start USV_MODE=$USV_MODE" >> "$LOG_DIR/host_trace.log"
 
 echo "--- [DOCKER] USV SİSTEMLERİ BAŞLATILIYOR (Mod: $USV_MODE) ---"
 

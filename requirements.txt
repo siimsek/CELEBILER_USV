@@ -1,0 +1,8 @@
+# CELEBILER USV - Minimal Dependencies
+# pip install -r requirements.txt
+
+opencv-python
+numpy
+pymavlink
+pyserial
+Flask

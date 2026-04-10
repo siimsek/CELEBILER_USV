@@ -1,28 +1,43 @@
-# --- Antigravity Kaynak Dosyaları (PDF, Manuel vs.) ---
-# kaynak klasörünü tamamen yok say
-kaynak/
-*.pdf
-old/
-
-# --- Log ve Geçici Dosyalar ---
-*.log
-system_boot.log
-logs/
-*.log
-*.csv
+# === Python ===
 __pycache__/
 *.pyc
+*.pyo
+
+# === Log / Gecici / Medya ===
+*.log
+*.csv
 *.tmp
 *.bak
+*.pid
+*.mp4
+*.avi
+*.jpg
+*.jpeg
+*.png
 
-# --- Otomatik Uyum Raporları (lokal çıktı) ---
-documents/compliance_report.md
-documents/compliance_report.json
-documents/compliance_behavior_report.md
-documents/compliance_behavior_report.json
-documents/compliance_runtime.log
+# === Compliance Reports (auto-generated) ===
+logs/*
 
-# --- VS Code ve Sistem Dosyaları ---
+# === Simulasyon Runtime (her calistirmada yeniden olusur) ===
+sim/control/
+sim/artifacts/
+sim/.ros/
+
+# === Gazebo / Ignition cache ve config ===
+.ignition/
+.cache/
+
+# === Eski / arsiv klasorleri ===
+kaynak/
+old/
+old_source/
+
+# === IDE / OS ===
 .vscode/
 .DS_Store
 Thumbs.db
+.vexp/
+
+# === Virtual env ===
+.venv*/
+venv/

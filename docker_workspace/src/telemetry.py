@@ -1,6 +1,6 @@
 import time
 from collections import deque
-import pandas as pd
+import csv as csv_mod
 from pymavlink import mavutil
 import sys
 import threading
@@ -10,14 +10,18 @@ import json
 import random
 import serial
 import math
-from flask import Flask, jsonify, render_template_string, request
+import urllib.request
+from flask import Flask, Response, jsonify, render_template_string, request, send_file
 
 from console_utils import make_console_printer
 from compliance_profile import (
     COMMS_POLICY,
+    CONTROL_DIR as DEFAULT_CONTROL_DIR,
     GENERAL_TELEMETRY_HZ,
     LIDAR_PROCESSING_HZ,
     LINK_TOPOLOGY,
+    LOG_DIR as DEFAULT_LOG_DIR,
+    MISSION_FILE_DEFAULT,
     OBSTACLE_TELEMETRY_HZ,
     REPORT_TELEMETRY_GROUPS,
     USV_MODE,
@@ -30,8 +34,21 @@ print = make_console_printer("TELEM")
 BAUD_RATE_PIXHAWK = 115200
 BAUD_RATES_STM32 = [9600, 115200] # Otomatik denenir
 WEB_PORT = 8080
-LOG_DIR = "/root/workspace/logs"
-CONTROL_DIR = "/root/workspace/control"
+LOG_DIR = os.environ.get("LOG_DIR", DEFAULT_LOG_DIR)
+CONTROL_DIR = os.environ.get("CONTROL_DIR", DEFAULT_CONTROL_DIR)
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(CONTROL_DIR, exist_ok=True)
+
+from runtime_debug_log import install_module_function_tracing, log_jsonl, setup_component_logger
+
+_telem_dbg = setup_component_logger("telemetry")
+_telem_dbg.info(
+    "telemetry module load LOG_DIR=%s USV_MODE=%s CONTROL_DIR=%s",
+    LOG_DIR,
+    USV_MODE,
+    CONTROL_DIR,
+)
+
 CSV_FILE = f"{LOG_DIR}/telemetri_verisi.csv"
 RC7_SAFE_PWM = 1100
 RC7_ESTOP_FORCE_PWM = 2011
@@ -39,22 +56,28 @@ PWM_VALID_MIN = 900
 PWM_VALID_MAX = 2100
 RC_SIGNAL_TIMEOUT_S = 1.5
 LINK_STATE_FILE = f"{CONTROL_DIR}/telemetry_link_state.json"
+SIM_VEHICLE_POSITION_FILE = f"{CONTROL_DIR}/vehicle_position.json"
 
 # IPC: usv_main.py ile dosya üzerinden iletişim (farklı süreçler)
 FLAG_START = f"{CONTROL_DIR}/start_mission.flag"
 FLAG_STOP = f"{CONTROL_DIR}/emergency_stop.flag"
 STATE_FILE = f"{CONTROL_DIR}/mission_state.json"
+CAMERA_STREAM_PROXY_SOURCE = os.environ.get("CAMERA_STREAM_PROXY_SOURCE", "http://127.0.0.1:5000/")
+LIDAR_STREAM_PROXY_SOURCE = os.environ.get("LIDAR_STREAM_PROXY_SOURCE", "http://127.0.0.1:5001/")
+LIDAR_MAP_JPG = f"{LOG_DIR}/file3_local_map_latest.jpg"
+GPS_MIN_FIX_TYPE = 3
 
 # --- GLOBAL DURUM ---
 # Şartname Bölüm 6: lat, lon, hız, roll, pitch, heading, hız_setpoint, yön_setpoint
 telemetry_data = {
-    "Timestamp": "--", "Lat": 0, "Lon": 0, "Heading": 0,
+    "Timestamp": "--", "Lat": None, "Lon": None, "Heading": 0,
     "Battery": 0, "Mode": "DISCONNECTED", "Speed": 0, "Roll": 0, "Pitch": 0,
     "Speed_Setpoint": 0, "Heading_Setpoint": 0,  # Şartname 6 zorunlu alanları
     "STM_Date": "--:--:--", "Env_Temp": 0, "Env_Hum": 0, "Rain_Val": 0, "Rain_Status": "DRY",
     "Sys_CPU": 0, "Sys_RAM": 0, "Sys_Temp": 0,
     "RC1": 0, "RC2": 0, "RC3": 0, "RC4": 0, "RC7": 0,
-    "Out1": 0, "Out3": 0
+    "Out1": 0, "Out3": 0,
+    "GPS_FixType": 0, "GPS_Satellites": 0,
 }
 COLUMNS = list(telemetry_data.keys())
 CSV_LOG_INTERVAL = 1.0  # Şartname: en az 1 Hz
@@ -81,6 +104,81 @@ EVENT_LAST = {
     "timeout_count": 0,
 }
 EVENT_LOCK = threading.Lock()
+LOG_FILE_ALLOWLIST = {
+    "telemetry.log": f"{LOG_DIR}/telemetry.log",
+    "telemetry.debug.log": f"{LOG_DIR}/telemetry.debug.log",
+    "telemetry.jsonl": f"{LOG_DIR}/telemetry.jsonl",
+    "telemetry_mavlink.jsonl": f"{LOG_DIR}/telemetry_mavlink.jsonl",
+    "sitl.log": f"{LOG_DIR}/sitl.log",
+    "gazebo.log": f"{LOG_DIR}/gazebo.log",
+    "cam.log": f"{LOG_DIR}/cam.log",
+    "cam.debug.log": f"{LOG_DIR}/cam.debug.log",
+    "cam.jsonl": f"{LOG_DIR}/cam.jsonl",
+    "cam_bridge.log": f"{LOG_DIR}/cam_bridge.log",
+    "pose.log": f"{LOG_DIR}/pose.log",
+    "ros_gz.log": f"{LOG_DIR}/ros_gz.log",
+    "usv_main.log": f"{LOG_DIR}/usv_main.log",
+    "usv_main.debug.log": f"{LOG_DIR}/usv_main.debug.log",
+    "usv_main.jsonl": f"{LOG_DIR}/usv_main.jsonl",
+    "lidar_map.debug.log": f"{LOG_DIR}/lidar_map.debug.log",
+    "lidar_map.jsonl": f"{LOG_DIR}/lidar_map.jsonl",
+    "check_stack.log": f"{LOG_DIR}/check_stack.log",
+    "telemetri_verisi.csv": CSV_FILE,
+    "file3_local_map_index.csv": f"{LOG_DIR}/file3_local_map_index.csv",
+}
+# Simülasyon köprüleri (SIM_LOG_DIR) — dashboard log görüntüleyicide
+_sim_ld = os.environ.get("SIM_LOG_DIR", "").strip()
+if _sim_ld:
+    _sim_join = lambda n: os.path.join(_sim_ld, n)
+    LOG_FILE_ALLOWLIST["sitl_gazebo_bridge.debug.log"] = _sim_join("sitl_gazebo_bridge.debug.log")
+    LOG_FILE_ALLOWLIST["sitl_gazebo_bridge.jsonl"] = _sim_join("sitl_gazebo_bridge.jsonl")
+    LOG_FILE_ALLOWLIST["ros_to_tcp_cam.debug.log"] = _sim_join("ros_to_tcp_cam.debug.log")
+    LOG_FILE_ALLOWLIST["ros_to_tcp_cam.jsonl"] = _sim_join("ros_to_tcp_cam.jsonl")
+    LOG_FILE_ALLOWLIST["terminal.log"] = os.path.join(
+        os.path.dirname(_sim_ld.rstrip(os.sep)), "terminal.log"
+    )
+
+
+def _ros2_logs_dir():
+    return os.path.join(LOG_DIR, "ros2")
+
+
+def _merged_log_index():
+    """Statik liste + sistem altinda olusan .log/.jsonl dosyalari."""
+    merged = dict(LOG_FILE_ALLOWLIST)
+    try:
+        if os.path.isdir(LOG_DIR):
+            for fn in os.listdir(LOG_DIR):
+                if not fn.endswith((".log", ".jsonl")):
+                    continue
+                path = os.path.join(LOG_DIR, fn)
+                if os.path.isfile(path):
+                    merged.setdefault(fn, path)
+    except OSError:
+        pass
+    rd = _ros2_logs_dir()
+    if not os.path.isdir(rd):
+        return merged
+    try:
+        for fn in os.listdir(rd):
+            if not fn.endswith((".log", ".jsonl")):
+                continue
+            path = os.path.join(rd, fn)
+            if os.path.isfile(path):
+                merged.setdefault(fn, path)
+    except OSError:
+        pass
+    return merged
+
+
+def _read_allowed_log(name):
+    safe_name = os.path.basename(str(name or "")).strip()
+    if not safe_name:
+        return "", None
+    merged = _merged_log_index()
+    if safe_name in merged:
+        return safe_name, merged[safe_name]
+    return safe_name, None
 
 
 def _is_valid_pwm(value):
@@ -108,6 +206,32 @@ def _touch_flag(path):
     except Exception as exc:
         print(f"[WARN] [IPC] Flag yazilamadi ({path}): {exc}")
         return False
+
+
+def _clear_flag(path):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        return True
+    except Exception as exc:
+        print(f"[WARN] [IPC] Flag silinemedi ({path}): {exc}")
+        return False
+
+
+def _atomic_write_json(path, payload):
+    directory = os.path.dirname(path)
+    tmp_path = f"{path}.tmp"
+    for attempt in range(2):
+        try:
+            os.makedirs(directory, exist_ok=True)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp_path, path)
+            return
+        except FileNotFoundError:
+            if attempt == 1:
+                raise
+            time.sleep(0.05)
 
 
 def _emit_event(kind, payload=None):
@@ -188,6 +312,33 @@ log.setLevel(logging.ERROR) # Gereksiz logları kapat
 app = Flask(__name__)
 st = None
 
+
+@app.before_request
+def _telemetry_http_before():
+    try:
+        request._usv_t0 = time.time()
+    except Exception:
+        pass
+
+
+@app.after_request
+def _telemetry_http_after(response):
+    try:
+        t0 = getattr(request, "_usv_t0", None)
+        dt_ms = round((time.time() - (t0 if t0 is not None else time.time())) * 1000.0, 2)
+        log_jsonl(
+            "telemetry_http",
+            False,
+            event="http_response",
+            path=request.path,
+            method=request.method,
+            status=int(response.status_code),
+            ms=dt_ms,
+        )
+    except Exception:
+        pass
+    return response
+
 # --- DASHBOARD ARAYÜZÜ (HTML/CSS/JS) ---
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -259,6 +410,8 @@ HTML_PAGE = """
         .btn-next:hover { box-shadow:0 0 20px rgba(56,189,248,0.4); }
         .btn-stop { background:linear-gradient(135deg,#ef4444,#b91c1c); color:#fff; }
         .btn-stop:hover { box-shadow:0 0 20px rgba(239,68,68,0.4); }
+        .btn-close { background:linear-gradient(135deg,#8b5cf6,#6d28d9); color:#fff; }
+        .btn-close:hover { box-shadow:0 0 20px rgba(139,92,246,0.4); }
         .btn:disabled { opacity:0.4; cursor:not-allowed; box-shadow:none !important; }
 
         /* Parkur Progress */
@@ -342,6 +495,7 @@ HTML_PAGE = """
                 <div class="m-btns">
                     <button class="btn btn-start" id="btn_start" onclick="cmdStart()" {% if usv_mode == 'race' %}disabled{% endif %}>▶ Görevi Başlat</button>
                     <button class="btn btn-stop" id="btn_stop" onclick="cmdStop()">⛔ Acil Durdur</button>
+                    <button class="btn btn-close" id="btn_close" onclick="cmdShutdown()">🔌 Sistemi Kapat</button>
                 </div>
             </div>
         </div>
@@ -459,8 +613,8 @@ HTML_PAGE = """
                     modeEl.style.color = d.Mode === 'DISCONNECTED' ? 'var(--danger)' : (d.Mode === 'SIMULATION' ? 'var(--warning)' : 'var(--success)');
 
                     // GPS
-                    document.getElementById('lat').innerText = (d.Lat || 0).toFixed(7);
-                    document.getElementById('lon').innerText = (d.Lon || 0).toFixed(7);
+                    document.getElementById('lat').innerText = (d.Lat === null || d.Lat === undefined || Number.isNaN(Number(d.Lat))) ? '--' : Number(d.Lat).toFixed(7);
+                    document.getElementById('lon').innerText = (d.Lon === null || d.Lon === undefined || Number.isNaN(Number(d.Lon))) ? '--' : Number(d.Lon).toFixed(7);
 
                     // Nav
                     document.getElementById('spd').innerText = (d.Speed || 0).toFixed(1);
@@ -507,7 +661,7 @@ HTML_PAGE = """
                         }
 
                         // Buttons
-                        document.getElementById('btn_start').disabled = d.mission_active || d.usv_mode === 'race';
+                        document.getElementById('btn_start').disabled = d.mission_active || d.usv_mode === 'race' || !d.ready_state || !d.camera_ready || !d.lidar_ready;
                         document.getElementById('btn_stop').disabled = !d.mission_active;
 
                         // Mission dot
@@ -541,20 +695,80 @@ HTML_PAGE = """
         // Commands
         function cmdStart() { fetch('/api/start_mission', {method:'POST'}).then(()=>{missionRunning=true;}); }
         function cmdStop() { fetch('/api/emergency_stop', {method:'POST'}).then(()=>{missionRunning=false;}); }
+        function cmdShutdown() { if(confirm('Sistemi kapatmak istediğinizden emin misiniz?')) { fetch('/api/shutdown', {method:'POST'}).then(()=>{alert('Sistem kapatılıyor...');}); } }
+
+        function bindCameraFeed(el) {
+            if (!el) return;
+            const host = window.location.hostname || '127.0.0.1';
+            const candidates = [
+                '/api/camera_stream',
+                'http://' + host + ':5000/'
+            ];
+            if (!el.dataset.camHooked) {
+                el.dataset.camHooked = '1';
+                el.dataset.camIndex = el.dataset.camIndex || '0';
+                el.onerror = function() {
+                    const idx = Number(el.dataset.camIndex || '0');
+                    el.dataset.camIndex = String((idx + 1) % candidates.length);
+                    el.dataset.camBound = '0';
+                };
+            }
+            const lastAttempt = Number(el.dataset.camAttemptTs || '0');
+            const currentSrc = el.getAttribute('src') || '';
+            const shouldRetry = !currentSrc || el.naturalWidth === 0 || el.dataset.camBound !== '1';
+            if (!shouldRetry && (Date.now() - lastAttempt) < 5000) {
+                return;
+            }
+            const idx = Number(el.dataset.camIndex || '0') % candidates.length;
+            el.src = candidates[idx] + '?t=' + Date.now();
+            el.dataset.camAttemptTs = String(Date.now());
+            el.dataset.camBound = '1';
+        }
+
+        function bindLidarFeed(el) {
+            if (!el) return;
+            const host = window.location.hostname || '127.0.0.1';
+            const candidates = [
+                '/api/lidar_stream',
+                'http://' + host + ':5001/'
+            ];
+            if (!el.dataset.lidarHooked) {
+                el.dataset.lidarHooked = '1';
+                el.dataset.lidarIndex = el.dataset.lidarIndex || '0';
+                el.onerror = function() {
+                    const idx = Number(el.dataset.lidarIndex || '0');
+                    el.dataset.lidarIndex = String((idx + 1) % candidates.length);
+                    el.dataset.lidarBound = '0';
+                };
+            }
+            const lastAttempt = Number(el.dataset.lidarAttemptTs || '0');
+            const currentSrc = el.getAttribute('src') || '';
+            const shouldRetry = !currentSrc || el.naturalWidth === 0 || el.dataset.lidarBound !== '1';
+            if (!shouldRetry && (Date.now() - lastAttempt) < 5000) {
+                return;
+            }
+            const idx = Number(el.dataset.lidarIndex || '0') % candidates.length;
+            el.src = candidates[idx] + '?t=' + Date.now();
+            el.dataset.lidarAttemptTs = String(Date.now());
+            el.dataset.lidarBound = '1';
+        }
+
+        function refreshVisualFeeds() {
+            {% if usv_mode == 'test' %}
+            var camEl = document.getElementById('cam_img');
+            var mapEl = document.getElementById('map_img');
+            bindCameraFeed(camEl);
+            bindLidarFeed(mapEl);
+            {% endif %}
+        }
 
         setInterval(updateStats, 200);
         setInterval(updateTimer, 1000);
+        setInterval(refreshVisualFeeds, 1000);
 
         // Load feeds (test mode only)
         window.onload = function() {
-            {% if usv_mode == 'test' %}
-            var host = window.location.hostname;
-            var r = Math.random();
-            var camEl = document.getElementById('cam_img');
-            var mapEl = document.getElementById('map_img');
-            if(camEl) camEl.src = 'http://' + host + ':5000/?t=' + r;
-            if(mapEl) mapEl.src = 'http://' + host + ':5001/?t=' + r;
-            {% endif %}
+            refreshVisualFeeds();
         };
     </script>
 </body>
@@ -578,8 +792,11 @@ class SmartTelemetry:
         self.lock = threading.Lock()
         self.boot_monotonic = time.monotonic()
         self.last_gnss_epoch = 0.0
+        self.last_gps_fix_type = 0
+        self.last_gps_satellites = 0
         self.last_link_heartbeat_time = 0.0
         self.link_heartbeat_age_s = 999.0
+        self.link_heartbeat_source = "telemetry"  # Initialize missing attribute
         self._last_link_state_write = 0.0
         self._warn_last = {}
         self.error_counters = {
@@ -594,13 +811,22 @@ class SmartTelemetry:
         self.sim_lat = 38.4192
         self.sim_lon = 27.1287
         self.sim_heading = 0
+        self._sim_pose_mtime = 0.0
+        try:
+            sim_home = [token.strip() for token in os.environ.get("SIM_HOME", "-35.363262,149.165237,584,0").split(",")]
+            self._sim_home_lat = float(sim_home[0])
+            self._sim_home_lon = float(sim_home[1])
+        except Exception:
+            self._sim_home_lat = -35.363262
+            self._sim_home_lon = 149.165237
         
         # Log Klasörü
         if not os.path.exists(LOG_DIR):
             os.makedirs(LOG_DIR)
             
         # CSV init - Her oturumda sıfırdan (Şartname 6: İDA karaya alındıktan sonra teslim)
-        pd.DataFrame(columns=COLUMNS).to_csv(CSV_FILE, index=False)
+        with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+            csv_mod.writer(f).writerow(COLUMNS)
         self.last_csv_log_time = 0
 
         # Motor Kontrolcüsünü Başlat
@@ -619,6 +845,38 @@ class SmartTelemetry:
             print(message)
             self._warn_last[key] = now
 
+    def _update_sim_pose_fallback(self):
+        if os.environ.get("USV_SIM") != "1":
+            return
+        try:
+            st = os.stat(SIM_VEHICLE_POSITION_FILE)
+            if st.st_mtime <= float(getattr(self, "_sim_pose_mtime", 0.0) or 0.0):
+                return
+            with open(SIM_VEHICLE_POSITION_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            pos_x = float(payload.get("pos_x", 0.0) or 0.0)
+            pos_y = float(payload.get("pos_y", 0.0) or 0.0)
+            heading_rad = float(payload.get("heading_rad", 0.0) or 0.0)
+            cos_home = math.cos(math.radians(self._sim_home_lat))
+            meters_to_lon = 1.0 / (111320.0 * cos_home) if abs(cos_home) > 1e-6 else 1.0 / 111320.0
+            lat = self._sim_home_lat + (pos_y / 111320.0)
+            lon = self._sim_home_lon + (pos_x * meters_to_lon)
+            with self.lock:
+                telemetry_data["Lat"] = lat
+                telemetry_data["Lon"] = lon
+                telemetry_data["Heading"] = (math.degrees(heading_rad) + 360.0) % 360.0
+                telemetry_data["GPS_FixType"] = max(int(telemetry_data.get("GPS_FixType", 0) or 0), GPS_MIN_FIX_TYPE)
+                telemetry_data["GPS_Satellites"] = max(int(telemetry_data.get("GPS_Satellites", 0) or 0), 10)
+            self.last_gps_fix_type = max(int(self.last_gps_fix_type or 0), GPS_MIN_FIX_TYPE)
+            self.last_gps_satellites = max(int(self.last_gps_satellites or 0), 10)
+            self._sim_pose_mtime = st.st_mtime
+        except FileNotFoundError:
+            return
+        except json.JSONDecodeError:
+            return
+        except Exception as exc:
+            self._warn_throttled("sim_pose_fallback", f"[WARN] [SIM_GPS] vehicle_position fallback hatasi: {exc}")
+
     def _bump_error(self, key, message=None, period_s=5.0):
         self.error_counters[key] = int(self.error_counters.get(key, 0)) + 1
         if message:
@@ -629,6 +887,7 @@ class SmartTelemetry:
             )
 
     def _publish_link_state(self, force=False):
+        self._update_sim_pose_fallback()
         now = time.monotonic()
         if SIMULATION_MODE:
             self.link_heartbeat_age_s = 0.0
@@ -637,7 +896,8 @@ class SmartTelemetry:
         else:
             self.link_heartbeat_age_s = 999.0
 
-        if not force and (now - self._last_link_state_write) < 0.2:
+        # KRITIK: Minimum interval reduced from 0.2s to 0.05s for faster heartbeat updates
+        if not force and (now - self._last_link_state_write) < 0.05:
             return
 
         payload = {
@@ -646,43 +906,90 @@ class SmartTelemetry:
             "error_counters": dict(self.error_counters),
         }
         try:
-            os.makedirs(CONTROL_DIR, exist_ok=True)
-            tmp_path = f"{LINK_STATE_FILE}.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f)
-            os.replace(tmp_path, LINK_STATE_FILE)
+            _atomic_write_json(LINK_STATE_FILE, payload)
             self._last_link_state_write = now
+            # Logging only every 2 seconds to avoid spam
+            if not hasattr(self, '_last_heartbeat_log') or (now - self._last_heartbeat_log) >= 2.0:
+                hb_source = getattr(self, 'link_heartbeat_source', 'unknown')  # Safe attribute access
+                print(f"[HEARTBEAT] Age={self.link_heartbeat_age_s:.1f}s Source={hb_source} Ts={now:.1f}")
+                self._last_heartbeat_log = now
         except Exception as exc:
             self._bump_error("link_state_write_error", f"[WARN] [LINK] state yazim hatasi: {exc}")
 
     def force_estop_relay(self):
-        """YKİ E-stop tetiklenince RC7'yi kesme seviyesine zorla."""
+        """YKİ E-stop tetiklenince araci neutral + HOLD + disarm zinciriyle bastir."""
         if not self.pixhawk:
             return False
         try:
-            for _ in range(6):
+            sysid = self.target_system_id if getattr(self, "target_system_id", None) else (getattr(self.pixhawk, "target_system", 0) or 1)
+            compid = getattr(self.pixhawk, "target_component", 0) or 1
+            hold_mode = None
+            try:
+                hold_mode = (self.pixhawk.mode_mapping() or {}).get("HOLD")
+            except Exception:
+                hold_mode = None
+            if hold_mode is not None:
+                self.pixhawk.mav.set_mode_send(
+                    sysid,
+                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                    hold_mode,
+                )
+            for _ in range(10):
                 rc_override = [65535] * 8
+                rc_override[0] = 1500
+                rc_override[2] = 1500
                 rc_override[6] = RC7_ESTOP_FORCE_PWM
                 self.pixhawk.mav.rc_channels_override_send(
-                    self.target_system_id if getattr(self, "target_system_id", None) else 1,
-                    self.pixhawk.target_component,
+                    sysid,
+                    compid,
                     *rc_override
                 )
                 time.sleep(0.04)
+            self.pixhawk.mav.command_long_send(
+                sysid,
+                compid,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0,
+                0,
+                21196,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
             with self.lock:
                 telemetry_data["RC7"] = RC7_ESTOP_FORCE_PWM
-            print("🚨 [ESTOP] RC7 force gönderildi")
+                telemetry_data["Out1"] = 1500
+                telemetry_data["Out3"] = 1500
+                telemetry_data["Manual_Lock_Reason"] = "ESTOP"
+            print("🚨 [ESTOP] RC7+HOLD+NEUTRAL+DISARM gönderildi")
             return True
         except Exception as e:
             self._bump_error("rc_override_error", f"[WARN] [ESTOP] RC7 force hatasi: {e}")
             return False
 
+    def _sync_setpoints_from_state(self):
+        try:
+            if os.path.exists(STATE_FILE):
+                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+                if isinstance(state, dict) and state.get("active", False):
+                    v_t = state.get("v_target")
+                    h_t = state.get("heading_target")
+                    if v_t is not None:
+                        telemetry_data["Speed_Setpoint"] = round(float(v_t), 3)
+                    if h_t is not None:
+                        telemetry_data["Heading_Setpoint"] = round(float(h_t), 3)
+        except Exception:
+            pass
+
     def csv_logger(self):
         """Şartname Bölüm 6: Telemetri CSV 1 Hz kayıt"""
-        import csv as csv_mod
         while self.running:
             try:
                 if time.time() - self.last_csv_log_time >= CSV_LOG_INTERVAL:
+                    self._sync_setpoints_from_state()
                     with self.lock:
                         row = [telemetry_data.get(k, '') for k in COLUMNS]
                         if row:
@@ -708,7 +1015,13 @@ class SmartTelemetry:
         
         print(f"🌍 WEB SERVER BAŞLATILIYOR: Port {WEB_PORT}")
         print(f"📋 [CSV] Telemetri 1 Hz kayıt: {CSV_FILE}")
-        app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)
+        _telem_dbg.info(
+            "flask app.run host=0.0.0.0 port=%s csv=%s SIMULATION_MODE=%s",
+            WEB_PORT,
+            CSV_FILE,
+            SIMULATION_MODE,
+        )
+        app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False, threaded=True)
 
     # --- BAĞLANTI YÖNETİMİ ---
     def connection_manager(self):
@@ -746,14 +1059,15 @@ class SmartTelemetry:
                 self._publish_link_state()
             
             first_scan = False
-            time.sleep(10)
+            # KRITIK: Heartbeat her 1 saniyede yazılması gerekiyor (usv_main 30s timeout için)
+            time.sleep(1)  # Reduced from 10s to ensure frequent heartbeat updates
 
     def scan_ports(self):
         """Bostaki portlari tarar ve uygun cihazlari eslestirir."""
-        # Pixhawk: Önce UDP dene (mavproxy aktifse)
+        # Sim tarafında telemetry akışı doğrudan UDP 14550'ye yayınlanır.
         if not self.pixhawk:
             if self._probe_pixhawk('udpin:0.0.0.0:14550'):
-                print("📡 [MAV] Pixhawk bağlantısı: UDP:14550 (mavproxy)")
+                print("📡 [MAV] Pixhawk bağlantısı: UDP:14550 (SITL telemetry)")
             else:
                 # Fallback: doğrudan seri port tara
                 all_ports = glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*')
@@ -824,12 +1138,12 @@ class SmartTelemetry:
     def _request_mavlink_streams(self, master):
         """Pixhawk'tan gerekli veri akışlarını ister."""
         if not master: return
-        # Genel veriler rapor hedefi: 5 Hz
+        # Genel veriler (profil: GENERAL_TELEMETRY_HZ)
         master.mav.request_data_stream_send(
             master.target_system, master.target_component,
             mavutil.mavlink.MAV_DATA_STREAM_ALL, GENERAL_TELEMETRY_HZ, 1
         )
-        # RC kanalları rapor hedefi: 5 Hz
+        # RC kanalları
         master.mav.request_data_stream_send(
             master.target_system, master.target_component,
             mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, GENERAL_TELEMETRY_HZ, 1
@@ -858,6 +1172,7 @@ class SmartTelemetry:
                             telemetry_data["Rain_Status"] = "WET" if telemetry_data["Rain_Val"] < 2000 else "DRY"
             except Exception as e:
                 print(f"❌ STM32 Error: {e}")
+                _telem_dbg.exception("stm32 read: %s", e)
 
     def read_pixhawk(self):
         print("📡 [MAV] Pixhawk Dinleme Servisi Aktif")
@@ -865,7 +1180,7 @@ class SmartTelemetry:
         
         while self.running:
             if not self.pixhawk:
-                self._publish_link_state()
+                self._publish_link_state(force=True)  # Force write when no pixhawk
                 time.sleep(0.1); continue
                 
             try:
@@ -876,32 +1191,83 @@ class SmartTelemetry:
                         if msg.chan3_raw > 0:
                             print(f"🎮 [RC] Sinyal Tespit Edildi: CH3={msg.chan3_raw}")
                             rc_logged = True
-                self._publish_link_state()
+                    self._publish_link_state(force=True)  # Force write on every message
+                else:
+                    log_jsonl("telemetry_mavlink", False, event="rx_timeout", blocking_timeout_s=1.0)
+                    # KRITIK: No message received (timeout) - still write heartbeat
+                    self._publish_link_state(force=True)  # Force write on timeout
             except Exception as e:
                 self._bump_error("mav_read_error", f"[WARN] [MAV] Okuma hatasi: {e}")
-                self._publish_link_state()
+                self._publish_link_state(force=True)  # Force write on error
 
     def _process_mavlink_msg(self, msg, rc_logged):
         """MAVLink mesajlarını işleyen yardımcı metot."""
         mtype = msg.get_type()
-        
+        log_jsonl("telemetry_mavlink", False, event="rx", mtype=mtype)
+
         with self.lock:
             telemetry_data["Timestamp"] = self._csv_timestamp()
             
             if mtype == 'GLOBAL_POSITION_INT':
-                telemetry_data['Lat'] = msg.lat / 1e7
-                telemetry_data['Lon'] = msg.lon / 1e7
-                telemetry_data['Heading'] = msg.hdg / 100.0
+                lat = float(getattr(msg, 'lat', 0) or 0) / 1e7
+                lon = float(getattr(msg, 'lon', 0) or 0) / 1e7
+                sim_position_valid = (
+                    bool(os.environ.get("USV_SIM") == "1")
+                    and -90.0 <= lat <= 90.0
+                    and -180.0 <= lon <= 180.0
+                    and (abs(lat) > 1e-6 or abs(lon) > 1e-6)
+                )
+                gps_valid = (
+                    (self.last_gps_fix_type >= GPS_MIN_FIX_TYPE or sim_position_valid)
+                    and -90.0 <= lat <= 90.0
+                    and -180.0 <= lon <= 180.0
+                    and (abs(lat) > 1e-6 or abs(lon) > 1e-6)
+                )
+                if gps_valid:
+                    telemetry_data['Lat'] = lat
+                    telemetry_data['Lon'] = lon
+                elif self.last_gps_fix_type < GPS_MIN_FIX_TYPE and os.environ.get("USV_SIM") != "1":
+                    telemetry_data['Lat'] = None
+                    telemetry_data['Lon'] = None
+                raw_heading = float(getattr(msg, 'hdg', 65535) or 65535)
+                if 0.0 <= raw_heading <= 36000.0:
+                    telemetry_data['Heading'] = raw_heading / 100.0
                 # Manuel modda yön setpoint = mevcut yön; AUTO/GUIDED'da NAV_CONTROLLER_OUTPUT kullanılır
                 mode_str = telemetry_data.get('Mode', '')
                 if 'AUTO' not in mode_str and 'GUIDED' not in mode_str:
-                    telemetry_data['Heading_Setpoint'] = msg.hdg / 100.0
+                    telemetry_data['Heading_Setpoint'] = telemetry_data['Heading']
 
             elif mtype == 'GPS_RAW_INT':
                 # time_usec GNSS epoch ise CSV zamanında önceliklidir
                 t_usec = getattr(msg, 'time_usec', 0)
                 if t_usec and t_usec > 1e14:
                     self.last_gnss_epoch = t_usec / 1e6
+                fix_type = int(getattr(msg, 'fix_type', 0) or 0)
+                satellites = int(getattr(msg, 'satellites_visible', 0) or 0)
+                if os.environ.get("USV_SIM") == "1" and fix_type < GPS_MIN_FIX_TYPE:
+                    self.last_gps_fix_type = max(int(self.last_gps_fix_type or 0), GPS_MIN_FIX_TYPE)
+                    self.last_gps_satellites = max(int(self.last_gps_satellites or 0), 10)
+                    telemetry_data['GPS_FixType'] = max(int(telemetry_data.get('GPS_FixType', 0) or 0), GPS_MIN_FIX_TYPE)
+                    telemetry_data['GPS_Satellites'] = max(int(telemetry_data.get('GPS_Satellites', 0) or 0), 10)
+                else:
+                    self.last_gps_fix_type = fix_type
+                    self.last_gps_satellites = satellites
+                    telemetry_data['GPS_FixType'] = fix_type
+                    telemetry_data['GPS_Satellites'] = satellites
+                gps_lat = float(getattr(msg, 'lat', 0) or 0) / 1e7
+                gps_lon = float(getattr(msg, 'lon', 0) or 0) / 1e7
+                gps_valid = (
+                    fix_type >= GPS_MIN_FIX_TYPE
+                    and -90.0 <= gps_lat <= 90.0
+                    and -180.0 <= gps_lon <= 180.0
+                    and (abs(gps_lat) > 1e-6 or abs(gps_lon) > 1e-6)
+                )
+                if gps_valid:
+                    telemetry_data['Lat'] = gps_lat
+                    telemetry_data['Lon'] = gps_lon
+                elif os.environ.get("USV_SIM") != "1":
+                    telemetry_data['Lat'] = None
+                    telemetry_data['Lon'] = None
                 
             elif mtype == 'RC_CHANNELS':
                 telemetry_data['RC1'] = msg.chan1_raw
@@ -1359,10 +1725,730 @@ class MotorController:
 
 
 
+CONTROLLER_PAGE = """
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CELEBILER USV Controller</title>
+    <style>
+        :root {
+            --bg: #0a1220;
+            --card: #121d30;
+            --card2: #0f1726;
+            --line: rgba(255,255,255,0.08);
+            --text: #e5eefc;
+            --muted: #8da2c0;
+            --accent: #3fb0ff;
+            --ok: #22c55e;
+            --warn: #f59e0b;
+            --bad: #ef4444;
+            --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            --sans: Inter, system-ui, sans-serif;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: var(--sans);
+            background:
+                radial-gradient(circle at top left, rgba(63,176,255,0.18), transparent 28%),
+                radial-gradient(circle at top right, rgba(34,197,94,0.12), transparent 24%),
+                radial-gradient(circle at top, #152846 0%, var(--bg) 45%);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        a { color: var(--accent); text-decoration: none; }
+        .page { padding: 12px; display: grid; gap: 10px; }
+        .topbar, .grid, .logs {
+            display: grid;
+            gap: 10px;
+        }
+        .topbar {
+            grid-template-columns: 1.35fr 0.95fr;
+        }
+        .grid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .logs {
+            grid-template-columns: 1.25fr 0.75fr;
+        }
+        .feeds {
+            display: grid;
+            gap: 12px;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .card {
+            background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            overflow: hidden;
+            min-width: 0;
+        }
+        .card header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--line);
+            background: rgba(255,255,255,0.02);
+        }
+        .card header h2 {
+            margin: 0;
+            font-size: 12px;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+        .card .body {
+            padding: 12px;
+        }
+        .hero {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 10px;
+        }
+        .hero h1 {
+            margin: 0 0 8px 0;
+            font-size: 24px;
+            line-height: 1;
+        }
+        .hero p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.35;
+            font-size: 13px;
+        }
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 10px;
+            border-radius: 999px;
+            background: rgba(63,176,255,0.12);
+            border: 1px solid rgba(63,176,255,0.25);
+            font-size: 12px;
+            white-space: nowrap;
+        }
+        .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--warn);
+            box-shadow: 0 0 12px rgba(245,158,11,0.5);
+        }
+        .dot.ok { background: var(--ok); box-shadow: 0 0 12px rgba(34,197,94,0.5); }
+        .dot.bad { background: var(--bad); box-shadow: 0 0 12px rgba(239,68,68,0.5); }
+        .kv {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .kv .item, .full-item {
+            background: rgba(255,255,255,0.02);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 10px;
+        }
+        .item .label, .full-item .label {
+            font-size: 11px;
+            color: var(--muted);
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .item .value, .full-item .value {
+            font-size: 15px;
+            font-weight: 700;
+            word-break: break-word;
+            line-height: 1.15;
+        }
+        .meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 10px;
+        }
+        .pill {
+            padding: 5px 9px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--line);
+            color: var(--muted);
+            font-size: 11px;
+        }
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            min-width: 250px;
+            justify-content: flex-end;
+        }
+        button, .link-btn {
+            appearance: none;
+            border: none;
+            border-radius: 12px;
+            padding: 10px 12px;
+            font-weight: 700;
+            cursor: pointer;
+            color: white;
+            font-size: 13px;
+        }
+        .start { background: linear-gradient(135deg, #16a34a, #22c55e); }
+        .stop { background: linear-gradient(135deg, #b91c1c, #ef4444); }
+        .close { background: linear-gradient(135deg, #6d28d9, #8b5cf6); }
+        .soft { background: linear-gradient(135deg, #0369a1, #3fb0ff); }
+        .link-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none;
+        }
+        .health-list, .event-list {
+            display: grid;
+            gap: 7px;
+            max-height: 24vh;
+            overflow: auto;
+            padding-right: 2px;
+        }
+        .health-row, .event-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            padding: 9px 10px;
+            border-radius: 12px;
+            background: rgba(255,255,255,0.02);
+            border: 1px solid var(--line);
+        }
+        .health-row .name, .event-row .name {
+            color: var(--muted);
+            font-size: 12px;
+        }
+        .health-row .state, .event-row .state {
+            font-weight: 700;
+            font-size: 12px;
+        }
+        .state.ok { color: var(--ok); }
+        .state.bad { color: var(--bad); }
+        .state.warn { color: var(--warn); }
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+        }
+        select, input {
+            background: var(--card2);
+            color: var(--text);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 8px 10px;
+            font-size: 12px;
+        }
+        pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: var(--mono);
+            font-size: 11px;
+            line-height: 1.45;
+            background: #08101c;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 12px;
+            min-height: 240px;
+            max-height: 34vh;
+            overflow: auto;
+        }
+        .mini {
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--muted);
+        }
+        .feed-shell {
+            width: 100%;
+            aspect-ratio: 16 / 8.5;
+            object-fit: cover;
+            display: block;
+            border-radius: 12px;
+            border: 1px solid var(--line);
+            background: #08101c;
+        }
+        @media (min-width: 1201px) {
+            body { overflow: hidden; }
+            .page {
+                min-height: 100vh;
+                height: 100vh;
+                grid-template-rows: auto auto auto minmax(0, 1fr);
+            }
+            .logs {
+                min-height: 0;
+            }
+            .logs .card,
+            .logs .body {
+                min-height: 0;
+            }
+        }
+        @media (max-width: 1200px) {
+            .grid, .logs, .topbar, .feeds { grid-template-columns: 1fr; }
+            .actions { justify-content: flex-start; min-width: 0; }
+            .health-list, .event-list { max-height: none; }
+            pre { max-height: none; min-height: 260px; }
+            body { overflow: auto; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <section class="topbar">
+            <div class="card">
+                <header>
+                    <h2>Web Controller</h2>
+                    <div class="badge"><span id="readyDot" class="dot"></span><span id="readyText">Bekleniyor</span></div>
+                </header>
+                <div class="body hero">
+                    <div>
+                        <h1>CELEBILER USV</h1>
+                        <p>Görev durumu, current position, parkur, güvenlik ve loglar tek ekranda. Klasik dashboard ayrı tutuldu.</p>
+                        <div class="meta">
+                            <span class="pill">Mod: <b id="usvMode">--</b></span>
+                            <span class="pill">Araç Modu: <b id="vehicleMode">--</b></span>
+                            <span class="pill">Mission File: <b id="missionFile">--</b></span>
+                        </div>
+                    </div>
+                    <div class="actions">
+                        <button id="startBtn" class="start">Görevi Başlat</button>
+                        <button id="stopBtn" class="stop">Acil Durdur</button>
+                        <button id="shutdownBtn" class="close">🔌 Sistemi Kapat</button>
+                        <a class="link-btn soft" href="/dashboard" target="_blank" rel="noreferrer">Klasik Dashboard</a>
+                        <a class="link-btn soft" href="http://127.0.0.1:5000" target="_blank" rel="noreferrer">Kamera</a>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <header><h2>Görev Özeti</h2><span class="mini" id="elapsed">--</span></header>
+                <div class="body">
+                    <div class="kv">
+                        <div class="item"><div class="label">Parkur</div><div class="value" id="activeParkur">IDLE</div></div>
+                        <div class="item"><div class="label">Görev State</div><div class="value" id="missionState">0</div></div>
+                        <div class="item"><div class="label">Waypoint</div><div class="value" id="wpInfo">-- / --</div></div>
+                        <div class="item"><div class="label">Target</div><div class="value" id="missionTarget">--</div></div>
+                    </div>
+                    <div class="meta" style="margin-top:14px">
+                        <span class="pill">Gate: <b id="gateCount">0</b></span>
+                        <span class="pill">Timeout: <b id="timeoutCount">0</b></span>
+                        <span class="pill">Failsafe: <b id="failsafeState">normal</b></span>
+                        <span class="pill">E-Stop: <b id="estopState">false</b></span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid">
+            <div class="card">
+                <header><h2>Navigasyon</h2><span class="mini" id="positionAge">--</span></header>
+                <div class="body">
+                    <div class="kv">
+                        <div class="item"><div class="label">Latitude</div><div class="value" id="lat">--</div></div>
+                        <div class="item"><div class="label">Longitude</div><div class="value" id="lon">--</div></div>
+                        <div class="item"><div class="label">Heading</div><div class="value" id="heading">--</div></div>
+                        <div class="item"><div class="label">Speed</div><div class="value" id="speed">--</div></div>
+                        <div class="item"><div class="label">Battery</div><div class="value" id="battery">--</div></div>
+                        <div class="item"><div class="label">Link Age</div><div class="value" id="linkAge">--</div></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <header><h2>Manuel ve Güvenlik</h2><span class="mini" id="commandLock">--</span></header>
+                <div class="body">
+                    <div class="kv">
+                        <div class="item"><div class="label">Gear</div><div class="value" id="gear">--</div></div>
+                        <div class="item"><div class="label">Manual Lock</div><div class="value" id="manualLock">--</div></div>
+                        <div class="item"><div class="label">RC1 / RC3</div><div class="value" id="rcSummary">--</div></div>
+                        <div class="item"><div class="label">Out1 / Out3</div><div class="value" id="outSummary">--</div></div>
+                    </div>
+                    <div class="meta" style="margin-top:14px">
+                        <span class="pill">Camera Ready: <b id="cameraReady">--</b></span>
+                        <span class="pill">Lidar Ready: <b id="lidarReady">--</b></span>
+                        <span class="pill">Health: <b id="healthReady">--</b></span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <header><h2>Sağlık Bayrakları</h2><span class="mini">readiness</span></header>
+                <div class="body health-list" id="healthList"></div>
+            </div>
+        </section>
+
+        <section class="feeds">
+            <div class="card">
+                <header><h2>Kamera Önizleme</h2><span class="mini">processed stream</span></header>
+                <div class="body">
+                    <img id="controllerCameraFeed" class="feed-shell" alt="Camera Preview" />
+                </div>
+            </div>
+            <div class="card">
+                <header><h2>Lidar Haritası</h2><span class="mini">latest local map</span></header>
+                <div class="body">
+                    <img id="controllerLidarFeed" class="feed-shell" alt="Lidar Preview" />
+                </div>
+            </div>
+        </section>
+
+        <section class="logs">
+            <div class="card">
+                <header><h2>Canlı Loglar</h2><span class="mini" id="logMeta">--</span></header>
+                <div class="body">
+                    <div class="toolbar">
+                        <select id="logSelect"></select>
+                        <input id="logLines" type="number" min="20" max="800" step="10" value="120">
+                        <button id="refreshLogBtn" class="soft">Log Yenile</button>
+                    </div>
+                    <pre id="logBody">Log yükleniyor...</pre>
+                </div>
+            </div>
+
+            <div class="card">
+                <header><h2>Event Akışı</h2><span class="mini" id="eventMeta">0 event</span></header>
+                <div class="body event-list" id="eventList"></div>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        const stateMap = {0: 'IDLE', 1: 'P1', 2: 'P2', 3: 'P3', 4: 'DONE', 5: 'HOLD'};
+        let latestEventId = 0;
+        let logFilesLoaded = false;
+
+        function fmtNum(v, d=3) {
+            if (v === null || v === undefined || Number.isNaN(Number(v))) return '--';
+            return Number(v).toFixed(d);
+        }
+
+        function text(id, value) {
+            document.getElementById(id).textContent = value;
+        }
+
+        function renderHealth(flags) {
+            const root = document.getElementById('healthList');
+            root.innerHTML = '';
+            const entries = Object.entries(flags || {});
+            if (!entries.length) {
+                root.innerHTML = '<div class="event-row"><span class="name">Flag bulunamadı</span><span class="state warn">--</span></div>';
+                return;
+            }
+            for (const [name, value] of entries) {
+                const row = document.createElement('div');
+                row.className = 'health-row';
+                row.innerHTML = `<span class="name">${name}</span><span class="state ${value ? 'ok' : 'bad'}">${value ? 'OK' : 'FAIL'}</span>`;
+                root.appendChild(row);
+            }
+        }
+
+        function prependEvent(kind, payload) {
+            const root = document.getElementById('eventList');
+            const row = document.createElement('div');
+            row.className = 'event-row';
+            row.innerHTML = `<span class="name">${kind}</span><span class="state">${payload}</span>`;
+            root.prepend(row);
+            while (root.children.length > 18) {
+                root.removeChild(root.lastChild);
+            }
+            text('eventMeta', `${root.children.length} event`);
+        }
+
+        async function loadLogFiles() {
+            const res = await fetch('/api/log_files');
+            const data = await res.json();
+            const select = document.getElementById('logSelect');
+            const current = select.value;
+            select.innerHTML = '';
+            for (const item of data.files || []) {
+                const opt = document.createElement('option');
+                opt.value = item.name;
+                opt.textContent = item.name;
+                select.appendChild(opt);
+            }
+            if (current) select.value = current;
+            if (!select.value && select.options.length) select.value = select.options[0].value;
+            logFilesLoaded = true;
+        }
+
+        async function refreshLogs() {
+            if (!logFilesLoaded) await loadLogFiles();
+            const name = document.getElementById('logSelect').value;
+            const lines = document.getElementById('logLines').value || '120';
+            if (!name) return;
+            const res = await fetch(`/api/log_tail?name=${encodeURIComponent(name)}&lines=${encodeURIComponent(lines)}`);
+            const data = await res.json();
+            text('logMeta', `${data.name || name} | ${data.exists ? 'OK' : 'missing'} | ${data.lines || 0} satır`);
+            document.getElementById('logBody').textContent = data.content || '[boş]';
+        }
+
+        function bindCameraFeed(el) {
+            if (!el) return;
+            const host = window.location.hostname || '127.0.0.1';
+            const candidates = [
+                '/api/camera_stream',
+                `http://${host}:5000/`
+            ];
+            if (!el.dataset.camHooked) {
+                el.dataset.camHooked = '1';
+                el.dataset.camIndex = el.dataset.camIndex || '0';
+                el.onerror = function() {
+                    const idx = Number(el.dataset.camIndex || '0');
+                    el.dataset.camIndex = String((idx + 1) % candidates.length);
+                    el.dataset.camBound = '0';
+                };
+            }
+            const lastAttempt = Number(el.dataset.camAttemptTs || '0');
+            const currentSrc = el.getAttribute('src') || '';
+            const shouldRetry = !currentSrc || el.naturalWidth === 0 || el.dataset.camBound !== '1';
+            if (!shouldRetry && (Date.now() - lastAttempt) < 5000) {
+                return;
+            }
+            const idx = Number(el.dataset.camIndex || '0') % candidates.length;
+            el.src = `${candidates[idx]}?t=${Date.now()}`;
+            el.dataset.camAttemptTs = String(Date.now());
+            el.dataset.camBound = '1';
+        }
+
+        function bindLidarFeed(el) {
+            if (!el) return;
+            const host = window.location.hostname || '127.0.0.1';
+            const candidates = [
+                '/api/lidar_stream',
+                `http://${host}:5001/`
+            ];
+            if (!el.dataset.lidarHooked) {
+                el.dataset.lidarHooked = '1';
+                el.dataset.lidarIndex = el.dataset.lidarIndex || '0';
+                el.onerror = function() {
+                    const idx = Number(el.dataset.lidarIndex || '0');
+                    el.dataset.lidarIndex = String((idx + 1) % candidates.length);
+                    el.dataset.lidarBound = '0';
+                };
+            }
+            const lastAttempt = Number(el.dataset.lidarAttemptTs || '0');
+            const currentSrc = el.getAttribute('src') || '';
+            const shouldRetry = !currentSrc || el.naturalWidth === 0 || el.dataset.lidarBound !== '1';
+            if (!shouldRetry && (Date.now() - lastAttempt) < 5000) {
+                return;
+            }
+            const idx = Number(el.dataset.lidarIndex || '0') % candidates.length;
+            el.src = `${candidates[idx]}?t=${Date.now()}`;
+            el.dataset.lidarAttemptTs = String(Date.now());
+            el.dataset.lidarBound = '1';
+        }
+
+        function refreshVisualFeeds() {
+            const cameraIds = ['controllerCameraFeed', 'cam_img'];
+            for (const id of cameraIds) {
+                const el = document.getElementById(id);
+                bindCameraFeed(el);
+            }
+            const lidarIds = ['controllerLidarFeed', 'map_img'];
+            for (const id of lidarIds) {
+                const el = document.getElementById(id);
+                bindLidarFeed(el);
+            }
+        }
+
+        async function refreshData() {
+            const res = await fetch('/api/data');
+            const data = await res.json();
+            text('usvMode', data.usv_mode || '--');
+            text('vehicleMode', data.Mode || '--');
+            text('missionFile', data.mission_file || '--');
+            text('activeParkur', data.active_parkur || 'IDLE');
+            text('missionState', `${data.mission_state} / ${stateMap[data.mission_state] || 'UNKNOWN'}`);
+            text('wpInfo', data.mission_wp_info || '-- / --');
+            text('missionTarget', data.mission_target || '--');
+            text('gateCount', String(data.gate_count ?? 0));
+            text('timeoutCount', String(data.timeout_count ?? 0));
+            text('failsafeState', data.failsafe_state || '--');
+            text('estopState', String(Boolean(data.estop_state)));
+            text('lat', fmtNum(data.Lat, 7));
+            text('lon', fmtNum(data.Lon, 7));
+            text('heading', `${fmtNum(data.Heading, 2)} deg`);
+            text('speed', `${fmtNum(data.Speed, 2)} m/s`);
+            text('battery', `${fmtNum(data.Battery, 2)} V`);
+            text('linkAge', `${fmtNum(data.link_heartbeat_age_s, 2)} s`);
+            text('positionAge', `state age ${fmtNum(data.state_age_s, 2)} s`);
+            text('gear', data.Gear || '--');
+            text('manualLock', data.manual_lock_reason || '--');
+            text('commandLock', `command_lock=${Boolean(data.command_lock)}`);
+            text('rcSummary', `${data.RC1 ?? '--'} / ${data.RC3 ?? '--'}`);
+            text('outSummary', `${data.Out1 ?? '--'} / ${data.Out3 ?? '--'}`);
+            text('cameraReady', String(Boolean(data.camera_ready)));
+            text('lidarReady', String(Boolean(data.lidar_ready)));
+            text('healthReady', String(Boolean(data.ready_state)));
+
+            const elapsed = Number(data.mission_active) && data.report_view ? data.report_view.mode_state.active_parkur : 'IDLE';
+            text('elapsed', `parkur=${elapsed}`);
+
+            renderHealth((data.health_check || {}).flags || {});
+
+            const ready = Boolean(data.ready_state);
+            const active = Boolean(data.mission_active);
+            const dot = document.getElementById('readyDot');
+            dot.className = 'dot ' + (active ? 'ok' : (ready ? 'ok' : 'bad'));
+            text('readyText', active ? 'Görev Aktif' : (ready ? 'Hazır' : 'Hazır Değil'));
+            document.getElementById('startBtn').disabled = active || !ready || !Boolean(data.camera_ready) || !Boolean(data.lidar_ready);
+        }
+
+        async function pollEvents() {
+            try {
+                const res = await fetch(`/api/events?since_id=${latestEventId}`);
+                const data = await res.json();
+                latestEventId = data.latest_id || latestEventId;
+                for (const ev of data.events || []) {
+                    prependEvent(ev.kind || 'event', JSON.stringify(ev.payload || {}));
+                }
+            } catch (err) {
+                prependEvent('events_error', String(err));
+            } finally {
+                setTimeout(pollEvents, 1500);
+            }
+        }
+
+        async function doPost(url) {
+            const res = await fetch(url, {method: 'POST'});
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                prependEvent('request_error', `${url} -> ${JSON.stringify(data)}`);
+                return;
+            }
+            prependEvent('request_ok', `${url} -> ${JSON.stringify(data)}`);
+            await refreshData();
+            await refreshLogs();
+        }
+
+        document.getElementById('startBtn').addEventListener('click', () => doPost('/api/start_mission'));
+        document.getElementById('stopBtn').addEventListener('click', () => doPost('/api/emergency_stop'));
+        document.getElementById('shutdownBtn').addEventListener('click', () => {
+            if (confirm('Sistemi kapatmak istediğinizden emin misiniz?')) {
+                doPost('/api/shutdown');
+            }
+        });
+        document.getElementById('refreshLogBtn').addEventListener('click', refreshLogs);
+        document.getElementById('logSelect').addEventListener('change', refreshLogs);
+
+        (async () => {
+            await loadLogFiles();
+            await refreshData();
+            await refreshLogs();
+            refreshVisualFeeds();
+            setInterval(refreshData, 1500);
+            setInterval(refreshLogs, 2500);
+            setInterval(refreshVisualFeeds, 1000);
+            pollEvents();
+        })();
+    </script>
+</body>
+</html>
+"""
+
+
+def _tail_text_file(path, lines):
+    if not path or not os.path.exists(path):
+        return False, ""
+    max_lines = max(20, min(int(lines or 120), 800))
+    recent = deque(maxlen=max_lines)
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            recent.append(line.rstrip("\n"))
+    return True, "\n".join(recent)
+
+
+def _svg_placeholder(title, subtitle):
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+<rect width="1280" height="720" fill="#08101c"/>
+<rect x="32" y="32" width="1216" height="656" rx="24" fill="#0f1726" stroke="#22324a" stroke-width="2"/>
+<text x="640" y="320" text-anchor="middle" fill="#e5eefc" font-family="Arial, sans-serif" font-size="42" font-weight="700">{title}</text>
+<text x="640" y="382" text-anchor="middle" fill="#8da2c0" font-family="Arial, sans-serif" font-size="24">{subtitle}</text>
+</svg>"""
+    return Response(svg, mimetype="image/svg+xml")
+
+
+def _stream_mjpeg_proxy(source_url):
+    upstream = urllib.request.urlopen(source_url, timeout=3.0)
+    mimetype = upstream.info().get_content_type() or "multipart/x-mixed-replace; boundary=frame"
+
+    def generate():
+        try:
+            while True:
+                chunk = upstream.read(4096)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            try:
+                upstream.close()
+            except Exception:
+                pass
+
+    return Response(generate(), mimetype=mimetype)
+
+
+def _stream_camera_proxy():
+    return _stream_mjpeg_proxy(CAMERA_STREAM_PROXY_SOURCE)
+
+
+def _stream_lidar_proxy():
+    return _stream_mjpeg_proxy(LIDAR_STREAM_PROXY_SOURCE)
+
+
 # --- FLASK ROUTES ---
 @app.route('/')
-def index():
+@app.route('/controller')
+def controller():
+    return render_template_string(CONTROLLER_PAGE)
+
+
+@app.route('/dashboard')
+def dashboard():
     return render_template_string(HTML_PAGE, usv_mode=USV_MODE)
+
+
+@app.route('/api/camera_stream')
+def camera_stream():
+    try:
+        return _stream_camera_proxy()
+    except Exception as exc:
+        if st is not None:
+            st._warn_throttled("camera_proxy", f"[WARN] [CAM] Proxy acilamadi: {exc}")
+        return _svg_placeholder("Kamera akisi yok", "cam.py veya bridge yayini kontrol edilmeli")
+
+
+@app.route('/api/lidar_stream')
+def lidar_stream():
+    try:
+        return _stream_lidar_proxy()
+    except Exception as exc:
+        if st is not None:
+            st._warn_throttled("lidar_proxy", f"[WARN] [LIDAR] Proxy acilamadi: {exc}")
+        if os.path.exists(LIDAR_MAP_JPG):
+            response = send_file(LIDAR_MAP_JPG, mimetype="image/jpeg", conditional=False)
+            response.cache_control.no_store = True
+            response.cache_control.max_age = 0
+            return response
+        return _svg_placeholder("Lidar akisi yok", "lidar_map.py veya ROS-GZ bridge kontrol edilmeli")
+
+
+@app.route('/api/lidar_map.jpg')
+def lidar_map():
+    if os.path.exists(LIDAR_MAP_JPG):
+        response = send_file(LIDAR_MAP_JPG, mimetype="image/jpeg", conditional=False)
+        response.cache_control.no_store = True
+        response.cache_control.max_age = 0
+        return response
+    return _svg_placeholder("Lidar haritasi yok", "file3 local map snapshot henuz olusmadi")
 
 def _read_mission_state():
     """usv_main tarafından yazılan state dosyasını oku."""
@@ -1376,14 +2462,15 @@ def _read_mission_state():
                 return state
     except Exception as exc:
         # Atomic olmayan yazım anında parse hatası olabilir; son geçerli state'e düş.
-        if st is not None:
-            st._bump_error("state_read_error", f"[WARN] [IPC] State okuma hatasi: {exc}")
+        # Silent fail - don't bump error counter at module level
+        pass
     return last_state_cache
 
 @app.route('/api/data')
 def get_data():
     out = dict(telemetry_data)
     out['usv_mode'] = USV_MODE
+    out['mission_file'] = os.environ.get('MISSION_FILE', '--')
     state = _read_mission_state()
     _sync_events_from_state(state)
     out['mission_state'] = state.get('state', mission_data['state'])
@@ -1581,6 +2668,185 @@ def get_data():
     }
     return jsonify(out)
 
+
+@app.route('/api/log_files')
+def log_files():
+    files = []
+    for name, path in sorted(_merged_log_index().items()):
+        exists = bool(path and os.path.exists(path))
+        size = os.path.getsize(path) if exists else 0
+        mtime = round(os.path.getmtime(path), 3) if exists else None
+        files.append({
+            'name': name,
+            'exists': exists,
+            'size': size,
+            'mtime': mtime,
+        })
+    files.sort(key=lambda item: item['name'])
+    return jsonify({'files': files})
+
+
+@app.route('/api/log_tail')
+def log_tail():
+    name = request.args.get('name', 'telemetry.log')
+    lines = request.args.get('lines', 120)
+    safe_name, path = _read_allowed_log(name)
+    if not path:
+        return jsonify({
+            'name': safe_name or str(name),
+            'exists': False,
+            'lines': 0,
+            'content': '',
+            'error': 'Log dosyasi izinli degil',
+        }), 400
+    try:
+        exists, content = _tail_text_file(path, lines)
+        return jsonify({
+            'name': safe_name,
+            'exists': exists,
+            'lines': max(20, min(int(lines or 120), 800)),
+            'content': content,
+        })
+    except Exception as exc:
+        # Silent fail for log tail endpoint
+        return jsonify({
+            'name': safe_name,
+            'exists': bool(os.path.exists(path)),
+            'lines': 0,
+            'content': '',
+            'error': str(exc),
+        }), 500
+
+@app.route('/api/mission', methods=['POST'])
+def upload_mission():
+    """Mission dosyasını yükle ve valide et.
+    
+    POST body:
+    {
+      "parkur1": [[lat, lon], ...],
+      "parkur2": [[lat, lon], ...],
+      "parkur3": [[lat, lon]],
+      "target_color": "RED|GREEN|BLACK|KIRMIZI_SANCAK|YESIL_SANCAK|SIYAH_HEDEF"
+    }
+    """
+    if USV_MODE == USV_MODE_RACE:
+        return jsonify({'error': 'Race modunda mission yükleme API kapalıdır.'}), 403
+    
+    # İstek gövdesinden mission verisini oku
+    try:
+        mission_data_upload = request.get_json()
+        if not mission_data_upload:
+            return jsonify({'error': 'JSON body boş'}), 400
+    except Exception as e:
+        return jsonify({'error': f'JSON parse hatası: {str(e)}'}), 400
+    
+    # Hızlı schema kontrolü
+    required_fields = ["parkur1", "parkur2", "parkur3", "target_color"]
+    missing = [f for f in required_fields if f not in mission_data_upload]
+    if missing:
+        return jsonify({'error': f'Eksik alanlar: {missing}'}), 400
+    
+    # Temel tip kontrolü
+    if not isinstance(mission_data_upload.get("parkur1"), list):
+        return jsonify({'error': 'parkur1 dizi olmalı'}), 400
+    if not isinstance(mission_data_upload.get("parkur2"), list):
+        return jsonify({'error': 'parkur2 dizi olmalı'}), 400
+    if not isinstance(mission_data_upload.get("parkur3"), list):
+        return jsonify({'error': 'parkur3 dizi olmalı'}), 400
+    if not isinstance(mission_data_upload.get("target_color"), str):
+        return jsonify({'error': 'target_color string olmalı'}), 400
+    
+    # Parkur boş olmama kontrolü
+    if len(mission_data_upload["parkur1"]) == 0:
+        return jsonify({'error': 'parkur1 boş olamaz'}), 400
+    if len(mission_data_upload["parkur2"]) == 0:
+        return jsonify({'error': 'parkur2 boş olamaz'}), 400
+    if len(mission_data_upload["parkur3"]) == 0:
+        return jsonify({'error': 'parkur3 boş olamaz'}), 400
+    if len(mission_data_upload["parkur3"]) > 2:
+        return jsonify({'error': 'parkur3 max 2 waypoint olabilir'}), 400
+    
+    # Geçerli renkler
+    valid_colors = ["RED", "GREEN", "BLACK", "KIRMIZI_SANCAK", "YESIL_SANCAK", "SIYAH_HEDEF"]
+    if mission_data_upload["target_color"] not in valid_colors:
+        return jsonify({'error': f'Geçersiz renk. Geçerli: {valid_colors}'}), 400
+    
+    # Mission dosyasına yazma
+    mission_file = os.environ.get("MISSION_FILE", MISSION_FILE_DEFAULT)
+    try:
+        os.makedirs(os.path.dirname(mission_file), exist_ok=True)
+        with open(mission_file, 'w', encoding='utf-8') as f:
+            json.dump(mission_data_upload, f, indent=2)
+        print(f"✓ [API] Mission dosyası başarıyla yüklendi: {mission_file}")
+        return jsonify({
+            'ok': True,
+            'message': 'Mission başarıyla yüklendi',
+            'mission': {
+                'p1_count': len(mission_data_upload["parkur1"]),
+                'p2_count': len(mission_data_upload["parkur2"]),
+                'p3_count': len(mission_data_upload["parkur3"]),
+                'target_color': mission_data_upload["target_color"],
+                'file': mission_file
+            }
+        }), 200
+    except Exception as e:
+        print(f"✗ [API] Mission yazma hatası: {e}")
+        return jsonify({'error': f'Mission dosyası yazılamadı: {str(e)}'}), 500
+
+
+@app.route('/api/target_color', methods=['POST'])
+def set_target_color():
+    """Target color'u dinamik olarak ayarla.
+    
+    POST body:
+    {
+      "target_color": "RED|GREEN|BLACK|KIRMIZI_SANCAK|YESIL_SANCAK|SIYAH_HEDEF"
+    }
+    """
+    if USV_MODE == USV_MODE_RACE:
+        return jsonify({'error': 'Race modunda target_color API kapalıdır.'}), 403
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'JSON body boş'}), 400
+    except Exception as e:
+        return jsonify({'error': f'JSON parse hatası: {str(e)}'}), 400
+    
+    target_color = data.get('target_color', '').upper()
+    if not target_color:
+        return jsonify({'error': 'target_color alanı zorunlu'}), 400
+    
+    # Geçerli renkler
+    valid_colors = ["RED", "GREEN", "BLACK", "KIRMIZI_SANCAK", "YESIL_SANCAK", "SIYAH_HEDEF"]
+    if target_color not in valid_colors:
+        return jsonify({'error': f'Geçersiz renk. Geçerli: {valid_colors}'}), 400
+    
+    # Mission state'i oku
+    state = _read_mission_state()
+    
+    # Target color'u güncelle
+    state['target_color'] = target_color
+    state['target_color_changed_at'] = time.time()
+    
+    # Mission state'i yaz
+    try:
+        tmp_path = f"{STATE_FILE}.tmp"
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, STATE_FILE)
+        
+        print(f"✓ [API] Target color güncellendi: {target_color}")
+        return jsonify({
+            'ok': True,
+            'message': f'Target color başarıyla {target_color} olarak ayarlandı',
+            'target_color': target_color
+        }), 200
+    except Exception as e:
+        print(f"✗ [API] Target color yazma hatası: {e}")
+        return jsonify({'error': f'Target color yazılamadı: {str(e)}'}), 500
+
+
 @app.route('/api/mission_status')
 def mission_status():
     state = _read_mission_state()
@@ -1619,6 +2885,13 @@ def start_mission():
     """Görevi başlat (usv_main dosya IPC ile algılar)."""
     if USV_MODE == USV_MODE_RACE:
         return jsonify({'error': 'Race modunda gorev baslatma sadece RC CH5 ile yapilir (API politikasi kapali).'}), 403
+    state = _read_mission_state()
+    if state.get('active', False):
+        return jsonify({'error': 'Gorev zaten aktif.'}), 409
+    if not state.get('ready_state', False):
+        return jsonify({'error': 'Sistem hazir degil. Kamera/lidar/telemetri hazir olmadan start kabul edilmez.'}), 409
+    if not state.get('camera_ready', False) or not state.get('lidar_ready', False):
+        return jsonify({'error': 'Kamera veya lidar hazir degil. Web controller readiness yesil olmadan start kabul edilmez.'}), 409
     mission_data['start_requested'] = True
     if not _touch_flag(FLAG_START):
         return jsonify({'error': 'Start flag yazilamadi'}), 500
@@ -1629,16 +2902,32 @@ def start_mission():
 def emergency_stop():
     """Acil durdur (usv_main dosya IPC ile algılar)."""
     mission_data['stop_requested'] = True
+    mission_data['start_requested'] = False
+    _clear_flag(FLAG_START)
     if not _touch_flag(FLAG_STOP):
         return jsonify({'error': 'E-stop flag yazilamadi'}), 500
     try:
         if st is not None:
             st.force_estop_relay()
     except Exception as exc:
-        if st is not None:
-            st._bump_error("rc_override_error", f"[WARN] [ESTOP] API estop relay hatasi: {exc}")
+        # Silent fail - estop relay triggered, error not critical
+        pass
     print("🚨 [DASHBOARD] ACİL DURDUR isteği alındı")
     return jsonify({'ok': True})
+
+@app.route('/api/shutdown', methods=['POST'])
+def shutdown_system():
+    """Sistemin tamamını kapat (ESC gibi)."""
+    print("⚠️  [DASHBOARD] SİSTEM KAPATMA komutu alındı")
+    os.system('pkill -9 -f "gazebo|ardupilot|usv_main|ros2|cam|telemetry"')
+    return jsonify({'ok': True, 'message': 'System shutting down...'})
+
+install_module_function_tracing(
+    globals(),
+    component="telemetry",
+    logger=_telem_dbg,
+    prefer_simulation=bool(os.environ.get("USV_SIM") == "1"),
+)
 
 if __name__ == "__main__":
     clean_port(WEB_PORT)

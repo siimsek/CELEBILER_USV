@@ -24,18 +24,45 @@ def resolve_usv_mode(raw_mode: str | None = None) -> str:
 USV_MODE = resolve_usv_mode()
 
 
+def _resolve_runtime_root() -> Path:
+    env_root = os.environ.get("USV_PROJECT_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+
+    here = Path(__file__).resolve()
+    for candidate in (here.parent, *here.parents):
+        if (candidate / "src").is_dir() and (candidate / "scripts").is_dir():
+            return candidate
+        if (candidate / "docker_workspace" / "src").is_dir() and (candidate / "host_scripts").is_dir():
+            return candidate
+    return here.parent
+
+
+def _is_container_layout(root: Path) -> bool:
+    return (root / "src").is_dir() and (root / "scripts").is_dir()
+
+
+RUNTIME_ROOT = _resolve_runtime_root()
+
+
 # Mission / control profile
 CONTROL_HZ = 10
 GENERAL_TELEMETRY_HZ = 5
 OBSTACLE_TELEMETRY_HZ = 5
 LIDAR_PROCESSING_HZ = 10
+if os.environ.get("USV_SIM") == "1":
+    # Sim: yüksek Hz — pose/telemetri akıcı, ışınlanma hissi azalır
+    CONTROL_HZ = 40
+    GENERAL_TELEMETRY_HZ = 40
+    OBSTACLE_TELEMETRY_HZ = 40
+    LIDAR_PROCESSING_HZ = 40
 
 R_WP_M = 2.5
 T_HOLD_S = 2.0
 P1_SPEED_CRUISE_MPS = 1.2
 P1_SPEED_APPROACH_MPS = 0.6
 P2_WAIT_SPEED_MPS = 0.6
-P2_CRUISE_MPS = 1.0
+P2_CRUISE_MPS = 1.5
 P2_STABLE_S = 1.0
 P2_GATE_CONFIRM_S = 0.5
 P3_MAX_SPEED_MPS = 1.5
@@ -46,11 +73,18 @@ P3_REVERSE_SPEED_MPS = 0.6
 P3_REVERSE_DISTANCE_M = 3.0
 P3_REVERSE_TIMEOUT_S = 4.0
 D_MIN_M = 2.0
+# P2: lidar + kamera birlesik kacinma (warn mesafesinde yumuak, D_MIN altinda sert)
+P2_LIDAR_WARN_M = 5.0
+P2_ESCAPE_MAX_DEG = 40.0
+P2_ESCAPE_MAX_DEG_LOCAL_MINIMA = 65.0
+P2_LOCAL_MINIMA_TIMEOUT_S = 8.0
+P2_CAM_YELLOW_WEIGHT = 0.55
 HEARTBEAT_WARN_S = 5.0
 HEARTBEAT_FAIL_S = 30.0
 FAILSAFE_SLOW_MPS = 0.3
 CAMERA_FRAME_TIMEOUT_S = 1.0
 LIDAR_READY_TIMEOUT_S = 1.0
+SIM_ALLOW_RC_OVERRIDE = os.environ.get("SIM_ALLOW_RC_OVERRIDE", "").strip() == "1"
 
 # Innovation switches: set to False to hard-disable from code before startup.
 INNOVATION_SWITCHES = {
@@ -68,6 +102,7 @@ FUSION_BEARING_WINDOW_DEG = 10.0
 FUSION_LIDAR_MIN_VALID_M = 0.4
 FUSION_LIDAR_CONFIRM_MAX_M = 12.0
 FUSION_CONFIRM_HOLD_S = 0.3
+FUSION_CAMERA_ONLY_TIMEOUT_S = 3.0
 FUSION_GATE_EVENT_CONFIRM_WINDOW_S = 1.2
 FUSION_LOG_PERIOD_S = 2.0
 DYN_SPEED_ENABLED = bool(INNOVATION_SWITCHES.get("dynamic_speed_profile", True))
@@ -76,11 +111,11 @@ DYN_SPEED_BAND_SOFT_DEG = 8.0
 DYN_SPEED_BAND_MEDIUM_DEG = 18.0
 DYN_SPEED_BAND_HARD_DEG = 30.0
 DYN_SPEED_FACTOR_STRAIGHT = 1.00
-DYN_SPEED_FACTOR_SOFT = 0.80
-DYN_SPEED_FACTOR_MEDIUM = 0.60
-DYN_SPEED_FACTOR_HARD = 0.40
+DYN_SPEED_FACTOR_SOFT = 0.90
+DYN_SPEED_FACTOR_MEDIUM = 0.78
+DYN_SPEED_FACTOR_HARD = 0.64
 DYN_SPEED_MIN_MPS_P1 = 0.35
-DYN_SPEED_MIN_MPS_P2 = 0.30
+DYN_SPEED_MIN_MPS_P2 = 0.40
 DYN_SPEED_LOG_PERIOD_S = 2.0
 WIND_ASSIST_ENABLED = bool(INNOVATION_SWITCHES.get("wind_assist", True))
 WIND_ASSIST_SCOPE = ("P1", "P2")
@@ -123,7 +158,9 @@ TRUST_WEIGHT_LIDAR = 0.25
 TRUST_WEIGHT_RC = 0.25
 TRUST_GOOD_THRESHOLD = 85.0
 TRUST_WARN_THRESHOLD = 60.0
-TRUST_LIDAR_POINTS_FULL = 180
+TRUST_LIDAR_POINTS_FULL = 360
+if os.environ.get("USV_SIM") == "1":
+    TRUST_LIDAR_POINTS_FULL = 720
 TRUST_LOG_PERIOD_S = 2.0
 
 
@@ -133,10 +170,47 @@ RC7_ESTOP_PWM = 1900
 RC7_ESTOP_FORCE_PWM = 2011
 RC_RACE_START_PWM = 1700
 
-CONTROL_DIR = "/root/workspace/control"
-LOG_DIR = "/root/workspace/logs"
+def _default_control_dir() -> str:
+    if os.environ.get("USV_SIM") == "1":
+        sim_control = RUNTIME_ROOT / "sim" / "control"
+        if (RUNTIME_ROOT / "sim").is_dir():
+            return str(sim_control)
+    if _is_container_layout(RUNTIME_ROOT):
+        return str(RUNTIME_ROOT / "control")
+    if (RUNTIME_ROOT / "docker_workspace").is_dir():
+        return str(RUNTIME_ROOT / "docker_workspace" / "control")
+    return str(RUNTIME_ROOT / "control")
+
+
+def _default_log_dir() -> str:
+    if os.environ.get("USV_SIM") == "1":
+        sim_log_dir = RUNTIME_ROOT / "logs" / "system"
+        if (RUNTIME_ROOT / "sim").is_dir():
+            return str(sim_log_dir)
+    if _is_container_layout(RUNTIME_ROOT):
+        return str(RUNTIME_ROOT / "logs")
+    if (RUNTIME_ROOT / "docker_workspace").is_dir():
+        return str(RUNTIME_ROOT / "logs" / "system")
+    return str(RUNTIME_ROOT / "logs")
+
+
+def _default_mission_file() -> str:
+    if os.environ.get("USV_SIM") == "1":
+        sim_mission = RUNTIME_ROOT / "sim" / "configs" / "mission_parkour_all.json"
+        if (RUNTIME_ROOT / "sim" / "configs").is_dir():
+            return str(sim_mission)
+    if _is_container_layout(RUNTIME_ROOT):
+        return str(RUNTIME_ROOT / "mission.json")
+    if (RUNTIME_ROOT / "docker_workspace").is_dir():
+        return str(RUNTIME_ROOT / "docker_workspace" / "mission.json")
+    return str(RUNTIME_ROOT / "mission.json")
+
+
+CONTROL_DIR = os.environ.get("CONTROL_DIR", _default_control_dir())
+LOG_DIR = os.environ.get("LOG_DIR", _default_log_dir())
+MISSION_FILE_DEFAULT = os.environ.get("MISSION_FILE", _default_mission_file())
 USB_STORAGE_CANDIDATES = (
-    "/root/workspace/usb",
+    "/home/siimsek/Desktop/CELEBILER_USV/logs/usb",
     "/media/usb",
     "/mnt/usb",
     "/media/pi",
@@ -197,7 +271,13 @@ def evaluate_storage_health(mode: str, local_dir: str = LOG_DIR, usb_candidates:
     local_ok = _is_dir_writable(local_path)
 
     candidate_paths = [Path(p) for p in usb_candidates]
-    existing_candidates = [p for p in candidate_paths if p.exists()]
+    existing_candidates = []
+    for p in candidate_paths:
+        try:
+            if p.exists():
+                existing_candidates.append(p)
+        except (PermissionError, OSError):
+            pass
     usb_required = bool(mode == USV_MODE_RACE and USB_REQUIRED_IN_RACE)
 
     if existing_candidates:
