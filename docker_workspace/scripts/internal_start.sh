@@ -55,7 +55,7 @@ if [ -n "$PIXHAWK_PORT" ]; then
         --out=udpout:127.0.0.1:14551 \
         --daemon --non-interactive \
         > /root/workspace/logs/mavproxy.log 2>&1 &
-    sleep 2
+    sleep 0.5
     echo "✅ [MAV] MAVProxy aktif"
 else
     echo "⚠️ [MAV] Pixhawk bulunamadı — doğrudan bağlantı denenecek"
@@ -64,7 +64,7 @@ fi
 # 1. LIDAR BAŞLAT (Her iki modda da - onboard kullanım için)
 echo "🚀 [LIDAR] Başlatılıyor..."
 ros2 launch rplidar_ros rplidar_s2e_launch.py channel_type:=udp ip:=192.168.11.2 tcp_port:=20108 frame_id:=laser_frame > /root/workspace/logs/lidar.log 2>&1 &
-sleep 5
+sleep 2
 
 # 2. HARİTA SUNUCUSU (Port 5001) - Sadece TEST modunda (görüntü aktarımı yasak)
 if [ "$USV_MODE" = "race" ]; then

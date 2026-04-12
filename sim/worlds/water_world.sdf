@@ -127,7 +127,7 @@
 
     <light type="directional" name="sun">
       <cast_shadows>false</cast_shadows>
-      <pose>0 0 16 0 0 0</pose>
+      <pose>0 0 16 0 0 -1.570796</pose>
       <diffuse>0.92 0.92 0.92 1</diffuse>
       <specular>0.18 0.18 0.18 1</specular>
       <attenuation>
@@ -181,92 +181,174 @@
     <!-- Merkez: (0,0)→(2.5,3.5)→(-2.5,7)→(2.5,10.5)→(0,14) -->
     <!-- Genişlik: 8 m | Aralık: 1 m | 3 kıvrım          -->
     <!-- ================================================ -->
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_01</name><pose>-4.00 0.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_02</name><pose>-3.29 1.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_03</name><pose>-2.57 2.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_04</name><pose>-1.86 3.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_05</name><pose>-2.21 4.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_06</name><pose>-3.64 5.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_07</name><pose>-5.07 6.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_08</name><pose>-6.50 7.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_09</name><pose>-5.07 8.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_10</name><pose>-3.64 9.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_11</name><pose>-2.21 10.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_12</name><pose>-1.86 11.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_13</name><pose>-2.57 12.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_14</name><pose>-3.29 13.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_15</name><pose>-4.00 14.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_16</name><pose>4.00 0.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_17</name><pose>4.71 1.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_18</name><pose>5.43 2.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_19</name><pose>6.14 3.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_20</name><pose>5.79 4.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_21</name><pose>4.36 5.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_22</name><pose>2.93 6.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_23</name><pose>1.50 7.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_24</name><pose>2.93 8.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_25</name><pose>4.36 9.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_26</name><pose>5.79 10.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_27</name><pose>6.14 11.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_28</name><pose>5.43 12.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_29</name><pose>4.71 13.00 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_30</name><pose>4.00 14.00 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_01</name><pose>0 4 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_02</name><pose>1 3.29 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_03</name><pose>2 2.57 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_04</name><pose>3 1.86 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_05</name><pose>4 2.21 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_06</name><pose>5 3.64 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_07</name><pose>6 5.07 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_08</name><pose>7 6.5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_09</name><pose>8 5.07 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_10</name><pose>9 3.64 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_11</name><pose>10 2.21 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_12</name><pose>11 1.86 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_13</name><pose>12 2.57 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_14</name><pose>13 3.29 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_15</name><pose>14 4 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_16</name><pose>0 -4 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_17</name><pose>1 -4.71 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_18</name><pose>2 -5.43 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_19</name><pose>3 -6.14 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_20</name><pose>4 -5.79 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_21</name><pose>5 -4.36 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_22</name><pose>6 -2.93 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_23</name><pose>7 -1.5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_24</name><pose>8 -2.93 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_25</name><pose>9 -4.36 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_26</name><pose>10 -5.79 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_27</name><pose>11 -6.14 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_28</name><pose>12 -5.43 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_29</name><pose>13 -4.71 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_30</name><pose>14 -4 0 0 0 -1.570796</pose></include>
 
-    <!-- Waypoint markers (waypoint_gn1-6) REMOVED per user request - gerek yok, görev noktaları GPS koordinatlardan geliyor -->
 
     <!-- ================================================ -->
     <!-- PARKUR 2: Engel kaçınma                         -->
     <!-- Turuncu sınır dubalar + sarı engel dubalar       -->
     <!-- ================================================ -->
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_67</name><pose>-5.0 14.8 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_68</name><pose>5.0 14.8 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_69</name><pose>-5.0 16.6 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_70</name><pose>5.0 16.6 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_71</name><pose>-5.0 18.4 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_72</name><pose>5.0 18.4 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_73</name><pose>-5.0 20.2 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_74</name><pose>5.0 20.2 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_75</name><pose>-5.0 22.0 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_76</name><pose>5.0 22.0 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_77</name><pose>-5.0 24.0 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_78</name><pose>5.0 24.0 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_79</name><pose>-5.2 27.0 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_80</name><pose>5.2 27.0 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_67</name><pose>14.8 5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_68</name><pose>14.8 -5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_69</name><pose>16.6 5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_70</name><pose>16.6 -5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_71</name><pose>18.4 5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_72</name><pose>18.4 -5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_73</name><pose>20.2 5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_74</name><pose>20.2 -5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_75</name><pose>22 5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_76</name><pose>22 -5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_77</name><pose>24 5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_78</name><pose>24 -5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_79</name><pose>27 5.2 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_80</name><pose>27 -5.2 0 0 0 -1.570796</pose></include>
 
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_01</name><pose>3.2 15.5 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_02</name><pose>-2.5 15.8 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_03</name><pose>-4.0 16.4 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_04</name><pose>0.0 16.9 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_05</name><pose>4.5 17.3 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_06</name><pose>-3.5 18.0 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_07</name><pose>2.5 18.6 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_08</name><pose>-4.5 19.2 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_09</name><pose>1.0 19.9 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_10</name><pose>4.0 20.5 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_11</name><pose>-2.0 21.2 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_12</name><pose>3.5 22.0 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_13</name><pose>-4.0 23.0 0 0 0 0</pose></include>
-    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_14</name><pose>0.8 24.0 0 0 0 0</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_01</name><pose>15.5 -3.2 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_02</name><pose>15.8 2.5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_03</name><pose>16.4 4 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_04</name><pose>16.9 0 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_05</name><pose>17.3 -4.5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_06</name><pose>18 3.5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_07</name><pose>18.6 -2.5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_08</name><pose>19.2 4.5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_09</name><pose>19.9 -1 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_10</name><pose>20.5 -4 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_11</name><pose>21.2 2 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_12</name><pose>22 -3.5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_13</name><pose>23 4 0 0 0 -1.570796</pose></include>
+    <include><uri>model://obstacle_buoy_yellow</uri><name>obstacle_buoy_yellow_14</name><pose>24 -0.8 0 0 0 -1.570796</pose></include>
 
-    <!-- Waypoint marker gn6 REMOVED per user request -->
 
     <!-- ================================================ -->
     <!-- PARKUR 3: Hedef seçimi (kamikaze)                -->
     <!-- Kırmızı / Yeşil / Siyah hedef dubalar           -->
     <!-- ================================================ -->
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_81</name><pose>-5.0 28.5 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_82</name><pose>5.0 28.5 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_83</name><pose>-5.5 31.2 0 0 0 0</pose></include>
-    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_84</name><pose>5.5 31.2 0 0 0 0</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_81</name><pose>28.5 5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_82</name><pose>28.5 -5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_83</name><pose>31.2 5.5 0 0 0 -1.570796</pose></include>
+    <include><uri>model://boundary_buoy_orange</uri><name>boundary_buoy_orange_84</name><pose>31.2 -5.5 0 0 0 -1.570796</pose></include>
 
-    <include><uri>model://target_buoy_red</uri><name>target_buoy_red</name><pose>-3.0 29.8 0 0 0 0</pose></include>
-    <include><uri>model://target_buoy_green</uri><name>target_buoy_green</name><pose>0.0 29.8 0 0 0 0</pose></include>
-    <include><uri>model://target_buoy_black</uri><name>target_buoy_black</name><pose>3.0 29.8 0 0 0 0</pose></include>
+    <include><uri>model://target_buoy_red</uri><name>target_buoy_red</name><pose>29.8 3 0 0 0 -1.570796</pose></include>
+    <include><uri>model://target_buoy_green</uri><name>target_buoy_green</name><pose>29.8 0 0 0 0 -1.570796</pose></include>
+    <include><uri>model://target_buoy_black</uri><name>target_buoy_black</name><pose>29.8 -3 0 0 0 -1.570796</pose></include>
 
+
+    <!-- ================================================ -->
+    <!-- WAYPOINT MARKERLERİ (yeşil küreler, r=0.22m)    -->
+    <!--   WP1: P1 kıvrım 1   world(+2.5,  3.5)          -->
+    <!--   WP2: P1 kıvrım 2   world(-2.5,  7.0)          -->
+    <!--   WP3: P1 kıvrım 3   world(+2.5, 10.5)          -->
+    <!--   WP4: P1 çıkış      world( 0.0, 14.0)          -->
+    <!--   WP5: P2 sonu       world( 0.0, 27.0)          -->
+    <!-- ================================================ -->
+    <model name="waypoint_p1_01">
+      <!-- WP1 P1-kıvrım-1 | world(+2.5, 3.5) | GPS(-35.3632306, 149.1652645) -->
+      <static>true</static>
+      <pose>3.5 -2.5 2.35 0 0 -1.570796</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><sphere><radius>0.22</radius></sphere></geometry>
+          <material>
+            <ambient>0.05 0.85 0.15 1</ambient>
+            <diffuse>0.05 0.85 0.15 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="waypoint_p1_02">
+      <!-- WP2 P1-kıvrım-2 | world(-2.5, 7.0) | GPS(-35.3631991, 149.1652095) -->
+      <static>true</static>
+      <pose>7 2.5 2.35 0 0 -1.570796</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><sphere><radius>0.22</radius></sphere></geometry>
+          <material>
+            <ambient>0.05 0.85 0.15 1</ambient>
+            <diffuse>0.05 0.85 0.15 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="waypoint_p1_03">
+      <!-- WP3 P1-kıvrım-3 | world(+2.5, 10.5) | GPS(-35.3631677, 149.1652645) -->
+      <static>true</static>
+      <pose>10.5 -2.5 2.35 0 0 -1.570796</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><sphere><radius>0.22</radius></sphere></geometry>
+          <material>
+            <ambient>0.05 0.85 0.15 1</ambient>
+            <diffuse>0.05 0.85 0.15 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="waypoint_p1_04">
+      <!-- WP4 P1-çıkış | world(+0.0, 14.0) | GPS(-35.3631362, 149.165237) -->
+      <static>true</static>
+      <pose>14 0 2.35 0 0 -1.570796</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><sphere><radius>0.22</radius></sphere></geometry>
+          <material>
+            <ambient>0.05 0.85 0.15 1</ambient>
+            <diffuse>0.05 0.85 0.15 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="waypoint_p2_end">
+      <!-- WP5 P2-sonu | world(+0.0, 27.0) | GPS(-35.3630195, 149.165237) -->
+      <static>true</static>
+      <pose>27 0 2.35 0 0 -1.570796</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><sphere><radius>0.22</radius></sphere></geometry>
+          <material>
+            <ambient>0.05 0.85 0.15 1</ambient>
+            <diffuse>0.05 0.85 0.15 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
     <include>
       <uri>model://usv_model</uri>
       <name>usv_model</name>
-      <pose>0 0 0.16 0 0 1.5707963267948966</pose>
+      <pose>0 0 0.16 0 0 0</pose>
     </include>
 
   </world>

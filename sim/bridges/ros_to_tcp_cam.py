@@ -16,6 +16,12 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT / "docker_workspace" / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "docker_workspace" / "src"))
 from runtime_debug_log import install_module_function_tracing, log_jsonl, setup_component_logger
+from compliance_profile import USV_MODE, USV_MODE_RACE
+
+# --- RACE MODE GUARD: Image transmission prohibited in race mode ---
+if USV_MODE == USV_MODE_RACE:
+    print("[RACE] [ros_to_tcp_cam.py] Race mode: camera stream disabled, exiting.")
+    sys.exit(0)
 
 log = setup_component_logger("ros_to_tcp_cam", prefer_simulation=True)
 log.info("module_load cwd=%s SIM_LOG_DIR=%s", os.getcwd(), os.environ.get("SIM_LOG_DIR"))

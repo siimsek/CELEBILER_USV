@@ -136,17 +136,21 @@ LOG_FILE="$LOG_DIR/system_boot.log"
 echo "Log Merkezi: $LOG_DIR"
 echo "Başlatılıyor..."
 
-# 3. TEMİZLİK & KAMERA BAŞLATMA (HOST)
+# 3. TEMİZLİK & KAMERA BAŞLATMA (HOST) - Race modunda devre dışı (Şartname 3.7)
 sudo fuser -k 8888/tcp > /dev/null 2>&1
-echo -e "${GREEN}[KAMERA]${NC} Port 8888 temizleniyor ve yayın başlatılıyor..."
-sudo pkill -9 rpicam-vid || true
-sudo nice -n -20 rpicam-vid -t 0 --codec mjpeg --inline --listen -o tcp://0.0.0.0:8888 --width 1280 --height 720 --framerate 25 --quality 95 2>&1 | grep --line-buffered -vE "^#|WARN CameraSensor|INFO Camera" > "$LOG_DIR/cam_host.log" &
-for _ in $(seq 1 20); do
-    if sudo fuser 8888/tcp > /dev/null 2>&1; then
-        break
-    fi
-    sleep 0.1
-done
+if [ "$USV_MODE" = "race" ]; then
+    echo -e "${YELLOW}[KAMERA]${NC} Race modu: Host kamera yayını devre dışı"
+else
+    echo -e "${GREEN}[KAMERA]${NC} Port 8888 temizleniyor ve yayın başlatılıyor..."
+    sudo pkill -9 rpicam-vid || true
+    sudo nice -n -20 rpicam-vid -t 0 --codec mjpeg --inline --listen -o tcp://0.0.0.0:8888 --width 1280 --height 720 --framerate 25 --quality 95 2>&1 | grep --line-buffered -vE "^#|WARN CameraSensor|INFO Camera" > "$LOG_DIR/cam_host.log" &
+    for _ in $(seq 1 20); do
+        if sudo fuser 8888/tcp > /dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
+fi
 
 # 4. DOCKER BAŞLATMA
 echo -e "${GREEN}[DOCKER]${NC} Konteyner ($CONTAINER_NAME) Kontrol Ediliyor..."

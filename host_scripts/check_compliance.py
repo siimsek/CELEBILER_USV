@@ -47,11 +47,6 @@ def check_mission_files():
     mission_files = [
         ROOT / "docker_workspace" / "mission.json",
         ROOT / "sim" / "configs" / "mission_parkour_all.json",
-        ROOT / "sim" / "configs" / "mission_parkour1.json",
-        ROOT / "sim" / "configs" / "mission_parkour2.json",
-        ROOT / "sim" / "configs" / "mission_parkour3_red.json",
-        ROOT / "sim" / "configs" / "mission_parkour3_green.json",
-        ROOT / "sim" / "configs" / "mission_parkour3_black.json",
     ]
     
     for mission_file in mission_files:

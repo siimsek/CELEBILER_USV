@@ -25,10 +25,10 @@ from compliance_profile import (
     CAM_ADAPT_DARK_BETA,
     CONTROL_DIR as DEFAULT_CONTROL_DIR,
     LOG_DIR as DEFAULT_LOG_DIR,
-    MISSION_FILE_DEFAULT,
     USV_MODE,
     USV_MODE_RACE,
 )
+from mission_config import TARGET_STATE_FILE, load_target_state
 
 def clamp(value, min_val, max_val):
     return max(min_val, min(value, max_val))
@@ -66,7 +66,6 @@ WEB_PORT = 5000
 CONTROL_DIR = os.environ.get("CONTROL_DIR", DEFAULT_CONTROL_DIR)
 STATUS_FILE = f"{CONTROL_DIR}/camera_status.json"
 MISSION_STATE_FILE = f"{CONTROL_DIR}/mission_state.json"
-MISSION_FILE = os.environ.get("MISSION_FILE", MISSION_FILE_DEFAULT)
 os.makedirs(CONTROL_DIR, exist_ok=True)
 VIDEO_DIR = os.path.join(os.environ.get("LOG_DIR", DEFAULT_LOG_DIR), "video")
 FILE1_MP4 = f"{VIDEO_DIR}/file1_camera_processed.mp4"
@@ -153,13 +152,32 @@ class VideoCamera:
             "recording": False,
             "recording_file": None,
             "target_class": "ANY",
+            "objective_phase": "IDLE",
+            "perception_policy": {
+                "gate": False,
+                "yellow_obstacle": False,
+                "target": False,
+            },
+            "gate_actionable": False,
+            "yellow_actionable": False,
+            "target_actionable": False,
+            "gate_detected_raw": False,
+            "gate_stable_s_raw": 0.0,
+            "gate_center_bearing_deg_raw": 0.0,
+            "gate_passed_event_raw": False,
             "gate_detected": False,
             "gate_stable_s": 0.0,
             "gate_center_bearing_deg": 0.0,
             "gate_passed_event": False,
+            "yellow_obstacle_detected_raw": False,
+            "yellow_obstacle_bearing_deg_raw": 0.0,
+            "yellow_obstacle_area_norm_raw": 0.0,
             "yellow_obstacle_detected": False,
             "yellow_obstacle_bearing_deg": 0.0,
             "yellow_obstacle_area_norm": 0.0,
+            "target_detected_raw": False,
+            "target_bearing_error_deg_raw": 0.0,
+            "target_area_norm_raw": 0.0,
             "target_detected": False,
             "target_bearing_error_deg": 0.0,
             "target_area_norm": 0.0,
@@ -180,7 +198,7 @@ class VideoCamera:
         self._last_status_write_time = 0.0
         self._recording_active = False
         self._last_mission_state = {"active": False}
-        self._mission_target_mtime = 0.0
+        self._target_state_mtime = 0.0
         self._process_lock = threading.Lock()
         self._last_processed_frame_ts = 0.0
         self._last_processed_frame = None
@@ -218,7 +236,7 @@ class VideoCamera:
             print(message)
             self._warn_last[key] = now
 
-    def _set_target_classes(self, raw_target, source="mission"):
+    def _set_target_classes(self, raw_target, source="target_state"):
         classes = tuple(resolve_target_classes(raw_target))
         if classes == tuple(self.target_classes):
             return
@@ -228,26 +246,64 @@ class VideoCamera:
 
     def _refresh_target_class(self):
         try:
-            mtime = os.path.getmtime(MISSION_FILE)
+            mtime = os.path.getmtime(TARGET_STATE_FILE)
         except OSError:
             return
-        if mtime <= float(self._mission_target_mtime or 0.0):
+        if mtime <= float(self._target_state_mtime or 0.0):
             return
         try:
-            with open(MISSION_FILE, "r", encoding="utf-8") as f:
-                mission = json.load(f)
-            self._mission_target_mtime = mtime
-            self._set_target_classes(mission.get("target_color"), source="mission")
+            target_state = load_target_state(TARGET_STATE_FILE)
+            self._target_state_mtime = mtime
+            self._set_target_classes(target_state.get("target_color"), source="target_state")
         except Exception as exc:
-            self._warn_throttled("mission_target_refresh", f"[WARN] [CAM] Mission hedef rengi okunamadi: {exc}")
+            self._warn_throttled("target_state_refresh", f"[WARN] [CAM] Target state okunamadi: {exc}")
+
+    def _objective_phase_for_parkur(self, parkur_label):
+        parkur = str(parkur_label or "IDLE").upper()
+        mapping = {
+            "P1": "P1_CORRIDOR",
+            "P2": "P2_OBSTACLE_CORRIDOR",
+            "P3": "P3_TARGET_ENGAGEMENT",
+            "COMPLETED": "COMPLETED",
+            "HOLD": "HOLD",
+        }
+        return mapping.get(parkur, "IDLE")
+
+    def _default_perception_policy(self, parkur_label):
+        parkur = str(parkur_label or "IDLE").upper()
+        return {
+            "gate": parkur in ("P1", "P2"),
+            "yellow_obstacle": parkur == "P2",
+            "target": parkur == "P3",
+        }
+
+    def _sync_perception_context(self, mission_state):
+        state = mission_state if isinstance(mission_state, dict) else {}
+        parkur_label = str(state.get("active_parkur", "IDLE") or "IDLE").upper()
+        objective_phase = str(state.get("objective_phase", "") or "").upper()
+        if not objective_phase:
+            objective_phase = self._objective_phase_for_parkur(parkur_label)
+        defaults = self._default_perception_policy(parkur_label)
+        incoming_policy = state.get("perception_policy", {})
+        if not isinstance(incoming_policy, dict):
+            incoming_policy = {}
+        resolved_policy = {
+            key: bool(incoming_policy.get(key, default))
+            for key, default in defaults.items()
+        }
+        self.status["objective_phase"] = objective_phase
+        self.status["perception_policy"] = dict(resolved_policy)
+        return resolved_policy
 
     def _check_mission_state(self):
         """Mission state'i oku ve recording kontrol et."""
         self._refresh_target_class()
+        self._sync_perception_context(self._last_mission_state)
         try:
             if os.path.exists(MISSION_STATE_FILE):
                 with open(MISSION_STATE_FILE, "r", encoding="utf-8") as f:
                     mission_state = json.load(f)
+                    self._sync_perception_context(mission_state)
                     mission_active = mission_state.get("active", False)
                     
                     # Mission başlattıysa recording başlat
@@ -423,10 +479,18 @@ class VideoCamera:
                     if isinstance(self.status.get("camera_adaptation", {}), dict)
                     else {}
                 )
-                if (old.get('gate_detected') == self.status['gate_detected'] and
+                if (old.get('objective_phase') == self.status['objective_phase'] and
+                    old.get('perception_policy') == self.status['perception_policy'] and
+                    old.get('gate_actionable') == self.status['gate_actionable'] and
+                    old.get('yellow_actionable') == self.status['yellow_actionable'] and
+                    old.get('target_actionable') == self.status['target_actionable'] and
+                    old.get('gate_detected') == self.status['gate_detected'] and
                     old.get('gate_passed_event') == self.status['gate_passed_event'] and
+                    old.get('yellow_obstacle_detected') == self.status['yellow_obstacle_detected'] and
                     old.get('target_detected') == self.status['target_detected'] and
                     abs(old.get('gate_center_bearing_deg', 0) - self.status['gate_center_bearing_deg']) < 0.1 and
+                    abs(old.get('yellow_obstacle_bearing_deg', 0) - self.status['yellow_obstacle_bearing_deg']) < 0.1 and
+                    abs(old.get('yellow_obstacle_area_norm', 0) - self.status['yellow_obstacle_area_norm']) < 0.01 and
                     abs(old.get('target_bearing_error_deg', 0) - self.status['target_bearing_error_deg']) < 0.1 and
                     abs(old.get('target_area_norm', 0) - self.status['target_area_norm']) < 0.01 and
                     old_adapt.get("mode") == new_adapt.get("mode") and
@@ -659,23 +723,23 @@ class VideoCamera:
         orange = [d for d in detections if d["name"] == "TURUNCU_SINIR"]
         orange_sorted = sorted(orange, key=lambda d: d["cx"])
 
-        gate_detected = len(orange_sorted) >= 2
-        gate_bearing = 0.0
-        if gate_detected:
+        gate_detected_raw = len(orange_sorted) >= 2
+        gate_bearing_raw = 0.0
+        if gate_detected_raw:
             left_buoy = orange_sorted[0]
             right_buoy = orange_sorted[-1]
             center_x = (left_buoy["cx"] + right_buoy["cx"]) / 2.0
-            gate_bearing = ((center_x - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
+            gate_bearing_raw = ((center_x - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
             cv2.circle(frame, (int(center_x), int(h * 0.5)), 8, (255, 255, 0), -1)
         elif len(orange_sorted) == 1:
             marker = orange_sorted[0]
             marker_bearing = ((marker["cx"] - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
             marker_offset = 8.0 if marker["cx"] < (w / 2.0) else -8.0
-            gate_bearing = clamp(marker_bearing + marker_offset, -BEARING_HALF_DEG, BEARING_HALF_DEG)
-            gate_detected = True
+            gate_bearing_raw = clamp(marker_bearing + marker_offset, -BEARING_HALF_DEG, BEARING_HALF_DEG)
+            gate_detected_raw = True
             cv2.circle(frame, (int(marker["cx"]), int(marker["cy"])), 8, (255, 255, 0), -1)
 
-        if gate_detected:
+        if gate_detected_raw:
             if self.gate_seen_since is None:
                 self.gate_seen_since = now
             self.last_gate_seen_ts = now
@@ -686,16 +750,16 @@ class VideoCamera:
             self.gate_seen_since = None
             self.last_gate_stable = 0.0
 
-        gate_passed_event = now < self.gate_passed_until
+        gate_passed_event_raw = now < self.gate_passed_until
 
         yellow_pool = [d for d in detections if d["name"] == "SARI_ENGEL"]
         yellow = max(yellow_pool, key=lambda d: d["area"]) if yellow_pool else None
-        yellow_detected = bool(yellow)
-        yellow_bearing = 0.0
-        yellow_area_norm = 0.0
-        if yellow_detected:
-            yellow_bearing = ((yellow["cx"] - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
-            yellow_area_norm = clamp((yellow["w"] * yellow["h"]) / float(w * h), 0.0, 1.0)
+        yellow_detected_raw = bool(yellow)
+        yellow_bearing_raw = 0.0
+        yellow_area_norm_raw = 0.0
+        if yellow_detected_raw:
+            yellow_bearing_raw = ((yellow["cx"] - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
+            yellow_area_norm_raw = clamp((yellow["w"] * yellow["h"]) / float(w * h), 0.0, 1.0)
             cv2.circle(frame, (int(yellow["cx"]), int(yellow["cy"])), 7, (0, 255, 255), 2)
 
         target_pool = [
@@ -704,37 +768,84 @@ class VideoCamera:
         ]
         target = max(target_pool, key=lambda d: d["area"]) if target_pool else None
 
-        target_detected = bool(target)
-        target_bearing = 0.0
-        target_area_norm = 0.0
-        if target_detected:
-            target_bearing = ((target["cx"] - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
-            target_area_norm = clamp((target["w"] * target["h"]) / float(w * h), 0.0, 1.0)
+        target_detected_raw = bool(target)
+        target_bearing_raw = 0.0
+        target_area_norm_raw = 0.0
+        if target_detected_raw:
+            target_bearing_raw = ((target["cx"] - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
+            target_area_norm_raw = clamp((target["w"] * target["h"]) / float(w * h), 0.0, 1.0)
             cv2.circle(frame, (int(target["cx"]), int(target["cy"])), 8, (255, 255, 255), -1)
-            self._warn_throttled(
-                "target_found",
-                f"[CAM] [DETECT] target_found={target['name']} area_norm={target_area_norm:.4f} bearing={target_bearing:.1f}deg",
-                period_s=1.0,
-            )
-        else:
-            self._warn_throttled(
-                "target_missing",
-                f"[CAM] [DETECT] no_target_detected frame={self._frame_count} target={self.target_class}",
-                period_s=3.0,
-            )
+
+        current_status = self.status if isinstance(self.status, dict) else {}
+        policy = current_status.get("perception_policy", {})
+        if not isinstance(policy, dict):
+            policy = {}
+
+        gate_actionable = bool(policy.get("gate", False))
+        yellow_actionable = bool(policy.get("yellow_obstacle", False))
+        target_actionable = bool(policy.get("target", False))
+
+        gate_detected = gate_detected_raw if gate_actionable else False
+        gate_stable_s = self.last_gate_stable if gate_actionable else 0.0
+        gate_bearing = gate_bearing_raw if gate_actionable else 0.0
+        gate_passed_event = gate_passed_event_raw if gate_actionable else False
+        yellow_detected = yellow_detected_raw if yellow_actionable else False
+        yellow_bearing = yellow_bearing_raw if yellow_actionable else 0.0
+        yellow_area_norm = yellow_area_norm_raw if yellow_actionable else 0.0
+        target_detected = target_detected_raw if target_actionable else False
+        target_bearing = target_bearing_raw if target_actionable else 0.0
+        target_area_norm = target_area_norm_raw if target_actionable else 0.0
+
+        if target_actionable:
+            if target_detected:
+                self._warn_throttled(
+                    "target_found",
+                    (
+                        f"[CAM] [DETECT] target_found={target['name']} "
+                        f"area_norm={target_area_norm:.4f} bearing={target_bearing:.1f}deg"
+                    ),
+                    period_s=1.0,
+                )
+            else:
+                self._warn_throttled(
+                    "target_missing",
+                    f"[CAM] [DETECT] no_target_detected frame={self._frame_count} target={self.target_class}",
+                    period_s=3.0,
+                )
 
         frame_age = 999.0 if self.last_frame_ts <= 0.0 else max(0.0, now - self.last_frame_ts)
         self.status = {
             "ts_monotonic": round(now, 3),
             "frame_age_s": round(frame_age, 3),
+            "recording": bool(current_status.get("recording", False)),
+            "recording_file": current_status.get("recording_file"),
             "target_class": self.target_class,
+            "objective_phase": str(current_status.get("objective_phase", "IDLE")),
+            "perception_policy": {
+                "gate": gate_actionable,
+                "yellow_obstacle": yellow_actionable,
+                "target": target_actionable,
+            },
+            "gate_actionable": gate_actionable,
+            "yellow_actionable": yellow_actionable,
+            "target_actionable": target_actionable,
+            "gate_detected_raw": gate_detected_raw,
+            "gate_stable_s_raw": round(self.last_gate_stable, 3),
+            "gate_center_bearing_deg_raw": round(gate_bearing_raw, 3),
+            "gate_passed_event_raw": gate_passed_event_raw,
             "gate_detected": gate_detected,
-            "gate_stable_s": round(self.last_gate_stable, 3),
+            "gate_stable_s": round(gate_stable_s, 3),
             "gate_center_bearing_deg": round(gate_bearing, 3),
             "gate_passed_event": gate_passed_event,
+            "yellow_obstacle_detected_raw": yellow_detected_raw,
+            "yellow_obstacle_bearing_deg_raw": round(yellow_bearing_raw, 3),
+            "yellow_obstacle_area_norm_raw": round(yellow_area_norm_raw, 4),
             "yellow_obstacle_detected": yellow_detected,
             "yellow_obstacle_bearing_deg": round(yellow_bearing, 3),
             "yellow_obstacle_area_norm": round(yellow_area_norm, 4),
+            "target_detected_raw": target_detected_raw,
+            "target_bearing_error_deg_raw": round(target_bearing_raw, 3),
+            "target_area_norm_raw": round(target_area_norm_raw, 4),
             "target_detected": target_detected,
             "target_bearing_error_deg": round(target_bearing, 3),
             "target_area_norm": round(target_area_norm, 4),
