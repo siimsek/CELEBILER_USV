@@ -65,6 +65,10 @@ from compliance_profile import (
     LIDAR_READY_TIMEOUT_S,
     LINK_TOPOLOGY,
     LOG_DIR,
+    MISSION_FILE_DEFAULT,
+    MISSION_INPUT_FORMAT,
+    MISSION_SPLIT_P2_COUNT,
+    MISSION_SPLIT_P3_COUNT,
     P1_SPEED_APPROACH_MPS,
     P1_SPEED_CRUISE_MPS,
     P2_CAM_YELLOW_WEIGHT,
@@ -115,6 +119,15 @@ from compliance_profile import (
 
 print = make_console_printer("USV")
 
+from mission_adapter import adapt_mission_to_structured
+from mission_config import (
+    TARGET_STATE_FILE,
+    default_sim_mission,
+    get_mission_split_profile,
+    load_target_state,
+    split_mission_waypoints,
+    validate_coordinate_mission,
+)
 from runtime_debug_log import log_jsonl, setup_component_logger
 
 _usv_dbg = setup_component_logger("usv_main")
@@ -128,8 +141,8 @@ _usv_dbg.info(
 BAUD_RATE = 115200
 LOOP_DT = 1.0 / CONTROL_HZ
 
-# Mission file default to workspace-relative path (Docker-compatible)
-MISSION_FILE = os.environ.get("MISSION_FILE", "/home/siimsek/Desktop/CELEBILER_USV/sim/configs/mission_parkour1.json")
+# Mission file default to profile-resolved path
+MISSION_FILE = os.environ.get("MISSION_FILE", MISSION_FILE_DEFAULT)
 
 FLAG_START = f"{CONTROL_DIR}/start_mission.flag"
 FLAG_STOP = f"{CONTROL_DIR}/emergency_stop.flag"
@@ -236,6 +249,7 @@ class USVStateMachine:
         self.current_pitch_deg = 0.0
         self.gps_satellites_visible = 0
         self.gps_fix_type = 0
+        self.gps_global_position_int_received = False  # Track if GLOBAL_POSITION_INT arrived (simulation GPS_RAW_INT fallback)
         self.battery_voltage = 0.0  # Volts (from SYS_STATUS MAVLink message)
         self.rc_channels = {f"ch{i}": 1500 for i in range(1, 9)}  # Initialize to neutral PWM
         self._last_sent_rc_override = {"ch1": 1500, "ch3": 1500, "ts": 0.0}
@@ -264,6 +278,12 @@ class USVStateMachine:
         self.lidar_right_dist = 99.0
         self.min_obstacle_distance = 99.0
         self.obstacle_detected = False
+        # Collision detection: track if vessel moving with command but stuck
+        self._last_collision_ts = 0.0
+        self._last_collision_check_pos = (0.0, 0.0)  # (x, y) from vehicle_position.json
+        self._collision_cooldown_s = 2.0
+        self._collision_position_thresh_m = 0.15  # Stuck if <15cm advance
+        self._collision_speed_thresh_mps = 0.2    # With >0.2 m/s command
         self._map_points = []
         self._lidar_front_samples = []
         self._lidar_sector_hold = {"left": None, "center": None, "right": None}
@@ -403,9 +423,14 @@ class USVStateMachine:
         self.waypoints_p2 = []
         self.waypoints_p3 = []
         self.target_color = ""
+        self.mission_input_format = MISSION_INPUT_FORMAT
+        self.mission_upload_source = "local_flat_file"
+        self.mission_validated_at_timestamp = None
+        self.mission_split_profile = get_mission_split_profile(0)
         self.gate_count = 0
         self._gate_event_start = None
         self._gate_event_latched = False
+        self._gate_bearing_prev = None  # Track bearing sign for spec-compliant gate passage
         self._wp_target = "--"
         self._wp_info = "-- / --"
 
@@ -442,6 +467,48 @@ class USVStateMachine:
             self.STATE_HOLD: "HOLD",
         }
         return mapping.get(self.state, "UNKNOWN")
+
+    def _get_objective_phase(self):
+        mapping = {
+            self.STATE_IDLE: "IDLE",
+            self.STATE_PARKUR1: "P1_CORRIDOR",
+            self.STATE_PARKUR2: "P2_OBSTACLE_CORRIDOR",
+            self.STATE_PARKUR3: "P3_TARGET_ENGAGEMENT",
+            self.STATE_COMPLETED: "COMPLETED",
+            self.STATE_HOLD: "HOLD",
+        }
+        return mapping.get(self.state, "UNKNOWN")
+
+    def _get_perception_policy(self):
+        active_parkur = self._active_parkur_label()
+        return {
+            "gate": active_parkur in ("P1", "P2"),
+            "yellow_obstacle": active_parkur == "P2",
+            "target": active_parkur == "P3",
+        }
+
+    def _get_guidance_source(self):
+        """
+        Return explicit guidance source identifying execution mode.
+        
+        Returns:
+        - "p1_pixhawk_auto": Race mode P1 (Pixhawk autonomous)
+        - "p1_pi_guided": Test mode P1 (Pi-based guidance)
+        - "p2_pi_guided": P2 guidance (Pi in both modes)
+        - "p3_pi_guided": P3 guidance (Pi in both modes)
+        - "idle": Not in active mission
+        """
+        if self.state == self.STATE_PARKUR1:
+            if USV_MODE == USV_MODE_RACE:
+                return "p1_pixhawk_auto"
+            else:
+                return "p1_pi_guided"
+        elif self.state == self.STATE_PARKUR2:
+            return "p2_pi_guided"
+        elif self.state == self.STATE_PARKUR3:
+            return "p3_pi_guided"
+        else:
+            return "idle"
 
     def _rc_link_active(self):
         if self.simulation_mode or os.environ.get("USV_SIM") == "1":
@@ -1194,8 +1261,14 @@ class USVStateMachine:
     def _apply_camera_lidar_fusion(self, camera_data):
         fused = dict(camera_data)
 
-        gate_raw_detected = bool(camera_data.get("gate_detected_raw", camera_data.get("gate_detected", False)))
-        target_raw_detected = bool(camera_data.get("target_detected_raw", camera_data.get("target_detected", False)))
+        gate_actionable = bool(camera_data.get("gate_actionable", True))
+        target_actionable = bool(camera_data.get("target_actionable", True))
+        gate_raw_detected = bool(
+            camera_data.get("gate_detected_raw", camera_data.get("gate_detected", False))
+        ) and gate_actionable
+        target_raw_detected = bool(
+            camera_data.get("target_detected_raw", camera_data.get("target_detected", False))
+        ) and target_actionable
         try:
             gate_bearing_raw = float(
                 camera_data.get(
@@ -1301,7 +1374,10 @@ class USVStateMachine:
             heartbeat_ok = bool(self.link_heartbeat_age_s < HEARTBEAT_WARN_S)
             rc_ok = self._rc_link_active()
 
-        estop_safe = bool((not self.estop_latched) and self.rc_channels.get("ch7", 0) <= RC7_SAFE_PWM and not os.path.exists(FLAG_STOP))
+        if sim_runtime:
+            estop_safe = bool((not self.estop_latched) and not os.path.exists(FLAG_STOP))
+        else:
+            estop_safe = bool((not self.estop_latched) and self.rc_channels.get("ch7", 0) <= RC7_SAFE_PWM and not os.path.exists(FLAG_STOP))
         lidar_point_count = int(len(self._lidar_front_samples))
         if sim_runtime:
             storage_health = {
@@ -1344,6 +1420,9 @@ class USVStateMachine:
     def _write_state(self):
         try:
             os.makedirs(CONTROL_DIR, exist_ok=True)
+            active_parkur = self._active_parkur_label()
+            objective_phase = self._get_objective_phase()
+            perception_policy = self._get_perception_policy()
             dyn_speed_state = self.dynamic_speed_profile if isinstance(self.dynamic_speed_profile, dict) else {}
             dyn_speed_payload = {
                 "enabled": bool(dyn_speed_state.get("enabled", DYN_SPEED_ENABLED)),
@@ -1459,10 +1538,26 @@ class USVStateMachine:
                 "hold_reason": self.hold_reason,
                 "target": self._wp_target,
                 "wp_info": self._wp_info,
-                "active_parkur": self._active_parkur_label(),
+                "active_parkur": active_parkur,
+                "objective_phase": objective_phase,
+                "guidance_source": self._get_guidance_source(),
+                "target_color": self.target_color or "--",
+                "mission_input_format": self.mission_input_format,
+                "perception_policy": perception_policy,
                 "gate_count": self.gate_count,
                 "command_lock": self.command_lock,
                 "failsafe_state": self.failsafe_state,
+                "mission_lifecycle": {
+                    "schema_version": 1,
+                    "upload_source": self.mission_upload_source,
+                    "validated_at_timestamp": self.mission_validated_at_timestamp,
+                },
+                "waypoint_counts": {
+                    "parkur1": len(self.waypoints_p1) if hasattr(self, 'waypoints_p1') else 0,
+                    "parkur2": len(self.waypoints_p2) if hasattr(self, 'waypoints_p2') else 0,
+                    "parkur3": len(self.waypoints_p3) if hasattr(self, 'waypoints_p3') else 0,
+                },
+                "mission_split_profile": dict(self.mission_split_profile),
                 "gate_gecildi": bool(self.gate_count > 0),  # Event flag: gate passed
                 "angajman_tamam": bool(self.state == self.STATE_COMPLETED),  # Event flag: engagement complete
                 "timeout": bool(self.timeout_count > 0),  # Event flag: timeout occurred
@@ -1476,11 +1571,12 @@ class USVStateMachine:
                 "gps_fix_type": int(self.gps_fix_type),
                 "battery_voltage": round(float(self.battery_voltage), 3),
                 "heartbeat_age_s": round(self.heartbeat_age_s, 3),
-                "gps_ok": bool(self.gps_fix_type >= 2),  # GPS status: 2+ is valid 3D fix
+                "gps_ok": bool(self.gps_fix_type >= 2 or (self.gps_global_position_int_received and os.environ.get("USV_SIM") == "1")),  # GPS OK: fix_type>=2 OR GLOBAL_POSITION_INT in simulation
                 "ekf_ok": bool(self.health_ready),  # EKF health represented by overall health readiness
                 "imu_ok": bool(abs(self.current_roll_deg) < 180 and abs(self.current_pitch_deg) < 180),  # IMU health: valid roll/pitch
                 "link_heartbeat_age_s": round(self.link_heartbeat_age_s, 3),
                 "link_heartbeat_source": self.link_heartbeat_source,
+                "current_heading": round(self.current_heading, 3),
                 "v_target": round(self.v_target, 3),
                 "heading_target": round(self.heading_target, 3),
                 "timeout_count": self.timeout_count,
@@ -1518,6 +1614,9 @@ class USVStateMachine:
                     old.get('hold_reason') == payload['hold_reason'] and
                     old.get('target') == payload['target'] and
                     old.get('wp_info') == payload['wp_info'] and
+                    old.get('objective_phase') == payload['objective_phase'] and
+                    old.get('target_color') == payload['target_color'] and
+                    old.get('perception_policy') == payload['perception_policy'] and
                     old.get('gate_count') == payload['gate_count'] and
                     old.get('command_lock') == payload['command_lock'] and
                     old.get('failsafe_state') == payload['failsafe_state'] and
@@ -2054,15 +2153,16 @@ class USVStateMachine:
                 throttle_norm = max(min(throttle_norm, 0.58), 0.30)
 
         if heading_abs < 15.0:
-            steer_gain = 2.4
+            steer_gain = 2.0  # Reduced from 2.4 to prevent overshoot near target
         elif heading_abs < 35.0:
-            steer_gain = 3.0
+            steer_gain = 2.5  # Reduced from 3.0 to reduce oscillation
         else:
-            steer_gain = 3.6
+            steer_gain = 3.0  # Reduced from 3.6 for large errors
         steer_norm = clamp((heading_error_deg * steer_gain) / 400.0, -1.0, 1.0)
 
-        left_mix = throttle_norm + steer_norm
-        right_mix = throttle_norm - steer_norm
+        # SKID STEER KINEMATICS: test original formula
+        left_mix = throttle_norm - steer_norm
+        right_mix = throttle_norm + steer_norm
         max_mag = max(abs(left_mix), abs(right_mix))
         if max_mag > 1.0:
             left_mix /= max_mag
@@ -2126,6 +2226,11 @@ class USVStateMachine:
                 if mtype == "GLOBAL_POSITION_INT":
                     self.current_lat = msg.lat / 1e7
                     self.current_lon = msg.lon / 1e7
+                    self.gps_global_position_int_received = True  # Mark GPS valid for simulation mode (JSON backend)
+                    # Set minimal GPS_RAW_INT values if not explicitly set (simulation GPS RAW fallback)
+                    if os.environ.get("USV_SIM") == "1" and self.gps_fix_type == 0:
+                        self.gps_fix_type = 3  # 3D fix equivalent (from GLOBAL_POSITION_INT)
+                        self.gps_satellites_visible = 12  # Simulate 12 satellites visible
                     # Heading with exponential moving average filter (reduces compass drift oscillation)
                     raw_heading = msg.hdg / 100.0
                     if self._heading_ema is None:
@@ -2140,6 +2245,19 @@ class USVStateMachine:
                 elif mtype == "ATTITUDE":
                     self.current_roll_deg = math.degrees(getattr(msg, "roll", 0.0))
                     self.current_pitch_deg = math.degrees(getattr(msg, "pitch", 0.0))
+                    # Yaw from ATTITUDE - DISABLED in SIM mode (use Gazebo heading instead)
+                    # In SIM: vehicle_position.json heading_rad is updated every loop with Gazebo data
+                    # In HW: uncomment below to use MAVLink ATTITUDE yaw
+                    if not self.simulation_mode:  # Hardware only
+                        yaw_rad = getattr(msg, "yaw", 0.0)
+                        yaw_deg = math.degrees(yaw_rad)
+                        # Convert to 0-360 range for consistency with GPS bearing
+                        yaw_deg = (yaw_deg + 360) % 360
+                        if self._heading_ema is None:
+                            self._heading_ema = yaw_deg
+                        else:
+                            self._heading_ema = self._heading_ema * (1.0 - self._heading_ema_alpha) + yaw_deg * self._heading_ema_alpha
+                        self.current_heading = self._heading_ema
                 elif mtype == "HEARTBEAT":
                     if msg.get_srcSystem() == self.master.target_system:
                         self.last_heartbeat_time = time.monotonic()
@@ -2149,7 +2267,6 @@ class USVStateMachine:
                     self.rc_channels["ch3"] = getattr(msg, "chan3_raw", 0)
                     self.rc_channels["ch4"] = getattr(msg, "chan4_raw", 0)
                     self.rc_channels["ch5"] = getattr(msg, "chan5_raw", 0)
-                    self.rc_channels["ch6"] = getattr(msg, "chan6_raw", 0)
                     self.rc_channels["ch7"] = getattr(msg, "chan7_raw", 0)
                     self.rc_channels["ch8"] = getattr(msg, "chan8_raw", 0)
                     if self.rc_channels["ch7"] >= RC7_ESTOP_PWM:
@@ -2174,13 +2291,28 @@ class USVStateMachine:
         default = {
             "ts_monotonic": 0.0,
             "frame_age_s": 999.0,
+            "objective_phase": self._get_objective_phase(),
+            "perception_policy": self._get_perception_policy(),
+            "gate_actionable": False,
+            "yellow_actionable": False,
+            "target_actionable": False,
+            "gate_detected_raw": False,
+            "gate_stable_s_raw": 0.0,
+            "gate_center_bearing_deg_raw": 0.0,
+            "gate_passed_event_raw": False,
             "gate_detected": False,
             "gate_stable_s": 0.0,
             "gate_center_bearing_deg": 0.0,
             "gate_passed_event": False,
+            "yellow_obstacle_detected_raw": False,
+            "yellow_obstacle_bearing_deg_raw": 0.0,
+            "yellow_obstacle_area_norm_raw": 0.0,
             "yellow_obstacle_detected": False,
             "yellow_obstacle_bearing_deg": 0.0,
             "yellow_obstacle_area_norm": 0.0,
+            "target_detected_raw": False,
+            "target_bearing_error_deg_raw": 0.0,
+            "target_area_norm_raw": 0.0,
             "target_detected": False,
             "target_bearing_error_deg": 0.0,
             "target_area_norm": 0.0,
@@ -2201,15 +2333,51 @@ class USVStateMachine:
             "gate_stable_s",
             "gate_center_bearing_deg",
             "gate_passed_event",
+            "yellow_obstacle_detected",
+            "yellow_obstacle_bearing_deg",
+            "yellow_obstacle_area_norm",
             "target_detected",
             "target_bearing_error_deg",
             "target_area_norm",
         ):
-            data[f"{key}_raw"] = data.get(key, default.get(key))
+            data[f"{key}_raw"] = data.get(f"{key}_raw", data.get(key, default.get(key)))
+
+        default_policy = default["perception_policy"]
+        perception_policy = data.get("perception_policy", default_policy)
+        if not isinstance(perception_policy, dict):
+            perception_policy = dict(default_policy)
+        perception_policy = {
+            "gate": bool(perception_policy.get("gate", default_policy["gate"])),
+            "yellow_obstacle": bool(perception_policy.get("yellow_obstacle", default_policy["yellow_obstacle"])),
+            "target": bool(perception_policy.get("target", default_policy["target"])),
+        }
+        data["objective_phase"] = str(data.get("objective_phase", default["objective_phase"]) or default["objective_phase"])
+        data["perception_policy"] = perception_policy
+        gate_actionable = bool(data.get("gate_actionable", perception_policy["gate"]))
+        yellow_actionable = bool(data.get("yellow_actionable", perception_policy["yellow_obstacle"]))
+        target_actionable = bool(data.get("target_actionable", perception_policy["target"]))
+        data["gate_actionable"] = gate_actionable
+        data["yellow_actionable"] = yellow_actionable
+        data["target_actionable"] = target_actionable
+        if not gate_actionable:
+            data["gate_detected"] = False
+            data["gate_stable_s"] = 0.0
+            data["gate_center_bearing_deg"] = 0.0
+            data["gate_passed_event"] = False
+        if not yellow_actionable:
+            data["yellow_obstacle_detected"] = False
+            data["yellow_obstacle_bearing_deg"] = 0.0
+            data["yellow_obstacle_area_norm"] = 0.0
+        if not target_actionable:
+            data["target_detected"] = False
+            data["target_bearing_error_deg"] = 0.0
+            data["target_area_norm"] = 0.0
 
         parkur_label = self._active_parkur_label()
         gate_detected_raw = bool(data.get("gate_detected_raw", False))
         target_detected_raw = bool(data.get("target_detected_raw", False))
+        gate_signal_active = gate_detected_raw and gate_actionable
+        target_signal_active = target_detected_raw and target_actionable
         try:
             gate_bearing_raw = float(data.get("gate_center_bearing_deg_raw", 0.0))
         except (TypeError, ValueError):
@@ -2236,7 +2404,7 @@ class USVStateMachine:
         data["target_bearing_error_deg_imu_corrected"] = target_bearing_corrected
         data["gate_center_bearing_deg"] = gate_bearing_corrected
         data["target_bearing_error_deg"] = target_bearing_corrected
-        if target_detected_raw:
+        if target_signal_active:
             self._apply_horizon_lock_to_bearing(
                 target_bearing_raw,
                 parkur_label,
@@ -2244,7 +2412,7 @@ class USVStateMachine:
                 True,
                 update_state=True,
             )
-        elif gate_detected_raw:
+        elif gate_signal_active:
             self._apply_horizon_lock_to_bearing(
                 gate_bearing_raw,
                 parkur_label,
@@ -2436,58 +2604,59 @@ class USVStateMachine:
         return False
 
     def load_mission(self, filepath=None):
-        """Load and validate mission file with schema checking."""
+        """
+        Load and validate mission file.
+
+        Operational contract:
+        - Flat ordered waypoint list: [[lat, lon], ...]
+
+        Legacy compatibility:
+        - Structured mission is accepted only if the compatibility switch is enabled.
+
+        Pi keeps the full ordered mission as its local reference and derives P1/P2/P3
+        slices from the onboard split profile. Target color is loaded separately from
+        target_state.json, not from the mission waypoint file.
+        """
         fp = filepath or MISSION_FILE
         if os.path.exists(fp):
             try:
                 with open(fp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                
-                # VALIDATION: Schema check
-                if not isinstance(data, dict):
-                    raise ValueError("Mission must be a JSON object")
-                
-                required_fields = ["parkur1", "parkur2", "parkur3", "target_color"]
-                missing = [f for f in required_fields if f not in data]
-                if missing:
-                    raise ValueError(f"Missing required fields: {missing}")
-                
-                # VALIDATION: Each parkur is array of [lat, lon] pairs
-                for parkur_name in ["parkur1", "parkur2", "parkur3"]:
-                    parkur_data = data[parkur_name]
-                    if not isinstance(parkur_data, list):
-                        raise ValueError(f"{parkur_name} must be array, got {type(parkur_data)}")
-                    if len(parkur_data) == 0:
-                        raise ValueError(f"{parkur_name} cannot be empty")
-                    if parkur_name == "parkur3" and len(parkur_data) > 2:
-                        raise ValueError(f"P3 can have max 2 waypoints (target + optional), got {len(parkur_data)}")
-                    
-                    for i, wp in enumerate(parkur_data):
-                        if not isinstance(wp, list) or len(wp) != 2:
-                            raise ValueError(f"{parkur_name}[{i}] must be [lat, lon], got {wp}")
-                        lat, lon = wp
-                        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
-                            raise ValueError(f"{parkur_name}[{i}] coordinates must be numbers")
-                        if not (-90 <= lat <= 90):
-                            raise ValueError(f"{parkur_name}[{i}] latitude {lat} out of range [-90,90]")
-                        if not (-180 <= lon <= 180):
-                            raise ValueError(f"{parkur_name}[{i}] longitude {lon} out of range [-180,180]")
-                
-                # VALIDATION: Target color
-                target_color = data.get("target_color", "")
-                valid_colors = ["RED", "GREEN", "BLACK", "KIRMIZI_SANCAK", "YESIL_SANCAK", "SIYAH_HEDEF"]
-                if target_color not in valid_colors:
-                    raise ValueError(f"target_color '{target_color}' must be one of {valid_colors}")
-                
-                # All validations passed, load data
-                self.waypoints_p1 = data["parkur1"]
-                self.waypoints_p2 = data["parkur2"]
-                self.waypoints_p3 = data["parkur3"]
-                self.target_color = target_color
-                
+                    raw_data = json.load(f)
+
+                mission_target_color = ""
+                if isinstance(raw_data, list):
+                    coords = validate_coordinate_mission(raw_data)
+                    self.waypoints_p1, self.waypoints_p2, self.waypoints_p3 = split_mission_waypoints(
+                        coords,
+                        validate_lengths=False,
+                    )
+                    self.mission_input_format = MISSION_INPUT_FORMAT
+                    self.mission_upload_source = "local_flat_file"
+                    self.mission_split_profile = get_mission_split_profile(len(coords))
+                elif isinstance(raw_data, dict):
+                    mission = adapt_mission_to_structured(raw_data, strict=True)
+                    self.waypoints_p1 = mission["parkur1"]
+                    self.waypoints_p2 = mission["parkur2"]
+                    self.waypoints_p3 = mission["parkur3"]
+                    mission_target_color = str(mission.get("target_color") or "").strip().upper()
+                    self.mission_input_format = mission.get("_mission_input_format", "structured_legacy")
+                    self.mission_upload_source = mission.get("_adapter_source", "structured_legacy")
+                    self.mission_split_profile = dict(mission.get("_split_profile") or {})
+                else:
+                    raise ValueError(f"Mission must be list or object, got {type(raw_data).__name__}")
+
+                total_count = len(self.waypoints_p1) + len(self.waypoints_p2) + len(self.waypoints_p3)
+                if not self.mission_split_profile:
+                    self.mission_split_profile = get_mission_split_profile(total_count)
+                target_state = load_target_state(TARGET_STATE_FILE)
+                target_from_state = str(target_state.get("target_color") or "").strip().upper()
+                self.target_color = target_from_state or mission_target_color or self.target_color or "RED"
+                self.mission_validated_at_timestamp = time.time()
+
                 print(
                     f"[OK] [GOREV] VALIDATED P1={len(self.waypoints_p1)} P2={len(self.waypoints_p2)} "
-                    f"P3={len(self.waypoints_p3)} Hedef={self.target_color}"
+                    f"P3={len(self.waypoints_p3)} Hedef={self.target_color} "
+                    f"format={self.mission_input_format} split=P2:{MISSION_SPLIT_P2_COUNT}/P3:{MISSION_SPLIT_P3_COUNT}"
                 )
                 return True
             except Exception as exc:
@@ -2502,49 +2671,29 @@ class USVStateMachine:
                 base_lon = float(home_tokens[1])
             except Exception:
                 base_lat, base_lon = -35.363262, 149.165237
-            meters_to_lat = 1.0 / 111111.0
-            cos_lat = math.cos(math.radians(base_lat))
-            meters_to_lon = 1.0 / (111111.0 * cos_lat) if abs(cos_lat) > 1e-6 else meters_to_lat
-
-            def xy_to_gps(world_x_m, world_y_m):
-                return [
-                    round(base_lat + world_y_m * meters_to_lat, 7),
-                    round(base_lon - world_x_m * meters_to_lon, 7),
-                ]
-
-            self.waypoints_p1 = [
-                xy_to_gps(0.0, 3.2),
-                xy_to_gps(-2.7, 7.0),
-                xy_to_gps(2.7, 9.4),
-                xy_to_gps(-2.5, 11.5),
-                xy_to_gps(0.0, 12.3),
-            ]
-            self.waypoints_p2 = [
-                xy_to_gps(0.0, 16.2),
-                xy_to_gps(1.0, 19.4),
-                xy_to_gps(-1.0, 22.6),
-                xy_to_gps(0.0, 26.2),
-            ]
-            self.waypoints_p3 = [xy_to_gps(-3.0, 29.8)]
-            self.target_color = "RED"
+            coords = default_sim_mission(base_lat, base_lon)
+            self.waypoints_p1, self.waypoints_p2, self.waypoints_p3 = split_mission_waypoints(
+                coords,
+                validate_lengths=False,
+            )
+            self.mission_input_format = MISSION_INPUT_FORMAT
+            self.mission_upload_source = "sim_default_flat_file"
+            self.mission_split_profile = get_mission_split_profile(len(coords))
+            target_state = load_target_state(TARGET_STATE_FILE)
+            self.target_color = str(target_state.get("target_color") or self.target_color or "RED").strip().upper() or "RED"
+            self.mission_validated_at_timestamp = time.time()
             print(
                 f"[SIM] [GOREV] Varsayilan gorev yuklendi "
-                f"P1={len(self.waypoints_p1)} P2={len(self.waypoints_p2)} P3={len(self.waypoints_p3)}"
+                f"P1={len(self.waypoints_p1)} P2={len(self.waypoints_p2)} P3={len(self.waypoints_p3)} "
+                f"split=P2:{MISSION_SPLIT_P2_COUNT}/P3:{MISSION_SPLIT_P3_COUNT}"
             )
             return True
         print(f"[WARN] [GOREV] Dosya bulunamadi: {fp}")
         return False
 
     def validate_mission_schema(self, data):
-        """Validate mission file schema structure."""
-        if not isinstance(data, dict):
-            raise ValueError("Mission must be a JSON object")
-        
-        required_fields = ["parkur1", "parkur2", "parkur3", "target_color"]
-        missing = [f for f in required_fields if f not in data]
-        if missing:
-            raise ValueError(f"Missing required fields: {missing}")
-        
+        """Validate operational flat mission schema."""
+        validate_coordinate_mission(data)
         return True
 
     def validate_parkur_waypoints(self, parkur_name, parkur_data, max_waypoints=None):
@@ -2661,30 +2810,51 @@ class USVStateMachine:
                 hold_start = None
                 base_speed = P1_SPEED_APPROACH_MPS if dist < 8.0 else P1_SPEED_CRUISE_MPS
 
-                left_d = self.lidar_left_dist
-                center_d = self.lidar_center_dist
-                right_d = self.lidar_right_dist
-                front_min = min(left_d, center_d, right_d)
-                lidar_emergency = front_min < D_MIN_M
-                in_warn = front_min < P2_LIDAR_WARN_M
+                # Lidar avoidance and wind assist: GUIDED mode only (test mode)
+                # In race mode (AUTO), rely on Pixhawk onboard obstacle avoidance
+                if USV_MODE != USV_MODE_RACE:
+                    # P1: Center-sector only (ignore side clutter from left/right sensors)
+                    center_d = self.lidar_center_dist
+                    left_d = self.lidar_left_dist
+                    right_d = self.lidar_right_dist
+                    lidar_emergency = center_d < D_MIN_M
+                    in_warn = center_d < P2_LIDAR_WARN_M
 
-                esc_l = self._p2_lidar_escape_heading_deg()
-                esc_c = self._p2_camera_yellow_escape_deg()
-                avoid = self._p1_avoid_heading_smoothed(esc_l, esc_c, in_warn, lidar_emergency)
+                    # Center escape heading: if obstacle ahead, choose available side
+                    if in_warn or lidar_emergency:
+                        urgency = clamp((P2_LIDAR_WARN_M - center_d) / max(P2_LIDAR_WARN_M - D_MIN_M, 0.01), 0.0, 1.0)
+                        if left_d > right_d:
+                            esc_l = -P2_ESCAPE_MAX_DEG * urgency * 0.6  # Go left at 60% intensity
+                        else:
+                            esc_l = P2_ESCAPE_MAX_DEG * urgency * 0.6   # Go right at 60% intensity
+                    else:
+                        esc_l = 0.0
 
-                heading_err_nav = heading_err
-                if in_warn or lidar_emergency:
-                    heading_err_nav = avoid
+                    # P1 goal is corridor progression only. Yellow-obstacle and
+                    # target-color semantics belong to later phases.
+                    esc_c = 0.0
+                    avoid = self._p1_avoid_heading_smoothed(esc_l, esc_c, in_warn, lidar_emergency)
 
-                center_obstacle = center_d < D_MIN_M
+                    # Smooth blending: waypoint bearing + obstacle avoidance (not binary cutoff)
+                    # in_warn=True → 30% waypoint, 70% avoidance
+                    # in_warn=False → 100% waypoint, 0% avoidance
+                    blend_factor = 0.3 if in_warn or lidar_emergency else 0.0
+                    heading_err_nav = (1.0 - blend_factor) * heading_err + blend_factor * avoid
+                else:
+                    # Race mode: no Pi lidar override, pure Pixhawk AUTO
+                    lidar_emergency = False
+                    in_warn = False
+                    heading_err_nav = heading_err
+
+                center_obstacle = in_warn or lidar_emergency if USV_MODE != USV_MODE_RACE else False
                 corrected_heading_err = self._apply_wind_assist(
                     heading_err_nav,
                     "P1",
                     base_speed,
-                    center_obstacle=center_obstacle or lidar_emergency,
+                    center_obstacle=center_obstacle or lidar_emergency if USV_MODE != USV_MODE_RACE else False,
                 )
                 speed = self._apply_dynamic_speed(base_speed, corrected_heading_err, "P1")
-                if lidar_emergency or in_warn:
+                if (lidar_emergency or in_warn) and USV_MODE != USV_MODE_RACE:
                     speed = min(speed, FAILSAFE_SLOW_MPS if lidar_emergency else base_speed * 0.85)
                 self._command_speed_heading(speed, corrected_heading_err)
             self._write_state()
@@ -2694,7 +2864,7 @@ class USVStateMachine:
     def _wait_p2_ready(self):
         print("[CHECK] [P1->P2] Kamera/Lidar hazirlik kontrolu")
         next_log = 0.0
-        deadline = time.monotonic() + 30.0
+        deadline = time.monotonic() + 10.0
         while self.mission_active:
             if self._check_abort():
                 return False
@@ -2720,6 +2890,7 @@ class USVStateMachine:
         return False
 
     def _track_gate_event(self):
+        """Track P2 gate passage with bearing sign-change verification (spec compliant)."""
         event_active_raw = bool(self.camera_status.get("gate_passed_event", False))
         event_active = event_active_raw
         if FUSION_ENABLED:
@@ -2727,16 +2898,33 @@ class USVStateMachine:
             if event_active_raw and not gate_confirm_recent:
                 self._fusion_log("gate_event_ghost_rejected", "[FUSION] gate_event ghost_rejected no_recent_confirm")
             event_active = event_active_raw and gate_confirm_recent
+        
+        # Extract bearing for sign-change verification (Spec: bearing işareti değişimi)
+        bearing_center = float(self.camera_status.get("gate_center_bearing_deg", 0.0))
+        
         if event_active:
             if self._gate_event_start is None:
                 self._gate_event_start = time.monotonic()
+            
+            # Check bearing sign change: if previous bearing exists, verify sign transition
+            bearing_sign_changed = False
+            if self._gate_bearing_prev is not None:
+                prev_sign = 1 if self._gate_bearing_prev >= 0 else -1
+                curr_sign = 1 if bearing_center >= 0 else -1
+                bearing_sign_changed = (prev_sign != curr_sign)
+            
             if (time.monotonic() - self._gate_event_start) >= P2_GATE_CONFIRM_S and not self._gate_event_latched:
-                self.gate_count += 1
-                self._gate_event_latched = True
-                print(f"[GATE] [P2] gate_gecildi -> {self.gate_count}")
+                if bearing_sign_changed or self._gate_bearing_prev is None:
+                    # Bearing verified or first confirmation (fallback)
+                    self.gate_count += 1
+                    self._gate_event_latched = True
+                    print(f"[GATE] [P2] gate_gecildi -> {self.gate_count} (bearing={bearing_center:.1f}°, sign_change={bearing_sign_changed})")
+            
+            self._gate_bearing_prev = bearing_center
         else:
             self._gate_event_start = None
             self._gate_event_latched = False
+            self._gate_bearing_prev = None
 
     def _p2_lidar_escape_heading_sectors_fallback(self):
         """Scan ornegi yoksa sol/orta/sag sektor min mesafeleriyle kacinma."""
@@ -2894,10 +3082,24 @@ class USVStateMachine:
             heading_err = gps_heading_err
             gate_detected = bool(self.camera_status.get("gate_detected", False))
             gate_stable_s = float(self.camera_status.get("gate_stable_s", 0.0))
-            if in_warn or lidar_emergency:
+            
+            # P2 heading priority: obstacle > gate > waypoint, but blend instead of binary cutoff
+            if lidar_emergency:
+                # Emergency: 100% avoidance
                 heading_err = avoid
-            elif gate_detected and gate_stable_s >= P2_STABLE_S and not lidar_emergency:
+            elif in_warn:
+                # Warning: 60% avoidance, 40% navigation (waypoint or gate)
+                if gate_detected and gate_stable_s >= P2_STABLE_S:
+                    nav_bearing = float(self.camera_status.get("gate_center_bearing_deg", 0.0))
+                else:
+                    nav_bearing = gps_heading_err
+                heading_err = 0.4 * nav_bearing + 0.6 * avoid
+            elif gate_detected and gate_stable_s >= P2_STABLE_S:
+                # No obstacle: gate bearing preferred
                 heading_err = float(self.camera_status.get("gate_center_bearing_deg", 0.0))
+            else:
+                # No obstacle, no gate: pure waypoint bearing
+                heading_err = gps_heading_err
 
             center_obstacle = center_d < D_MIN_M
 
@@ -2990,9 +3192,18 @@ class USVStateMachine:
         print("=" * 52)
         self.state = self.STATE_PARKUR1
         self._p1_avoid_smooth = 0.0
-        if not self._set_mode("GUIDED"):
-            print("❌ [P1] GUIDED moda gecilemedi")
+        p1_mode = "GUIDED" if USV_MODE != USV_MODE_RACE else "AUTO"
+        if not self._set_mode(p1_mode):
+            print(f"❌ [P1] {p1_mode} moda gecilemedi")
             return False
+        
+        # RACE COMPLIANCE: P1 in race mode is pure Pixhawk AUTO.
+        # No Pi override, no AUTO→GUIDED fallback, no lidar avoidance.
+        # If AUTO fails (waypoint timeout, Pixhawk unresponsive), return False → mission enters HOLD.
+        if USV_MODE == USV_MODE_RACE:
+            assert p1_mode == "AUTO", "Race mode P1 must be pure Pixhawk AUTO"
+            print("[RACE] [P1] Pure Pixhawk AUTO mode - no Pi takeover or fallback")
+        
         self._write_state()
         if not self.waypoints_p1:
             print("[WARN] [P1] Waypoint yok")
@@ -3069,6 +3280,89 @@ class USVStateMachine:
         elif elapsed > 18 * 60 and int(elapsed) % 30 == 0:
             print(f"[WARN] [SURE] Kritik bolge ({minutes}:{seconds:02d})")
 
+    def _update_heading_from_vehicle_position(self):
+        """Update heading from vehicle_position.json (Gazebo-sourced heading_rad)."""
+        try:
+            pos_file = Path(CONTROL_DIR) / "vehicle_position.json"
+            with open(pos_file) as f:
+                pos_data = json.load(f)
+            heading_rad = pos_data.get('heading_rad', None)
+            if heading_rad is not None:
+                heading_deg = math.degrees(heading_rad) % 360
+                # EMA filter: α=0.40 for faster heading response (reduces overshoot)
+                alpha = 0.40
+                old_hdg = self.current_heading
+                self.current_heading = alpha * heading_deg + (1.0 - alpha) * self.current_heading
+                
+                # Log heading changes (every 2s or when delta > 2°)
+                now = time.monotonic()
+                if not hasattr(self, '_last_hdg_log'):
+                    self._last_hdg_log = now
+                    self._last_hdg_logged = old_hdg
+                if (now - self._last_hdg_log) >= 2.0 or abs(self.current_heading - self._last_hdg_logged) >= 2.0:
+                    print(f"[HDG_UPDATE] Gazebo={heading_deg:.1f}° → current_heading={self.current_heading:.1f}° (was {old_hdg:.1f}°)")
+                    self._last_hdg_log = now
+                    self._last_hdg_logged = self.current_heading
+        except Exception as exc:
+            if not hasattr(self, '_hdg_error_logged'):
+                print(f"[WARN] [HDG_UPDATE] Error reading vehicle_position: {exc}")
+                self._hdg_error_logged = True
+
+    def _check_collision(self):
+        """Detect: moving with speed command but vessel stuck against obstacle."""
+        now = time.time()
+        
+        # Cooldown: don't log same collision repeatedly
+        if now - self._last_collision_ts < self._collision_cooldown_s:
+            return
+        
+        # Get current position from vehicle_position.json
+        try:
+            pos_file = Path(CONTROL_DIR) / "vehicle_position.json"
+            pos_data = json.load(open(pos_file))
+            current_pos = (pos_data['pos_x'], pos_data['pos_y'])
+        except:
+            return
+        
+        # Has speed command?
+        has_speed_cmd = self.v_target > self._collision_speed_thresh_mps
+        
+        # Position change from last check
+        if self._last_collision_check_pos != (0.0, 0.0):
+            dx = current_pos[0] - self._last_collision_check_pos[0]
+            dy = current_pos[1] - self._last_collision_check_pos[1]
+            pos_change = math.sqrt(dx*dx + dy*dy)
+        else:
+            self._last_collision_check_pos = current_pos
+            return
+        
+        # Collision = moving command, minimal position change, close lidar
+        is_collision = (
+            has_speed_cmd and 
+            pos_change < self._collision_position_thresh_m and
+            self.lidar_center_dist < 1.0
+        )
+        
+        if is_collision:
+            log_jsonl("usv_collision", False, 
+                event="collision_detected",
+                ts=now,
+                pos_x=round(current_pos[0], 2),
+                pos_y=round(current_pos[1], 2),
+                heading_deg=round(self.current_heading, 1),
+                v_target_mps=round(self.v_target, 2),
+                heading_target_deg=round(self.heading_target, 1),
+                lidar_center_m=round(self.lidar_center_dist, 2),
+                lidar_left_m=round(self.lidar_left_dist, 2),
+                lidar_right_m=round(self.lidar_right_dist, 2),
+                pos_change_cm=round(pos_change * 100, 1),
+                reason="stuck_at_obstacle"
+            )
+            print(f"[COLLISION] X={current_pos[0]:+.2f}m Y={current_pos[1]:+.2f}m lidar_center={self.lidar_center_dist:.2f}m pos_change={pos_change*100:.1f}cm")
+            self._last_collision_ts = now
+        
+        self._last_collision_check_pos = current_pos
+
     def run(self):
         while self.mission_active:
             self._check_time()
@@ -3093,6 +3387,10 @@ class USVStateMachine:
                     break
             elif self.state in (self.STATE_COMPLETED, self.STATE_HOLD):
                 break
+            # Update compass heading from Gazebo every tick
+            self._update_heading_from_vehicle_position()
+            # Check for collisions every tick
+            self._check_collision()
             self._write_state()
 
         if self.state == self.STATE_COMPLETED:

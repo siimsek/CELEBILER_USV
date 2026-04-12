@@ -21,12 +21,26 @@ from compliance_profile import (
     LIDAR_PROCESSING_HZ,
     LINK_TOPOLOGY,
     LOG_DIR as DEFAULT_LOG_DIR,
+    MISSION_ALLOW_STRUCTURED_LEGACY,
     MISSION_FILE_DEFAULT,
+    MISSION_INPUT_FORMAT,
     OBSTACLE_TELEMETRY_HZ,
     REPORT_TELEMETRY_GROUPS,
     USV_MODE,
     USV_MODE_RACE,
 )
+from mission_adapter import (
+    adapt_mission_to_structured,
+    validate_target_color,
+)
+from mission_config import (
+    TARGET_STATE_FILE,
+    get_mission_split_profile,
+    load_target_state,
+    split_mission_waypoints,
+    validate_coordinate_mission,
+)
+from sim_nav_state import load_sim_nav_state
 
 print = make_console_printer("TELEM")
 
@@ -56,7 +70,6 @@ PWM_VALID_MIN = 900
 PWM_VALID_MAX = 2100
 RC_SIGNAL_TIMEOUT_S = 1.5
 LINK_STATE_FILE = f"{CONTROL_DIR}/telemetry_link_state.json"
-SIM_VEHICLE_POSITION_FILE = f"{CONTROL_DIR}/vehicle_position.json"
 
 # IPC: usv_main.py ile dosya üzerinden iletişim (farklı süreçler)
 FLAG_START = f"{CONTROL_DIR}/start_mission.flag"
@@ -104,30 +117,30 @@ EVENT_LAST = {
     "timeout_count": 0,
 }
 EVENT_LOCK = threading.Lock()
+_sim_ld = os.environ.get("SIM_LOG_DIR", "").strip()
+_sim_base = _sim_ld if _sim_ld else LOG_DIR
 LOG_FILE_ALLOWLIST = {
     "telemetry.log": f"{LOG_DIR}/telemetry.log",
     "telemetry.debug.log": f"{LOG_DIR}/telemetry.debug.log",
     "telemetry.jsonl": f"{LOG_DIR}/telemetry.jsonl",
     "telemetry_mavlink.jsonl": f"{LOG_DIR}/telemetry_mavlink.jsonl",
-    "sitl.log": f"{LOG_DIR}/sitl.log",
-    "gazebo.log": f"{LOG_DIR}/gazebo.log",
+    "sitl.log": f"{_sim_base}/sitl.log",
+    "gazebo.log": f"{_sim_base}/gazebo.log",
     "cam.log": f"{LOG_DIR}/cam.log",
     "cam.debug.log": f"{LOG_DIR}/cam.debug.log",
     "cam.jsonl": f"{LOG_DIR}/cam.jsonl",
-    "cam_bridge.log": f"{LOG_DIR}/cam_bridge.log",
-    "pose.log": f"{LOG_DIR}/pose.log",
-    "ros_gz.log": f"{LOG_DIR}/ros_gz.log",
+    "cam_bridge.log": f"{_sim_base}/cam_bridge.log",
+    "pose.log": f"{_sim_base}/pose.log",
+    "ros_gz.log": f"{_sim_base}/ros_gz.log",
     "usv_main.log": f"{LOG_DIR}/usv_main.log",
     "usv_main.debug.log": f"{LOG_DIR}/usv_main.debug.log",
     "usv_main.jsonl": f"{LOG_DIR}/usv_main.jsonl",
     "lidar_map.debug.log": f"{LOG_DIR}/lidar_map.debug.log",
     "lidar_map.jsonl": f"{LOG_DIR}/lidar_map.jsonl",
-    "check_stack.log": f"{LOG_DIR}/check_stack.log",
+    "check_stack.log": f"{_sim_base}/check_stack.log",
     "telemetri_verisi.csv": CSV_FILE,
     "file3_local_map_index.csv": f"{LOG_DIR}/file3_local_map_index.csv",
 }
-# Simülasyon köprüleri (SIM_LOG_DIR) — dashboard log görüntüleyicide
-_sim_ld = os.environ.get("SIM_LOG_DIR", "").strip()
 if _sim_ld:
     _sim_join = lambda n: os.path.join(_sim_ld, n)
     LOG_FILE_ALLOWLIST["sitl_gazebo_bridge.debug.log"] = _sim_join("sitl_gazebo_bridge.debug.log")
@@ -140,34 +153,35 @@ if _sim_ld:
 
 
 def _ros2_logs_dir():
-    return os.path.join(LOG_DIR, "ros2")
+    ros_ld = os.environ.get("ROS_LOG_DIR", "").strip()
+    if ros_ld:
+        return ros_ld
+    return os.path.join(_sim_base, "ros2")
 
 
-def _merged_log_index():
-    """Statik liste + sistem altinda olusan .log/.jsonl dosyalari."""
-    merged = dict(LOG_FILE_ALLOWLIST)
+def _scan_dir_logs(directory, merged):
+    """directory altindaki .log/.jsonl dosyalarini merged'e ekler (setdefault)."""
     try:
-        if os.path.isdir(LOG_DIR):
-            for fn in os.listdir(LOG_DIR):
+        if os.path.isdir(directory):
+            for fn in os.listdir(directory):
                 if not fn.endswith((".log", ".jsonl")):
                     continue
-                path = os.path.join(LOG_DIR, fn)
+                path = os.path.join(directory, fn)
                 if os.path.isfile(path):
                     merged.setdefault(fn, path)
     except OSError:
         pass
+
+
+def _merged_log_index():
+    """Statik liste + LOG_DIR + SIM_LOG_DIR + ROS2 altinda olusan dosyalar."""
+    merged = dict(LOG_FILE_ALLOWLIST)
+    _scan_dir_logs(LOG_DIR, merged)
+    if _sim_ld and _sim_ld != LOG_DIR:
+        _scan_dir_logs(_sim_ld, merged)
     rd = _ros2_logs_dir()
-    if not os.path.isdir(rd):
-        return merged
-    try:
-        for fn in os.listdir(rd):
-            if not fn.endswith((".log", ".jsonl")):
-                continue
-            path = os.path.join(rd, fn)
-            if os.path.isfile(path):
-                merged.setdefault(fn, path)
-    except OSError:
-        pass
+    if os.path.isdir(rd):
+        _scan_dir_logs(rd, merged)
     return merged
 
 
@@ -446,9 +460,6 @@ HTML_PAGE = """
         .mot-bar { height:100%; background:var(--accent); transition:width 0.1s; border-radius:3px; }
         .mot-val { font-family:var(--mono); font-size:0.75rem; width:35px; text-align:right; }
 
-        /* Gear */
-        .gear-disp { text-align:center; font-size:0.9rem; font-weight:700; margin-top:4px; }
-
         /* Race mode layout */
         .main.race-mode { grid-template-columns:280px 1fr; }
         .main.race-mode .stats-row { grid-column:span 1; grid-template-columns:repeat(3,1fr); }
@@ -569,7 +580,6 @@ HTML_PAGE = """
                         <div class="stick-lbl">STEER</div>
                     </div>
                 </div>
-                <div class="gear-disp" id="gear_disp">--</div>
             </div>
 
             <!-- 6: Motors -->
@@ -631,13 +641,6 @@ HTML_PAGE = """
                     const mapS = (v) => { if(!v) return 0; let n=(v-1500)/500.0; if(Math.abs(n)<0.1) n=0; return Math.max(-1,Math.min(1,n))*20; };
                     document.getElementById('stick_left').style.transform = 'translate(0px,' + (-mapS(d.RC3)) + 'px)';
                     document.getElementById('stick_right').style.transform = 'translate(' + mapS(d.RC1) + 'px,0px)';
-
-                    // Gear
-                    const gearEl = document.getElementById('gear_disp');
-                    if(d.Gear) {
-                        gearEl.innerText = d.Gear;
-                        gearEl.style.color = d.Gear==='FORWARD' ? 'var(--success)' : (d.Gear==='REVERSE' ? 'var(--danger)' : 'var(--warning)');
-                    }
 
                     // Motors
                     const mapPWM = (v) => { if(!v) return 0; let p=(v-1000)/10.0; return Math.max(0,Math.min(100,p)); };
@@ -811,14 +814,7 @@ class SmartTelemetry:
         self.sim_lat = 38.4192
         self.sim_lon = 27.1287
         self.sim_heading = 0
-        self._sim_pose_mtime = 0.0
-        try:
-            sim_home = [token.strip() for token in os.environ.get("SIM_HOME", "-35.363262,149.165237,584,0").split(",")]
-            self._sim_home_lat = float(sim_home[0])
-            self._sim_home_lon = float(sim_home[1])
-        except Exception:
-            self._sim_home_lat = -35.363262
-            self._sim_home_lon = 149.165237
+        self._sim_pose_epoch = 0.0
         
         # Log Klasörü
         if not os.path.exists(LOG_DIR):
@@ -849,27 +845,22 @@ class SmartTelemetry:
         if os.environ.get("USV_SIM") != "1":
             return
         try:
-            st = os.stat(SIM_VEHICLE_POSITION_FILE)
-            if st.st_mtime <= float(getattr(self, "_sim_pose_mtime", 0.0) or 0.0):
+            nav = load_sim_nav_state(control_dir=CONTROL_DIR)
+            ts_epoch = float(nav.get("ts_epoch", 0.0) or 0.0)
+            if ts_epoch <= float(getattr(self, "_sim_pose_epoch", 0.0) or 0.0):
                 return
-            with open(SIM_VEHICLE_POSITION_FILE, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            pos_x = float(payload.get("pos_x", 0.0) or 0.0)
-            pos_y = float(payload.get("pos_y", 0.0) or 0.0)
-            heading_rad = float(payload.get("heading_rad", 0.0) or 0.0)
-            cos_home = math.cos(math.radians(self._sim_home_lat))
-            meters_to_lon = 1.0 / (111320.0 * cos_home) if abs(cos_home) > 1e-6 else 1.0 / 111320.0
-            lat = self._sim_home_lat + (pos_y / 111320.0)
-            lon = self._sim_home_lon + (pos_x * meters_to_lon)
+            if not nav.get("valid"):
+                self._sim_pose_epoch = ts_epoch
+                return
             with self.lock:
-                telemetry_data["Lat"] = lat
-                telemetry_data["Lon"] = lon
-                telemetry_data["Heading"] = (math.degrees(heading_rad) + 360.0) % 360.0
+                telemetry_data["Lat"] = float(nav.get("lat"))
+                telemetry_data["Lon"] = float(nav.get("lon"))
+                telemetry_data["Heading"] = float(nav.get("heading_deg"))
                 telemetry_data["GPS_FixType"] = max(int(telemetry_data.get("GPS_FixType", 0) or 0), GPS_MIN_FIX_TYPE)
                 telemetry_data["GPS_Satellites"] = max(int(telemetry_data.get("GPS_Satellites", 0) or 0), 10)
             self.last_gps_fix_type = max(int(self.last_gps_fix_type or 0), GPS_MIN_FIX_TYPE)
             self.last_gps_satellites = max(int(self.last_gps_satellites or 0), 10)
-            self._sim_pose_mtime = st.st_mtime
+            self._sim_pose_epoch = ts_epoch
         except FileNotFoundError:
             return
         except json.JSONDecodeError:
@@ -908,8 +899,8 @@ class SmartTelemetry:
         try:
             _atomic_write_json(LINK_STATE_FILE, payload)
             self._last_link_state_write = now
-            # Logging only every 2 seconds to avoid spam
-            if not hasattr(self, '_last_heartbeat_log') or (now - self._last_heartbeat_log) >= 2.0:
+            # Logging only every 5 seconds to avoid spam
+            if not hasattr(self, '_last_heartbeat_log') or (now - self._last_heartbeat_log) >= 5.0:
                 hb_source = getattr(self, 'link_heartbeat_source', 'unknown')  # Safe attribute access
                 print(f"[HEARTBEAT] Age={self.link_heartbeat_age_s:.1f}s Source={hb_source} Ts={now:.1f}")
                 self._last_heartbeat_log = now
@@ -963,7 +954,7 @@ class SmartTelemetry:
                 telemetry_data["Out1"] = 1500
                 telemetry_data["Out3"] = 1500
                 telemetry_data["Manual_Lock_Reason"] = "ESTOP"
-            print("🚨 [ESTOP] RC7+HOLD+NEUTRAL+DISARM gönderildi")
+            print("🚨 [ESTOP] RC7+HOLD+PWM1500+DISARM gönderildi")
             return True
         except Exception as e:
             self._bump_error("rc_override_error", f"[WARN] [ESTOP] RC7 force hatasi: {e}")
@@ -1277,17 +1268,14 @@ class SmartTelemetry:
                 telemetry_data['RC7'] = getattr(msg, 'chan7_raw', 0)
                 
                 # Motor Kontrolcüsüne Veri Gönder
-                # CH1: Direksiyon, CH3: Gaz Artır/Azalt, CH6: Vites
-                rc6 = msg.chan6_raw
-                # YENİ: Tüm kanalları gönderiyoruz (CH1, CH2, CH3, CH4, CH6)
-                self.motor_ctrl.update_inputs(msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw, rc6)
+                # CH1/4 steer, CH2/3 throttle fallback
+                self.motor_ctrl.update_inputs(msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw)
                 
                 # --- RC DEBUG (Kanal Tespiti) ---
                 # Her 25 mesajda bir (~5 saniyede 1) loga bas — CPU tasarrufu
                 self.rc_debug_counter = getattr(self, 'rc_debug_counter', 0) + 1
                 if self.rc_debug_counter % 25 == 0:
-                    gear_stat = telemetry_data.get('Gear', 'N')
-                    print(f"🎮 RC: 1:{msg.chan1_raw} 2:{msg.chan2_raw} 3:{msg.chan3_raw} 4:{msg.chan4_raw} 6:{msg.chan6_raw} -> {gear_stat}")
+                    print(f"🎮 RC: 1:{msg.chan1_raw} 2:{msg.chan2_raw} 3:{msg.chan3_raw} 4:{msg.chan4_raw}")
 
                 self._update_physics_sim(msg.chan1_raw, msg.chan3_raw)
                 
@@ -1352,8 +1340,8 @@ class SmartTelemetry:
                 
             elif mtype == 'VFR_HUD':
                 telemetry_data['Speed'] = msg.groundspeed
-                # Hız setpoint: Motor output yoksa (NEUTRAL) mevcut hız kullan
-                if telemetry_data.get('Gear') == 'NEUTRAL' or abs(telemetry_data.get('Out1', 1500) - 1500) + abs(telemetry_data.get('Out3', 1500) - 1500) < 50:
+                # Manuel çıkış nötr civarındaysa mevcut hız setpoint olarak korunur.
+                if abs(telemetry_data.get('Out1', 1500) - 1500) + abs(telemetry_data.get('Out3', 1500) - 1500) < 50:
                     telemetry_data['Speed_Setpoint'] = msg.groundspeed
 
             elif mtype == 'NAV_CONTROLLER_OUTPUT':
@@ -1441,7 +1429,6 @@ class SmartTelemetry:
                 "Speed": spd,
                 "Speed_Setpoint": spd,
                 "Mode": "SIMULATION",
-                "Gear": "NEUTRAL",
                 # STM32 Mock
                 "STM_Date": time.strftime("%H:%M:%S"),
                 "Env_Temp": 24.5 + random.uniform(-0.5, 0.5),
@@ -1457,21 +1444,17 @@ class MotorController:
         self.active = True
         
         # Durum Değişkenleri
-        self.target_pwm = 1500.0   # Hedeflenen Hız (Sanal)
-        self.current_pwm = 1500.0  # Anlık Fiziksel Hız (Ramping uygulanan)
-        self.gear = "NEUTRAL"      # Vites: FORWARD, NEUTRAL, REVERSE
-        self.last_gear_switch = 0  # Debouncing için
+        self.target_pwm = 1500.0   # Hedeflenen diferansiyel thrust merkezi
+        self.current_pwm = 1500.0  # Anlık fiziksel thrust merkezi (ramping uygulanır)
         
         # Girdiler
         self.input_throttle = 1500 # CH3 (Sol Stick)
         self.input_steer = 1500    # CH1 (Sağ Stick)
-        self.input_gear = 1000     # CH6 (Switch)
         self.left_motor_pwm = 1500
         self.right_motor_pwm = 1500
         self.last_input_ts = time.monotonic()
         
         # Ayarlar
-        self.PWM_NEUTRAL = 1500
         self.PWM_DEADZONE = 50     # 1450-1550 arası stick hareketsiz sayılır
         
         self.MAX_FWD = 1900
@@ -1499,13 +1482,11 @@ class MotorController:
         self.thread = threading.Thread(target=self.control_loop, daemon=True)
         self.thread.start()
 
-    def update_inputs(self, rc1, rc2, rc3, rc4, rc6):
+    def update_inputs(self, rc1, rc2, rc3, rc4):
         """RC verilerini filtreleyip güvenli girişlere dönüştür."""
         # Primary/fallback: throttle rc2->rc3, steer rc4->rc1
         self.input_throttle = _pick_primary_fallback(rc2, rc3, default=1500)
         self.input_steer = _pick_primary_fallback(rc4, rc1, default=1500)
-        if _is_valid_pwm(rc6):
-            self.input_gear = int(rc6)
         self.last_input_ts = time.monotonic()
 
     def control_loop(self):
@@ -1523,13 +1504,16 @@ class MotorController:
             except (TypeError, ValueError):
                 state_ts = 0.0
             state_stale = bool(state_ts <= 0.0 or (time.monotonic() - state_ts) > 2.0)
-            mission_locked = bool(
+            autonomy_owner = bool(
                 state.get("active", False)
                 or state.get("command_lock", False)
-                or state.get("estop_state", False)
                 or mode_locked
+            )
+            safety_lock = bool(
+                state.get("estop_state", False)
                 or state_stale
             )
+            mission_locked = bool(autonomy_owner or safety_lock)
             if state.get("active", False):
                 lock_reason = "MISSION_ACTIVE"
             elif state.get("command_lock", False):
@@ -1545,10 +1529,10 @@ class MotorController:
             if mission_locked:
                 self.target_pwm = 1500
                 self.current_pwm = 1500
+                self.current_turn = 0.0
                 self.left_motor_pwm = 1500
                 self.right_motor_pwm = 1500
-                self.gear = "LOCKED"
-                if self.parent.pixhawk:
+                if safety_lock and self.parent.pixhawk:
                     try:
                         rc_override = [65535] * 8
                         rc_override[0] = 1500
@@ -1561,9 +1545,9 @@ class MotorController:
                     except Exception as exc:
                         self.parent._bump_error("rc_override_error", f"[WARN] [MOTOR] Lock RC override hatasi: {exc}")
                 with self.parent.lock:
-                    telemetry_data["Gear"] = "LOCKED"
-                    telemetry_data["Out1"] = 1500
-                    telemetry_data["Out3"] = 1500
+                    if safety_lock:
+                        telemetry_data["Out1"] = 1500
+                        telemetry_data["Out3"] = 1500
                     telemetry_data["Manual_Lock_Reason"] = lock_reason
                 continue
 
@@ -1574,7 +1558,6 @@ class MotorController:
                 self.current_turn = 0.0
                 self.input_throttle = 1500
                 self.input_steer = 1500
-                self.gear = "NEUTRAL"
                 self.left_motor_pwm = 1500
                 self.right_motor_pwm = 1500
                 if self.parent.pixhawk:
@@ -1590,52 +1573,24 @@ class MotorController:
                     except Exception as exc:
                         self.parent._bump_error("rc_override_error", f"[WARN] [MOTOR] RC timeout override hatasi: {exc}")
                 with self.parent.lock:
-                    telemetry_data["Gear"] = "RC_LOSS_HOLD"
                     telemetry_data["Out1"] = 1500
                     telemetry_data["Out3"] = 1500
                     telemetry_data["Manual_Lock_Reason"] = "RC_TIMEOUT"
                 continue
              
-            # --- 1. VİTES MANTIĞI (CH6) ---
-            new_gear = "NEUTRAL"
-            if self.input_gear > 1700: new_gear = "FORWARD"
-            elif self.input_gear < 1300: new_gear = "REVERSE"
-            
-            if new_gear != self.gear:
-                 if self.gear == "FORWARD" and new_gear == "REVERSE":
-                     # Hızımız henüz durma noktasına gelmediyse, NEUTRAL'a alıp yavaşlamasını bekle
-                     if abs(self.current_pwm - 1500) > 25: 
-                         new_gear = "NEUTRAL"
-                 elif self.gear == "REVERSE" and new_gear == "FORWARD":
-                     if abs(self.current_pwm - 1500) > 25: 
-                         new_gear = "NEUTRAL"
-                 self.gear = new_gear
-                 if self.gear == "NEUTRAL": 
-                     self.target_pwm = 1500
-
-            # --- 2. CRUISE CONTROL GİRDİSİ (SOL STICK - CH3) ---
+            # --- 1. DIFFERENTIAL THRUST GİRDİSİ (vites yok, signed throttle) ---
             throttle_raw_diff = self.input_throttle - 1500
             if self.INV_THROTTLE: throttle_raw_diff *= -1
             
             if abs(throttle_raw_diff) > self.PWM_DEADZONE:
                 power_factor = (abs(throttle_raw_diff) - self.PWM_DEADZONE) / (500.0 - self.PWM_DEADZONE)
-                step_val = self.CRUISE_STEP * power_factor * 2.0 
-                
-                if throttle_raw_diff > 0:
-                    # HIZ ARTIR
-                    if self.gear == "FORWARD":
-                        self.target_pwm = min(self.target_pwm + step_val, self.MAX_FWD)
-                    elif self.gear == "REVERSE":
-                        self.target_pwm = max(self.target_pwm - step_val, self.MAX_REV)
-                else: 
-                    # HIZ AZALT (Frenleme hissiyatı vermek için daha hızlı yavaşlayabiliriz)
-                    brake_factor = 2.0
-                    if self.target_pwm > 1500:
-                        self.target_pwm = max(self.target_pwm - (step_val * brake_factor), 1500)
-                    elif self.target_pwm < 1500:
-                        self.target_pwm = min(self.target_pwm + (step_val * brake_factor), 1500)
+                desired_throttle_pwm = 1500 + math.copysign(power_factor * 400.0, throttle_raw_diff)
+            else:
+                desired_throttle_pwm = 1500.0
+            self.target_pwm += (desired_throttle_pwm - self.target_pwm) * 0.18
+            self.target_pwm = max(self.MAX_REV, min(self.MAX_FWD, self.target_pwm))
 
-            # --- 3. EXPONENTIAL RAMPING (YUMUŞAK GEÇİŞ - LPF) ---
+            # --- 2. EXPONENTIAL RAMPING (YUMUŞAK GEÇİŞ - LPF) ---
             # Lineer rampa yerine üstel filtre (Low Pass Filter) ile daha gerçekçi tekne ataleti
             alpha_pwm = 0.15  # 0.0 - 1.0 (küçük değerler = daha yavaş/yumuşak hızlanma)
             self.current_pwm += (self.target_pwm - self.current_pwm) * alpha_pwm
@@ -1644,7 +1599,7 @@ class MotorController:
             if abs(self.target_pwm - self.current_pwm) < 2.0:
                 self.current_pwm = self.target_pwm
 
-            # --- 4. MIXING (NORMALIZED DIFFERENTIAL DRIVE) ---
+            # --- 3. MIXING (NORMALIZED DIFFERENTIAL DRIVE) ---
             # Pixhawk SERVO_PASS_THROUGH ayarlandığında tüm miksaj Python'da yapılır:
             throttle_norm = (self.current_pwm - 1500) / 400.0  # -1.0 to 1.0
             
@@ -1672,19 +1627,7 @@ class MotorController:
             left_pwm_out = int(1500 + left_mix * 400)
             right_pwm_out = int(1500 + right_mix * 400)
             
-            # --- 5. SAFETY CLAMP & DYNAMIC LIMITS ---
-            # İleri viteste aniden tam geri veya geri viteste tam ileri komutlarını yumuşatma
-            if self.gear == "FORWARD":
-                left_pwm_out = max(1450, left_pwm_out)
-                right_pwm_out = max(1450, right_pwm_out)
-            elif self.gear == "REVERSE":
-                left_pwm_out = min(1550, left_pwm_out)
-                right_pwm_out = min(1550, right_pwm_out)
-                
-            if self.gear == "NEUTRAL": 
-                left_pwm_out = 1500
-                right_pwm_out = 1500
-                
+            # --- 4. SAFETY CLAMP ---
             left_pwm_out = int(max(1100, min(left_pwm_out, 1900)))
             right_pwm_out = int(max(1100, min(right_pwm_out, 1900)))
             
@@ -1695,7 +1638,7 @@ class MotorController:
             self.left_motor_pwm = left_pwm_out
             self.right_motor_pwm = right_pwm_out
             
-            # --- 6. ÇIKIŞ (MAVLINK OVERRIDE) ---
+            # --- 5. ÇIKIŞ (MAVLINK OVERRIDE) ---
             if self.parent.pixhawk:
                 try:
                     rc_override = [65535]*8
@@ -1710,7 +1653,6 @@ class MotorController:
                     )
                     
                     with self.parent.lock:
-                        telemetry_data["Gear"] = self.gear
                         telemetry_data["Out1"] = left_pwm_out
                         telemetry_data["Out3"] = right_pwm_out
                         telemetry_data["Manual_Lock_Reason"] = "MANUAL_ACTIVE"
@@ -2066,7 +2008,6 @@ CONTROLLER_PAGE = """
                 <header><h2>Manuel ve Güvenlik</h2><span class="mini" id="commandLock">--</span></header>
                 <div class="body">
                     <div class="kv">
-                        <div class="item"><div class="label">Gear</div><div class="value" id="gear">--</div></div>
                         <div class="item"><div class="label">Manual Lock</div><div class="value" id="manualLock">--</div></div>
                         <div class="item"><div class="label">RC1 / RC3</div><div class="value" id="rcSummary">--</div></div>
                         <div class="item"><div class="label">Out1 / Out3</div><div class="value" id="outSummary">--</div></div>
@@ -2280,7 +2221,6 @@ CONTROLLER_PAGE = """
             text('battery', `${fmtNum(data.Battery, 2)} V`);
             text('linkAge', `${fmtNum(data.link_heartbeat_age_s, 2)} s`);
             text('positionAge', `state age ${fmtNum(data.state_age_s, 2)} s`);
-            text('gear', data.Gear || '--');
             text('manualLock', data.manual_lock_reason || '--');
             text('commandLock', `command_lock=${Boolean(data.command_lock)}`);
             text('rcSummary', `${data.RC1 ?? '--'} / ${data.RC3 ?? '--'}`);
@@ -2418,6 +2358,9 @@ def dashboard():
 
 @app.route('/api/camera_stream')
 def camera_stream():
+    # Race mode guard: image transmission prohibited
+    if USV_MODE == USV_MODE_RACE:
+        return jsonify({'error': 'Camera stream disabled in race mode'}), 403
     try:
         return _stream_camera_proxy()
     except Exception as exc:
@@ -2428,6 +2371,9 @@ def camera_stream():
 
 @app.route('/api/lidar_stream')
 def lidar_stream():
+    # Race mode guard: image transmission prohibited
+    if USV_MODE == USV_MODE_RACE:
+        return jsonify({'error': 'Lidar stream disabled in race mode'}), 403
     try:
         return _stream_lidar_proxy()
     except Exception as exc:
@@ -2443,6 +2389,9 @@ def lidar_stream():
 
 @app.route('/api/lidar_map.jpg')
 def lidar_map():
+    # Race mode guard: image transmission prohibited
+    if USV_MODE == USV_MODE_RACE:
+        return jsonify({'error': 'Lidar map disabled in race mode'}), 403
     if os.path.exists(LIDAR_MAP_JPG):
         response = send_file(LIDAR_MAP_JPG, mimetype="image/jpeg", conditional=False)
         response.cache_control.no_store = True
@@ -2472,11 +2421,13 @@ def get_data():
     out['usv_mode'] = USV_MODE
     out['mission_file'] = os.environ.get('MISSION_FILE', '--')
     state = _read_mission_state()
+    target_state = load_target_state(TARGET_STATE_FILE)
     _sync_events_from_state(state)
     out['mission_state'] = state.get('state', mission_data['state'])
     out['mission_active'] = state.get('active', mission_data['active'])
     out['mission_target'] = state.get('target', mission_data['target'])
     out['mission_wp_info'] = state.get('wp_info', mission_data['wp_info'])
+    out['guidance_source'] = state.get('guidance_source', '--')
     out['failsafe_state'] = state.get('failsafe_state', '--')
     out['estop_state'] = state.get('estop_state', False)
     out['estop_source'] = state.get('estop_source', '--')
@@ -2502,7 +2453,17 @@ def get_data():
     out['manual_lock_reason'] = out.get('Manual_Lock_Reason', state.get('manual_lock_reason', '--'))
     out['camera_ready'] = state.get('camera_ready', False)
     out['lidar_ready'] = state.get('lidar_ready', False)
+    out['nav_position_source'] = state.get('nav_position_source', '--')
+    out['nav_heading_source'] = state.get('nav_heading_source', '--')
+    out['nav_fix_valid'] = bool(state.get('nav_fix_valid', False))
+    out['nav_state_age_s'] = state.get('nav_state_age_s')
+    out['nav_target_bearing_deg'] = state.get('nav_target_bearing_deg')
+    out['nav_source_detail'] = state.get('nav_source_detail', '--')
     out['active_parkur'] = state.get('active_parkur', '--')
+    out['active_waypoint_index'] = state.get('active_waypoint_index', -1)
+    out['target_color'] = target_state.get('target_color', state.get('target_color', '--'))
+    out['mission_input_format'] = state.get('mission_input_format', MISSION_INPUT_FORMAT)
+    out['mission_split_profile'] = state.get('mission_split_profile', {})
     sensor_fusion = state.get('sensor_fusion', {})
     out['sensor_fusion'] = sensor_fusion if isinstance(sensor_fusion, dict) else {}
     dynamic_speed_profile = state.get('dynamic_speed_profile', {})
@@ -2627,6 +2588,8 @@ def get_data():
         'mission_progress': {
             'target': out['mission_target'],
             'wp_info': out['mission_wp_info'],
+            'active_waypoint_index': out['active_waypoint_index'],
+            'target_color': out['target_color'],
             'gate_count': out['gate_count'],
         },
         'event_flags': {
@@ -2638,6 +2601,13 @@ def get_data():
         'navigation_health': {
             'camera_ready': out['camera_ready'],
             'lidar_ready': out['lidar_ready'],
+            'guidance_source': out['guidance_source'],
+            'nav_position_source': out['nav_position_source'],
+            'nav_heading_source': out['nav_heading_source'],
+            'nav_fix_valid': out['nav_fix_valid'],
+            'nav_state_age_s': out['nav_state_age_s'],
+            'nav_target_bearing_deg': out['nav_target_bearing_deg'],
+            'nav_source_detail': out['nav_source_detail'],
             'heartbeat_age_s': out['heartbeat_age_s'],
             'link_heartbeat_age_s': out['link_heartbeat_age_s'],
             'state_age_s': out['state_age_s'],
@@ -2720,17 +2690,20 @@ def log_tail():
 @app.route('/api/mission', methods=['POST'])
 def upload_mission():
     """Mission dosyasını yükle ve valide et.
-    
-    POST body:
-    {
-      "parkur1": [[lat, lon], ...],
-      "parkur2": [[lat, lon], ...],
-      "parkur3": [[lat, lon]],
-      "target_color": "RED|GREEN|BLACK|KIRMIZI_SANCAK|YESIL_SANCAK|SIYAH_HEDEF"
-    }
+
+    Operational POST body (flat ordered format):
+    [
+      [lat, lon],
+      [lat, lon]
+    ]
     """
     if USV_MODE == USV_MODE_RACE:
         return jsonify({'error': 'Race modunda mission yükleme API kapalıdır.'}), 403
+    
+    # Check if mission is already running (post-start lock)
+    state = _read_mission_state()
+    if state.get('active', False):
+        return jsonify({'error': 'Görev aktifken yeni mission yüklenemez.'}), 409
     
     # İstek gövdesinden mission verisini oku
     try:
@@ -2740,52 +2713,52 @@ def upload_mission():
     except Exception as e:
         return jsonify({'error': f'JSON parse hatası: {str(e)}'}), 400
     
-    # Hızlı schema kontrolü
-    required_fields = ["parkur1", "parkur2", "parkur3", "target_color"]
-    missing = [f for f in required_fields if f not in mission_data_upload]
-    if missing:
-        return jsonify({'error': f'Eksik alanlar: {missing}'}), 400
+    try:
+        target_color_from_legacy = ""
+        if isinstance(mission_data_upload, list):
+            flat_mission = validate_coordinate_mission(mission_data_upload)
+        elif isinstance(mission_data_upload, dict) and MISSION_ALLOW_STRUCTURED_LEGACY:
+            mission = adapt_mission_to_structured(mission_data_upload, strict=True)
+            flat_mission = mission["parkur1"] + mission["parkur2"] + mission["parkur3"]
+            target_color_from_legacy = str(mission.get("target_color") or "").strip().upper()
+        elif isinstance(mission_data_upload, dict):
+            return jsonify({'error': 'Structured mission payload disabled; flat ordered [lat, lon] list gönderin.'}), 400
+        else:
+            return jsonify({'error': f'Mission list veya object olmalı, gelen tip: {type(mission_data_upload).__name__}'}), 400
+
+        p1_wps, p2_wps, p3_wps = split_mission_waypoints(flat_mission, validate_lengths=False)
+        split_profile = get_mission_split_profile(len(flat_mission))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
     
-    # Temel tip kontrolü
-    if not isinstance(mission_data_upload.get("parkur1"), list):
-        return jsonify({'error': 'parkur1 dizi olmalı'}), 400
-    if not isinstance(mission_data_upload.get("parkur2"), list):
-        return jsonify({'error': 'parkur2 dizi olmalı'}), 400
-    if not isinstance(mission_data_upload.get("parkur3"), list):
-        return jsonify({'error': 'parkur3 dizi olmalı'}), 400
-    if not isinstance(mission_data_upload.get("target_color"), str):
-        return jsonify({'error': 'target_color string olmalı'}), 400
-    
-    # Parkur boş olmama kontrolü
-    if len(mission_data_upload["parkur1"]) == 0:
-        return jsonify({'error': 'parkur1 boş olamaz'}), 400
-    if len(mission_data_upload["parkur2"]) == 0:
-        return jsonify({'error': 'parkur2 boş olamaz'}), 400
-    if len(mission_data_upload["parkur3"]) == 0:
-        return jsonify({'error': 'parkur3 boş olamaz'}), 400
-    if len(mission_data_upload["parkur3"]) > 2:
-        return jsonify({'error': 'parkur3 max 2 waypoint olabilir'}), 400
-    
-    # Geçerli renkler
-    valid_colors = ["RED", "GREEN", "BLACK", "KIRMIZI_SANCAK", "YESIL_SANCAK", "SIYAH_HEDEF"]
-    if mission_data_upload["target_color"] not in valid_colors:
-        return jsonify({'error': f'Geçersiz renk. Geçerli: {valid_colors}'}), 400
-    
-    # Mission dosyasına yazma
+    # Mission dosyasına canonical flat formatta yaz.
     mission_file = os.environ.get("MISSION_FILE", MISSION_FILE_DEFAULT)
     try:
         os.makedirs(os.path.dirname(mission_file), exist_ok=True)
         with open(mission_file, 'w', encoding='utf-8') as f:
-            json.dump(mission_data_upload, f, indent=2)
+            json.dump(flat_mission, f, indent=2)
+
+        if target_color_from_legacy:
+            os.makedirs(os.path.dirname(TARGET_STATE_FILE), exist_ok=True)
+            tmp_target = f"{TARGET_STATE_FILE}.tmp"
+            with open(tmp_target, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'target_color': validate_target_color(target_color_from_legacy),
+                    'target_color_changed_at': time.time(),
+                }, f, indent=2)
+            os.replace(tmp_target, TARGET_STATE_FILE)
+
         print(f"✓ [API] Mission dosyası başarıyla yüklendi: {mission_file}")
         return jsonify({
             'ok': True,
             'message': 'Mission başarıyla yüklendi',
             'mission': {
-                'p1_count': len(mission_data_upload["parkur1"]),
-                'p2_count': len(mission_data_upload["parkur2"]),
-                'p3_count': len(mission_data_upload["parkur3"]),
-                'target_color': mission_data_upload["target_color"],
+                'input_format': MISSION_INPUT_FORMAT,
+                'total_count': len(flat_mission),
+                'p1_count': len(p1_wps),
+                'p2_count': len(p2_wps),
+                'p3_count': len(p3_wps),
+                'split_profile': split_profile,
                 'file': mission_file
             }
         }), 200
@@ -2813,28 +2786,28 @@ def set_target_color():
     except Exception as e:
         return jsonify({'error': f'JSON parse hatası: {str(e)}'}), 400
     
-    target_color = data.get('target_color', '').upper()
-    if not target_color:
+    target_color_raw = data.get('target_color', '')
+    if not target_color_raw:
         return jsonify({'error': 'target_color alanı zorunlu'}), 400
-    
-    # Geçerli renkler
-    valid_colors = ["RED", "GREEN", "BLACK", "KIRMIZI_SANCAK", "YESIL_SANCAK", "SIYAH_HEDEF"]
-    if target_color not in valid_colors:
-        return jsonify({'error': f'Geçersiz renk. Geçerli: {valid_colors}'}), 400
-    
-    # Mission state'i oku
+
     state = _read_mission_state()
-    
-    # Target color'u güncelle
-    state['target_color'] = target_color
-    state['target_color_changed_at'] = time.time()
-    
-    # Mission state'i yaz
+    if state.get('active', False):
+        return jsonify({'error': 'Görev aktifken target_color güncellenemez.'}), 409
+
     try:
-        tmp_path = f"{STATE_FILE}.tmp"
+        target_color = validate_target_color(target_color_raw)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    try:
+        os.makedirs(os.path.dirname(TARGET_STATE_FILE), exist_ok=True)
+        tmp_path = f"{TARGET_STATE_FILE}.tmp"
         with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(state, f, indent=2)
-        os.replace(tmp_path, STATE_FILE)
+            json.dump({
+                'target_color': target_color,
+                'target_color_changed_at': time.time(),
+            }, f, indent=2)
+        os.replace(tmp_path, TARGET_STATE_FILE)
         
         print(f"✓ [API] Target color güncellendi: {target_color}")
         return jsonify({

@@ -30,7 +30,7 @@ POSE_ARM_S = max(0.0, float(os.environ.get("SIM_GZ_POSE_ARM_S", "0")))
 MAX_LINEAR_VELOCITY_MPS = max(0.1, float(os.environ.get("SIM_GZ_MAX_LINEAR_VELOCITY_MPS", "1.4")))
 MAX_YAW_RATE_RAD_S = max(0.1, float(os.environ.get("SIM_GZ_MAX_YAW_RATE_RAD_S", "1.0")))
 LEFT_MOTOR_REVERSED = os.environ.get("SIM_GZ_LEFT_MOTOR_REVERSED", "0").lower() in ("1", "true", "yes")
-RIGHT_MOTOR_REVERSED = os.environ.get("SIM_GZ_RIGHT_MOTOR_REVERSED", "1").lower() in ("1", "true", "yes")
+RIGHT_MOTOR_REVERSED = os.environ.get("SIM_GZ_RIGHT_MOTOR_REVERSED", "0").lower() in ("1", "true", "yes")
 
 # Simulation test mode: optional auto-inject for bench debugging only.
 # Default is OFF to keep motion fully driven by SITL outputs.
@@ -169,10 +169,22 @@ class SitlGazeboBridge:
             self.pos_z = p.z
             self.heading_rad = self.q_to_euler(q.w, q.x, q.y, q.z)
             
-        # Convert NED to Global Lat/Lon
+        # Convert NED to Global Lat/Lon using earth coordinates
+        # Reference: SIM_HOME = {home_lat}, {home_lon}, {home_alt}
         lat = self.home_lat + (x_ned / 111320.0)
         lon = self.home_lon + (y_ned / (111320.0 * math.cos(math.radians(self.home_lat))))
         alt = self.home_alt - z_ned
+        
+        # VALIDATION: Log coordinate transform periodically for diagnostics
+        if self._msg_count_odom % 100 == 1:
+            log_jsonl("coordinate_transform", {
+                "msg_count": self._msg_count_odom,
+                "gazebo_xyz": [round(p.x, 3), round(p.y, 3), round(p.z, 3)],
+                "ned_xyz": [round(x_ned, 3), round(y_ned, 3), round(z_ned, 3)],
+                "gps_latlon": [round(lat, 7), round(lon, 7)],
+                "home_ref": [self.home_lat, self.home_lon],
+                "validation": "OK" if (-90 <= lat <= 90 and -180 <= lon <= 180) else "RANGE_ERROR"
+            })
 
         # Calculate roll, pitch, yaw
         # Roll (x-axis rotation)

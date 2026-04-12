@@ -125,13 +125,17 @@ cd CELEBILER_USV
 ### 2. Görev noktalarını ayarla
 `docker_workspace/mission.json` dosyasını düzenle:
 ```json
-{
-  "parkur1": [[36.88838, 30.67384], [36.88848, 30.67394]],
-  "parkur2": [[36.88818, 30.67394], [36.88808, 30.67404]],
-  "parkur3": [[36.88828, 30.67414]],
-  "target_color": "RED"
-}
+[
+  [36.88838, 30.67384],
+  [36.88848, 30.67394],
+  [36.88818, 30.67394],
+  [36.88808, 30.67404],
+  [36.88828, 30.67414],
+  [36.88818, 30.67424]
+]
 ```
+
+Parkur ayrımı sabit endekslerden türetilir. `target_color` ayrı olarak görev başlamadan önce `/api/target_color` ile verilir.
 
 ### 3. Sistemi başlat (Raspberry Pi üzerinde)
 ```bash

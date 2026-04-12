@@ -11,19 +11,20 @@ HOME_LOCATION="${SIM_HOME:--35.363262,149.165237,584,0}"
 SPEEDUP="${SIM_SPEEDUP:-1}"
 ARDUROVER_BIN="$HOME/ardupilot/build/sitl/bin/ardurover"
 DEFAULTS_ROOT="$HOME/ardupilot/Tools/autotest/default_params"
+CUSTOM_GPS_PARM="$PROJ_ROOT/sim/configs/sitl_sim_gps.parm"
 
 case "$FRAME" in
     motorboat-skid)
-        DEFAULTS="$DEFAULTS_ROOT/rover.parm,$DEFAULTS_ROOT/motorboat.parm,$DEFAULTS_ROOT/rover-skid.parm"
+        DEFAULTS="$DEFAULTS_ROOT/rover.parm,$DEFAULTS_ROOT/motorboat.parm,$DEFAULTS_ROOT/rover-skid.parm,$CUSTOM_GPS_PARM"
         ;;
     rover-skid)
-        DEFAULTS="$DEFAULTS_ROOT/rover.parm,$DEFAULTS_ROOT/rover-skid.parm"
+        DEFAULTS="$DEFAULTS_ROOT/rover.parm,$DEFAULTS_ROOT/rover-skid.parm,$CUSTOM_GPS_PARM"
         ;;
     motorboat)
-        DEFAULTS="$DEFAULTS_ROOT/rover.parm,$DEFAULTS_ROOT/motorboat.parm"
+        DEFAULTS="$DEFAULTS_ROOT/rover.parm,$DEFAULTS_ROOT/motorboat.parm,$CUSTOM_GPS_PARM"
         ;;
     *)
-        DEFAULTS="$DEFAULTS_ROOT/rover.parm"
+        DEFAULTS="$DEFAULTS_ROOT/rover.parm,$CUSTOM_GPS_PARM"
         ;;
 esac
 

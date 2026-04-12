@@ -204,7 +204,7 @@ except Exception:
     pass
 
 print(mapping.get(raw, default))
-' "$MISSION_FILE"
+' "${TARGET_STATE_FILE:-$CONTROL_DIR/target_state.json}"
 }
 
 wait_for_startup_readiness() {
@@ -215,37 +215,61 @@ import sys
 import time
 import urllib.request
 
-url = "http://127.0.0.1:8080/api/data"
+telemetry_url = "http://127.0.0.1:8080/api/data"
+camera_url = "http://127.0.0.1:5000/"
 deadline = time.monotonic() + 20.0
 last_line = None
 min_lidar_points = max(0, int(os.environ.get("SIM_READY_MIN_LIDAR_POINTS", "0") or 0))
 
+
+def probe_camera_endpoint():
+    request = urllib.request.Request(camera_url, method="HEAD")
+    with urllib.request.urlopen(request, timeout=1.5) as response:
+        return int(getattr(response, "status", 200) or 200) < 500
+
 while time.monotonic() < deadline:
     try:
-        with urllib.request.urlopen(url, timeout=2.0) as response:
+        with urllib.request.urlopen(telemetry_url, timeout=2.0) as response:
             data = json.load(response)
         autonomy = data.get("autonomy_health") or {}
         lidar_points = int(autonomy.get("lidar_point_count", 0) or 0)
+        camera_api_ready = False
+        camera_api_error = None
+        try:
+            camera_api_ready = probe_camera_endpoint()
+        except Exception as cam_exc:
+            camera_api_error = str(cam_exc)
         ready = (
             bool(data.get("ready_state"))
             and bool(data.get("camera_ready"))
             and bool(data.get("lidar_ready"))
             and lidar_points >= min_lidar_points
+            and camera_api_ready
         )
         line = (
             f"[SIM] Startup check: ready={str(ready).lower()} "
             f"camera={str(bool(data.get('camera_ready'))).lower()} "
             f"lidar={str(bool(data.get('lidar_ready'))).lower()} "
+            f"telemetry_api=true "
+            f"camera_api={str(camera_api_ready).lower()} "
             f"lidar_points={lidar_points} min_lidar_points={min_lidar_points} "
             f"health={str(bool(data.get('ready_state'))).lower()}"
         )
         if line != last_line:
             print(line)
             last_line = line
+        if camera_api_error:
+            print(f"[SIM] Startup check camera endpoint bekleniyor: {camera_api_error}")
 
         if ready:
-            print("[READY] [SISTEM] Kamera + LIDAR + sağlık kontrolleri OK, göreve başlamaya hazır")
-            print(f"[READY] [SISTEM] lidar_point_count={lidar_points} camera_ready={bool(data.get('camera_ready'))} lidar_ready={bool(data.get('lidar_ready'))}")
+            print("[READY] [SISTEM] Kamera + LIDAR + sağlık kontrolleri ve API endpointleri OK")
+            print(
+                "[READY] [SISTEM] "
+                f"lidar_point_count={lidar_points} "
+                f"camera_ready={bool(data.get('camera_ready'))} "
+                f"lidar_ready={bool(data.get('lidar_ready'))} "
+                f"telemetry_api_ready=True camera_api_ready=True"
+            )
             sys.exit(0)
 
         time.sleep(1.0)
@@ -376,7 +400,7 @@ echo "[SIM] SIM Loglar: $SIM_LOG_DIR (Gazebo, SITL, ROS2, bridges)"
 echo "[SIM] APP Loglar: $LOG_DIR (cam, telemetry, usv_main, CSV, video)"
 echo "[SIM] Kontrol dosyalari: $SIM_CONTROL_DIR"
 echo "[SIM] Varsayilan sim gorevi: $MISSION_FILE"
-echo "[SIM] Alternatif gorev: ./sim/bin/run_sim_stack.sh sim/configs/mission_parkour2.json"
+echo "[SIM] Alternatif gorev: ./sim/bin/run_sim_stack.sh <mission_json_path>"
 echo "[SIM] Telemetry UI: http://127.0.0.1:8080"
 echo "[SIM] Camera UI:    http://127.0.0.1:5000"
 echo "[SIM] Gorev otomatik baslamaz; web controller Start komutunu bekler."
@@ -400,7 +424,8 @@ LIDAR_MAP_PID=$!
 register_pid "$LIDAR_MAP_PID"
 sleep 1
 # stdin ayrilir: ESC bu kabukta yakalanir, usv_main klavye beklemez
-LOG_DIR="$LOG_DIR" python3 usv_main.py </dev/null > "$LOG_DIR/usv_main.log" 2>&1 &
+# Export critical env vars: CONTROL_DIR for mission state/flags, USV_MODE for startup logic
+LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" MISSION_FILE="${MISSION_FILE}" python3 usv_main.py </dev/null > "$LOG_DIR/usv_main.log" 2>&1 &
 USV_PID=$!
 register_pid "$USV_PID"
 
@@ -415,9 +440,18 @@ echo "  ROS_LOG_DIR=$ROS_LOG_DIR"
 
 wait_for_startup_readiness || true
 
-# Additional wait for API services to fully initialize (Flask app takes extra time after health checks)
-echo "[SIM] Waiting extra 12 sec for API services (telemetry@8080, cam@5000)..."
-sleep 12
+# COMPLIANCE TESTING: Run race-level compliance checks after stack startup
+echo "[COMPLIANCE] Running race-level compliance tests..."
+python3 "$PROJ_ROOT/host_scripts/check_compliance_race.py" > "$ROOT_LOG_DIR/simulation/compliance_race_test.log" 2>&1
+COMPLIANCE_EXIT_CODE=$?
+
+if [ $COMPLIANCE_EXIT_CODE -eq 0 ]; then
+    echo "[COMPLIANCE] ✅ All 8 acceptance criteria PASSED"
+else
+    echo "[COMPLIANCE] ❌ Compliance tests FAILED (exit code: $COMPLIANCE_EXIT_CODE)"
+    echo "[COMPLIANCE] See logs: $ROOT_LOG_DIR/simulation/compliance_race_test.log"
+    # Log compliance failure but continue with AUTO_TEST if enabled
+fi
 
 # Auto-test flow: health check → mission start → motor validation
 if [ -n "$AUTO_TEST_DURATION" ]; then

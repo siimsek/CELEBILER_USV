@@ -9,11 +9,14 @@ import sys
 
 PROJ = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 MISSION = os.path.join(PROJ, "sim/configs/mission_parkour_all.json")
-
-# SDF ile ayni metrik (water_world.sdf waypoint_gn1..5 + usv_main varsayilan sim gorevi)
-P1 = [(0.0, 3.2), (-2.7, 7.0), (2.7, 9.4), (-2.5, 11.5), (0.0, 12.3)]
-P2 = [(0.0, 16.2), (1.0, 19.4), (-1.0, 22.6), (0.0, 26.2)]
-P3 = [(-3.0, 29.8)]
+POINTS = [
+    (2.5, 3.5),
+    (-2.5, 7.0),
+    (2.5, 10.5),
+    (0.0, 14.0),
+    (0.0, 27.0),
+    (-3.0, 29.8),
+]
 
 
 def load_base():
@@ -51,30 +54,27 @@ def main() -> int:
     ok = True
     eps = 0.03
 
-    for name, sdf_pts, key in (
-        ("P1", P1, "parkur1"),
-        ("P2", P2, "parkur2"),
-        ("P3", P3, "parkur3"),
-    ):
-        wps = m.get(key) or []
-        if len(wps) != len(sdf_pts):
-            print(f"[FAIL] {name}: waypoint sayisi {len(wps)} != SDF {len(sdf_pts)}")
+    if not isinstance(m, list):
+        print("[FAIL] mission JSON must be a flat array")
+        return 1
+    if len(m) != len(POINTS):
+        print(f"[FAIL] mission waypoint sayisi {len(m)} != beklenen {len(POINTS)}")
+        return 1
+
+    for i, ((wx, wy), wp) in enumerate(zip(POINTS, m)):
+        g = xy_to_gps(base_lat, base_lon, wx, wy)
+        if g[0] != wp[0] or g[1] != wp[1]:
+            print(f"[FAIL] wp{i+1}: xy_to_gps({wx},{wy})={g} mission={wp}")
             ok = False
-            continue
-        for i, ((wx, wy), wp) in enumerate(zip(sdf_pts, wps)):
-            g = xy_to_gps(base_lat, base_lon, wx, wy)
-            if g[0] != wp[0] or g[1] != wp[1]:
-                print(f"[FAIL] {name} wp{i+1}: xy_to_gps({wx},{wy})={g} mission={wp}")
-                ok = False
-            ix, iy = gps_to_xy(base_lat, base_lon, wp[0], wp[1])
-            if math.hypot(ix - wx, iy - wy) > eps:
-                print(f"[FAIL] {name} wp{i+1}: GPS ters {ix:.4f},{iy:.4f} beklenen {wx},{wy}")
-                ok = False
+        ix, iy = gps_to_xy(base_lat, base_lon, wp[0], wp[1])
+        if math.hypot(ix - wx, iy - wy) > eps:
+            print(f"[FAIL] wp{i+1}: GPS ters {ix:.4f},{iy:.4f} beklenen {wx},{wy}")
+            ok = False
 
     if ok:
         print(f"[OK] mission <-> SDF metrik uyumu: {MISSION}")
         print(f"     SIM_HOME base: {base_lat}, {base_lon}")
-        print("     P1: genis S-egrisi (5 GN), P2/P3 world ile hizali.")
+        print("     Flat waypoint list SDF metriği ile hizali.")
     return 0 if ok else 1
 
 
