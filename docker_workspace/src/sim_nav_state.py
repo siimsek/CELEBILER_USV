@@ -42,9 +42,35 @@ def parse_sim_home(raw: str | None = None) -> tuple[float, float, float, float]:
 def local_xy_to_global(home_lat: float, home_lon: float, pos_x: float, pos_y: float) -> tuple[float, float]:
     cos_home = math.cos(math.radians(home_lat))
     meters_to_lon = 1.0 / (111320.0 * cos_home) if abs(cos_home) > 1e-6 else 1.0 / 111320.0
-    lat = home_lat + (pos_y / 111320.0)
-    lon = home_lon + (pos_x * meters_to_lon)
+    lat = home_lat + (pos_x / 111320.0)
+    lon = home_lon + (-pos_y * meters_to_lon)
     return lat, lon
+
+
+def heading_rad_to_nav_deg(heading_rad: float) -> float:
+    """
+    Convert Gazebo/bridge body yaw (heading_rad) to compass-style [0, 360) degrees.
+    Must match sitl_gazebo_bridge + load_sim_nav_state so usv_main and telemetry agree.
+    """
+    return (-math.degrees(float(heading_rad)) + 360.0) % 360.0
+
+
+def mavlink_heading_cdeg_valid(hdg_cdeg: float | int, *, trust_zero: bool = True) -> bool:
+    """
+    GLOBAL_POSITION_INT.hdg is centi-degrees; 65535 = unknown (MAVLink).
+    SITL sometimes sends 0 cdeg when heading is not yet valid — treat as unknown when trust_zero=False.
+    """
+    try:
+        h = float(hdg_cdeg)
+    except (TypeError, ValueError):
+        return False
+    if math.isnan(h) or math.isinf(h):
+        return False
+    if h < 0.0 or h >= 36000.0:
+        return False
+    if not trust_zero and h < 0.5:
+        return False
+    return True
 
 
 def _base_result(path: str) -> Dict[str, Any]:
@@ -105,7 +131,7 @@ def load_sim_nav_state(
 
     home_lat, home_lon, _, _ = parse_sim_home()
     lat, lon = local_xy_to_global(home_lat, home_lon, pos_x, pos_y)
-    heading_deg = (math.degrees(heading_rad) + 360.0) % 360.0
+    heading_deg = heading_rad_to_nav_deg(heading_rad)
 
     position_valid = (
         -90.0 <= lat <= 90.0

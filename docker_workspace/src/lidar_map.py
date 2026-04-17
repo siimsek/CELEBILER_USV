@@ -2,7 +2,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, HistoryPolicy
-from runtime_debug_log import log_jsonl, setup_component_logger
+from runtime_debug_log import log_jsonl, redirect_std_streams, setup_component_logger
 import cv2
 import numpy as np
 import math
@@ -10,11 +10,15 @@ import threading
 import time
 import os
 import sys
+import json
+from pathlib import Path
 from flask import Flask, Response
 import logging
-from compliance_profile import USV_MODE, USV_MODE_RACE
+from compliance_profile import USV_MODE, USV_MODE_RACE, CONTROL_DIR
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR) # Gereksiz logları kapat
+_lidar_dbg = setup_component_logger("lidar_map")
+redirect_std_streams(_lidar_dbg)
 
 # --- YARIŞMA MODU GUARD (IDA 3.7 - görüntü aktarımı yasak) ---
 if USV_MODE == USV_MODE_RACE:
@@ -25,7 +29,63 @@ if USV_MODE == USV_MODE_RACE:
 WEB_PORT = 5001
 MAP_SIZE = 600       # 600x600 piksel harita
 MAX_RANGE_M = 10.0   # Haritanın kenarı kaç metre olsun? (Zoom)
-SCALE = (MAP_SIZE // 2) / MAX_RANGE_M 
+SCALE = (MAP_SIZE // 2) / MAX_RANGE_M
+INSET_SIZE = 200
+INSET_SCALE = (INSET_SIZE // 2 - 10) / MAX_RANGE_M
+
+
+def _read_vehicle_heading_rad():
+    """Gazebo/SITL köprüsü vehicle_position.json — kuzey-yukarı alt harita için."""
+    try:
+        p = Path(CONTROL_DIR) / "vehicle_position.json"
+        if not p.is_file():
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            j = json.load(f)
+        hr = j.get("heading_rad")
+        if hr is None:
+            return None
+        return float(hr)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def build_north_up_inset(msg: LaserScan, heading_rad: float) -> np.ndarray:
+    """Lidar gövde çerçevesinden sabit dünya (kuzey yukarı) mini harita."""
+    img = np.zeros((INSET_SIZE, INSET_SIZE, 3), dtype=np.uint8)
+    cx = INSET_SIZE // 2
+    cy = INSET_SIZE // 2
+    c = math.cos(float(heading_rad))
+    s = math.sin(float(heading_rad))
+    ranges = np.array(msg.ranges, dtype=np.float64)
+    valid = (ranges > 0.1) & (ranges < MAX_RANGE_M) & np.isfinite(ranges)
+    if np.any(valid):
+        idx = np.flatnonzero(valid)
+        r = ranges[idx]
+        angles = float(msg.angle_min) + idx.astype(np.float64) * float(msg.angle_increment)
+        xb = r * np.cos(angles)
+        yb = r * np.sin(angles)
+        xw = xb * c - yb * s
+        yw = xb * s + yb * c
+        px = (cx - (yw * INSET_SCALE)).astype(np.int32)
+        py = (cy - (xw * INSET_SCALE)).astype(np.int32)
+        m = (px >= 0) & (px < INSET_SIZE) & (py >= 0) & (py < INSET_SIZE)
+        px = px[m]
+        py = py[m]
+        img[py, px] = (210, 230, 255)
+    cv2.arrowedLine(img, (cx, cy + 5), (cx, cy - 14), (0, 255, 0), 2)
+    cv2.circle(img, (cx, cy), 4, (0, 100, 255), -1)
+    cv2.putText(img, "N", (cx - 6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 220, 255), 2)
+    cv2.putText(
+        img,
+        "kuzey",
+        (6, INSET_SIZE - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.38,
+        (160, 200, 220),
+        1,
+    )
+    return img
 
 # Flask Sunucusu
 app = Flask(__name__)
@@ -34,7 +94,6 @@ cv2.putText(output_frame, "MAP LOADING...", (180, 300), cv2.FONT_HERSHEY_SIMPLEX
 lock = threading.Lock()
 SIMULATION_MODE = False
 
-_lidar_dbg = setup_component_logger("lidar_map")
 _lidar_dbg.info(
     "lidar_map module WEB_PORT=%s LOG_DIR=%s",
     WEB_PORT,
@@ -47,12 +106,11 @@ class LidarMapper(Node):
         self._scan_cb_n = 0
         _lidar_dbg.info("LidarMapper node init /scan subscriber")
         
-        # CRITICAL FIX: ros_gz_bridge publishes /scan with BEST_EFFORT + KEEP_LAST=10
-        # Using SENSOR_DATA causes QoS deadlock; must match publisher's policy
+        # BEST_EFFORT + depth=1: guncel tarama (derin kuyruk haritada/eski usv_main ile uyumsuzluk)
         lidar_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10
+            depth=1,
         )
         
         self.subscription = self.create_subscription(
@@ -145,6 +203,48 @@ class LidarMapper(Node):
         # Bilgi
         cv2.putText(img, f"LIVE LIDAR | PTS: {len(ranges)}", (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(
+            img,
+            "burun yukari (lidar govde)",
+            (10, MAP_SIZE - 14),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (140, 200, 140),
+            1,
+        )
+
+        hdg = _read_vehicle_heading_rad()
+        if hdg is not None:
+            inset = build_north_up_inset(msg, hdg)
+            x0 = MAP_SIZE - INSET_SIZE - 10
+            y0 = 10
+            img[y0 : y0 + INSET_SIZE, x0 : x0 + INSET_SIZE] = inset
+            cv2.rectangle(
+                img,
+                (x0 - 1, y0 - 1),
+                (x0 + INSET_SIZE, y0 + INSET_SIZE),
+                (0, 200, 255),
+                1,
+            )
+            cv2.putText(
+                img,
+                f"hdg {math.degrees(hdg):.0f}deg",
+                (x0, y0 + INSET_SIZE + 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                (0, 220, 255),
+                1,
+            )
+        else:
+            cv2.putText(
+                img,
+                "heading yok",
+                (MAP_SIZE - 120, MAP_SIZE - 14),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (80, 80, 120),
+                1,
+            )
 
         with lock:
             output_frame = img

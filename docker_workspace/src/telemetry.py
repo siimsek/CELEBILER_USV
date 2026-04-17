@@ -38,9 +38,10 @@ from mission_config import (
     get_mission_split_profile,
     load_target_state,
     split_mission_waypoints,
+    split_nav_engage,
     validate_coordinate_mission,
 )
-from sim_nav_state import load_sim_nav_state
+from sim_nav_state import load_sim_nav_state, mavlink_heading_cdeg_valid
 
 print = make_console_printer("TELEM")
 
@@ -53,9 +54,15 @@ CONTROL_DIR = os.environ.get("CONTROL_DIR", DEFAULT_CONTROL_DIR)
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(CONTROL_DIR, exist_ok=True)
 
-from runtime_debug_log import install_module_function_tracing, log_jsonl, setup_component_logger
+from runtime_debug_log import (
+    install_module_function_tracing,
+    log_jsonl,
+    redirect_std_streams,
+    setup_component_logger,
+)
 
 _telem_dbg = setup_component_logger("telemetry")
+redirect_std_streams(_telem_dbg)
 _telem_dbg.info(
     "telemetry module load LOG_DIR=%s USV_MODE=%s CONTROL_DIR=%s",
     LOG_DIR,
@@ -120,21 +127,25 @@ EVENT_LOCK = threading.Lock()
 _sim_ld = os.environ.get("SIM_LOG_DIR", "").strip()
 _sim_base = _sim_ld if _sim_ld else LOG_DIR
 LOG_FILE_ALLOWLIST = {
-    "telemetry.log": f"{LOG_DIR}/telemetry.log",
+    "telemetry.log": f"{LOG_DIR}/telemetry.debug.log",
     "telemetry.debug.log": f"{LOG_DIR}/telemetry.debug.log",
     "telemetry.jsonl": f"{LOG_DIR}/telemetry.jsonl",
-    "telemetry_mavlink.jsonl": f"{LOG_DIR}/telemetry_mavlink.jsonl",
+    "telemetry_mavlink.jsonl": f"{LOG_DIR}/telemetry.jsonl",
+    "telemetry_http.jsonl": f"{LOG_DIR}/telemetry.jsonl",
     "sitl.log": f"{_sim_base}/sitl.log",
     "gazebo.log": f"{_sim_base}/gazebo.log",
-    "cam.log": f"{LOG_DIR}/cam.log",
+    "cam.log": f"{LOG_DIR}/cam.debug.log",
     "cam.debug.log": f"{LOG_DIR}/cam.debug.log",
     "cam.jsonl": f"{LOG_DIR}/cam.jsonl",
-    "cam_bridge.log": f"{_sim_base}/cam_bridge.log",
-    "pose.log": f"{_sim_base}/pose.log",
+    "cam_bridge.log": f"{_sim_base}/ros_to_tcp_cam.debug.log",
+    "pose.log": f"{_sim_base}/sitl_gazebo_bridge.debug.log",
     "ros_gz.log": f"{_sim_base}/ros_gz.log",
-    "usv_main.log": f"{LOG_DIR}/usv_main.log",
+    "usv_main.log": f"{LOG_DIR}/usv_main.debug.log",
     "usv_main.debug.log": f"{LOG_DIR}/usv_main.debug.log",
     "usv_main.jsonl": f"{LOG_DIR}/usv_main.jsonl",
+    "usv_mavlink.jsonl": f"{LOG_DIR}/usv_main.jsonl",
+    "usv_collision.jsonl": f"{LOG_DIR}/usv_main.jsonl",
+    "lidar_map.log": f"{LOG_DIR}/lidar_map.debug.log",
     "lidar_map.debug.log": f"{LOG_DIR}/lidar_map.debug.log",
     "lidar_map.jsonl": f"{LOG_DIR}/lidar_map.jsonl",
     "check_stack.log": f"{_sim_base}/check_stack.log",
@@ -341,7 +352,7 @@ def _telemetry_http_after(response):
         t0 = getattr(request, "_usv_t0", None)
         dt_ms = round((time.time() - (t0 if t0 is not None else time.time())) * 1000.0, 2)
         log_jsonl(
-            "telemetry_http",
+            "telemetry",
             False,
             event="http_response",
             path=request.path,
@@ -1184,7 +1195,7 @@ class SmartTelemetry:
                             rc_logged = True
                     self._publish_link_state(force=True)  # Force write on every message
                 else:
-                    log_jsonl("telemetry_mavlink", False, event="rx_timeout", blocking_timeout_s=1.0)
+                    log_jsonl("telemetry", False, event="rx_timeout", blocking_timeout_s=1.0)
                     # KRITIK: No message received (timeout) - still write heartbeat
                     self._publish_link_state(force=True)  # Force write on timeout
             except Exception as e:
@@ -1194,7 +1205,7 @@ class SmartTelemetry:
     def _process_mavlink_msg(self, msg, rc_logged):
         """MAVLink mesajlarını işleyen yardımcı metot."""
         mtype = msg.get_type()
-        log_jsonl("telemetry_mavlink", False, event="rx", mtype=mtype)
+        log_jsonl("telemetry", False, event="rx", mtype=mtype)
 
         with self.lock:
             telemetry_data["Timestamp"] = self._csv_timestamp()
@@ -1220,8 +1231,15 @@ class SmartTelemetry:
                 elif self.last_gps_fix_type < GPS_MIN_FIX_TYPE and os.environ.get("USV_SIM") != "1":
                     telemetry_data['Lat'] = None
                     telemetry_data['Lon'] = None
+                sim_heading_authority = (
+                    os.environ.get("USV_SIM") == "1"
+                    and bool(load_sim_nav_state(control_dir=CONTROL_DIR).get("valid"))
+                )
+                trust_zero_hdg = os.environ.get("USV_SIM") != "1"
                 raw_heading = float(getattr(msg, 'hdg', 65535) or 65535)
-                if 0.0 <= raw_heading <= 36000.0:
+                if (not sim_heading_authority) and mavlink_heading_cdeg_valid(
+                    raw_heading, trust_zero=trust_zero_hdg
+                ):
                     telemetry_data['Heading'] = raw_heading / 100.0
                 # Manuel modda yön setpoint = mevcut yön; AUTO/GUIDED'da NAV_CONTROLLER_OUTPUT kullanılır
                 mode_str = telemetry_data.get('Mode', '')
@@ -2000,6 +2018,7 @@ CONTROLLER_PAGE = """
                         <div class="item"><div class="label">Speed</div><div class="value" id="speed">--</div></div>
                         <div class="item"><div class="label">Battery</div><div class="value" id="battery">--</div></div>
                         <div class="item"><div class="label">Link Age</div><div class="value" id="linkAge">--</div></div>
+                        <div class="item"><div class="label">Lidar L / C / R (m)</div><div class="value" id="lidarLcr">--</div></div>
                     </div>
                 </div>
             </div>
@@ -2062,13 +2081,22 @@ CONTROLLER_PAGE = """
     </div>
 
     <script>
-        const stateMap = {0: 'IDLE', 1: 'P1', 2: 'P2', 3: 'P3', 4: 'DONE', 5: 'HOLD'};
+        const stateMap = {0: 'BEKLEME', 1: 'NAV', 2: 'ENGAGE', 4: 'TAMAMLANDI', 5: 'HOLD'};
         let latestEventId = 0;
         let logFilesLoaded = false;
 
         function fmtNum(v, d=3) {
             if (v === null || v === undefined || Number.isNaN(Number(v))) return '--';
             return Number(v).toFixed(d);
+        }
+
+        /** Lidar sector meters: avoid fake "0" from rounding; show open range as "off". */
+        function fmtLidarM(v) {
+            if (v === null || v === undefined || Number.isNaN(Number(v))) return '--';
+            const x = Number(v);
+            if (x >= 90) return 'off';
+            if (x < 0.2) return '<0.20';
+            return x.toFixed(2);
         }
 
         function text(id, value) {
@@ -2221,6 +2249,7 @@ CONTROLLER_PAGE = """
             text('battery', `${fmtNum(data.Battery, 2)} V`);
             text('linkAge', `${fmtNum(data.link_heartbeat_age_s, 2)} s`);
             text('positionAge', `state age ${fmtNum(data.state_age_s, 2)} s`);
+            text('lidarLcr', `${fmtLidarM(data.lidar_left_m)} / ${fmtLidarM(data.lidar_center_m)} / ${fmtLidarM(data.lidar_right_m)}`);
             text('manualLock', data.manual_lock_reason || '--');
             text('commandLock', `command_lock=${Boolean(data.command_lock)}`);
             text('rcSummary', `${data.RC1 ?? '--'} / ${data.RC3 ?? '--'}`);
@@ -2455,12 +2484,40 @@ def get_data():
     out['lidar_ready'] = state.get('lidar_ready', False)
     out['nav_position_source'] = state.get('nav_position_source', '--')
     out['nav_heading_source'] = state.get('nav_heading_source', '--')
+    out['nav_solution_source'] = state.get('nav_solution_source', '--')
     out['nav_fix_valid'] = bool(state.get('nav_fix_valid', False))
     out['nav_state_age_s'] = state.get('nav_state_age_s')
     out['nav_target_bearing_deg'] = state.get('nav_target_bearing_deg')
+    out['nav_target_distance_m'] = state.get('nav_target_distance_m')
+    out['nav_heading_error_deg'] = state.get('nav_heading_error_deg')
     out['nav_source_detail'] = state.get('nav_source_detail', '--')
+    out['nav_leg_start_lat'] = state.get('nav_leg_start_lat')
+    out['nav_leg_start_lon'] = state.get('nav_leg_start_lon')
+    out['closest_waypoint_distance_m'] = state.get('closest_waypoint_distance_m')
+    out['nav_arrival_phase'] = state.get('nav_arrival_phase', '--')
+    out['avoidance_active'] = bool(state.get('avoidance_active', False))
+    out['avoidance_source'] = state.get('avoidance_source', '--')
+    out['escape_side'] = state.get('escape_side', '--')
+    out['lidar_sector_ages'] = state.get('lidar_sector_ages', {})
+    out['lidar_left_m'] = state.get('lidar_left_m')
+    out['lidar_center_m'] = state.get('lidar_center_m')
+    out['lidar_right_m'] = state.get('lidar_right_m')
+    out['min_obstacle_m'] = state.get('min_obstacle_m')
     out['active_parkur'] = state.get('active_parkur', '--')
     out['active_waypoint_index'] = state.get('active_waypoint_index', -1)
+    out['guidance_detail_source'] = state.get('guidance_detail_source', '--')
+    out['guidance_mode'] = state.get('guidance_mode', '--')
+    out['guidance_reason'] = state.get('guidance_reason', '--')
+    out['avoidance_bias_deg'] = state.get('avoidance_bias_deg', 0.0)
+    out['cross_track_error_m'] = state.get('cross_track_error_m', 0.0)
+    out['nominal_heading_deg'] = state.get('nominal_heading_deg', 0.0)
+    out['gate_assist_bias_deg'] = state.get('gate_assist_bias_deg', 0.0)
+    out['progress_along_leg_m'] = state.get('progress_along_leg_m', 0.0)
+    out['waypoint_passed_gate'] = bool(state.get('waypoint_passed_gate', False))
+    out['waypoint_accept_reason'] = state.get('waypoint_accept_reason', '--')
+    out['motor_limit_reason'] = state.get('motor_limit_reason', '--')
+    camera_pipeline = state.get('camera_pipeline', {})
+    out['camera_pipeline'] = camera_pipeline if isinstance(camera_pipeline, dict) else {}
     out['target_color'] = target_state.get('target_color', state.get('target_color', '--'))
     out['mission_input_format'] = state.get('mission_input_format', MISSION_INPUT_FORMAT)
     out['mission_split_profile'] = state.get('mission_split_profile', {})
@@ -2602,15 +2659,42 @@ def get_data():
             'camera_ready': out['camera_ready'],
             'lidar_ready': out['lidar_ready'],
             'guidance_source': out['guidance_source'],
+            'guidance_detail_source': out['guidance_detail_source'],
+            'guidance_mode': out['guidance_mode'],
+            'guidance_reason': out['guidance_reason'],
+            'avoidance_bias_deg': out['avoidance_bias_deg'],
+            'cross_track_error_m': out['cross_track_error_m'],
+            'nominal_heading_deg': out['nominal_heading_deg'],
+            'gate_assist_bias_deg': out['gate_assist_bias_deg'],
+            'progress_along_leg_m': out['progress_along_leg_m'],
+            'waypoint_passed_gate': out['waypoint_passed_gate'],
+            'waypoint_accept_reason': out['waypoint_accept_reason'],
+            'motor_limit_reason': out['motor_limit_reason'],
             'nav_position_source': out['nav_position_source'],
             'nav_heading_source': out['nav_heading_source'],
+            'nav_solution_source': out['nav_solution_source'],
             'nav_fix_valid': out['nav_fix_valid'],
             'nav_state_age_s': out['nav_state_age_s'],
             'nav_target_bearing_deg': out['nav_target_bearing_deg'],
+            'nav_target_distance_m': out['nav_target_distance_m'],
+            'nav_heading_error_deg': out['nav_heading_error_deg'],
             'nav_source_detail': out['nav_source_detail'],
+            'nav_leg_start_lat': out['nav_leg_start_lat'],
+            'nav_leg_start_lon': out['nav_leg_start_lon'],
+            'closest_waypoint_distance_m': out['closest_waypoint_distance_m'],
+            'nav_arrival_phase': out['nav_arrival_phase'],
+            'avoidance_active': out['avoidance_active'],
+            'avoidance_source': out['avoidance_source'],
+            'escape_side': out['escape_side'],
+            'lidar_sector_ages': out['lidar_sector_ages'],
+            'lidar_left_m': state.get('lidar_left_m'),
+            'lidar_center_m': state.get('lidar_center_m'),
+            'lidar_right_m': state.get('lidar_right_m'),
+            'min_obstacle_m': state.get('min_obstacle_m'),
             'heartbeat_age_s': out['heartbeat_age_s'],
             'link_heartbeat_age_s': out['link_heartbeat_age_s'],
             'state_age_s': out['state_age_s'],
+            'camera_pipeline': out['camera_pipeline'],
             'sensor_fusion': fusion_summary,
             'dynamic_speed_profile': dyn_speed_summary,
             'wind_assist': wind_assist_summary,
@@ -2658,7 +2742,7 @@ def log_files():
 
 @app.route('/api/log_tail')
 def log_tail():
-    name = request.args.get('name', 'telemetry.log')
+    name = request.args.get('name', 'telemetry.debug.log')
     lines = request.args.get('lines', 120)
     safe_name, path = _read_allowed_log(name)
     if not path:

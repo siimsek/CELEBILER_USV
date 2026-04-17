@@ -40,28 +40,65 @@ echo "[SIM] Gazebo resource paths configured"
 
 # CLI argument parsing
 AUTO_TEST_DURATION=""
+MISSION_FILE_ARG=""
+USV_MODE="${USV_MODE:-test}"
+STRICT_COMPLIANCE="${STRICT_COMPLIANCE:-0}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --auto-test)
             AUTO_TEST_DURATION="${2:-60}"
             shift 2 || true
             ;;
+        --strict-compliance|--certify)
+            STRICT_COMPLIANCE=1
+            shift
+            ;;
+        mode=*)
+            USV_MODE="${1#mode=}"
+            case "$USV_MODE" in
+                race)
+                    STRICT_COMPLIANCE=1
+                    ;;
+                test)
+                    ;;
+                *)
+                    echo "[ERR] Gecersiz mode argumani: $1 (beklenen: mode=test | mode=race)"
+                    exit 2
+                    ;;
+            esac
+            shift
+            ;;
+        race|test)
+            USV_MODE="$1"
+            if [ "$USV_MODE" = "race" ]; then
+                STRICT_COMPLIANCE=1
+            fi
+            shift
+            ;;
         *)
-            if [ -z "$MISSION_FILE" ] && [ ! -f "$1" ] 2>/dev/null; then
-                # Treat as mission file path
-                MISSION_FILE="$1"
+            if [ -z "$MISSION_FILE_ARG" ]; then
+                # Treat first positional arg as mission file path
+                MISSION_FILE_ARG="$1"
+            else
+                echo "[WARN] Ek arguman yoksayildi: $1"
             fi
             shift
             ;;
     esac
 done
 
-if [ -n "${MISSION_FILE:-}" ] && [[ "$MISSION_FILE" != /* ]]; then
-    export MISSION_FILE="$PROJ_ROOT/$MISSION_FILE"
+if [ -n "$MISSION_FILE_ARG" ]; then
+    if [[ "$MISSION_FILE_ARG" != /* ]]; then
+        export MISSION_FILE="$PROJ_ROOT/$MISSION_FILE_ARG"
+    else
+        export MISSION_FILE="$MISSION_FILE_ARG"
+    fi
 fi
 
 export PROJ_ROOT
 export USV_SIM=1
+export USV_MODE
+export STRICT_COMPLIANCE
 export PYTHONUNBUFFERED=1
 export PATH="$PATH:$HOME/ardupilot/Tools/autotest"
 
@@ -364,32 +401,32 @@ SITL_PID=$!
 register_pid "$SITL_PID"
 sleep 3
 
-echo "[SIM] Starting SITL↔Gazebo bridge (tek MAVLink 14551: pose + motor + JSON)..."
-python3 sim/bridges/sitl_gazebo_bridge.py > "$SIM_LOG_DIR/pose.log" 2>&1 &
+echo "[SIM] Starting SITL↔Gazebo bridge (human log: $SIM_LOG_DIR/sitl_gazebo_bridge.debug.log)..."
+python3 sim/bridges/sitl_gazebo_bridge.py &
 POSE_BRIDGE_PID=$!
 register_pid "$POSE_BRIDGE_PID"
 sleep 5
 
-echo "[SIM] Starting Camera TCP bridge (logging to $SIM_LOG_DIR/cam_bridge.log)..."
-python3 sim/bridges/ros_to_tcp_cam.py > "$SIM_LOG_DIR/cam_bridge.log" 2>&1 &
+echo "[SIM] Starting Camera TCP bridge (human log: $SIM_LOG_DIR/ros_to_tcp_cam.debug.log)..."
+python3 sim/bridges/ros_to_tcp_cam.py &
 export LOG_DIR  # Ensure application logs route to system directory
 CAM_BRIDGE_PID=$!
 register_pid "$CAM_BRIDGE_PID"
 sleep 2
 
 echo "[SIM] Camera target class: $TARGET_CLASS"
-echo "[SIM] Starting camera processor (logging to $LOG_DIR/cam.log)..."
+echo "[SIM] Starting camera processor (human log: $LOG_DIR/cam.debug.log)..."
 (
     cd docker_workspace/src
-    LOG_DIR="$LOG_DIR" python3 cam.py > "$LOG_DIR/cam.log" 2>&1 &
+    LOG_DIR="$LOG_DIR" python3 cam.py &
     echo $! > "$CAM_PID_FILE"
 )
 sleep 2
 
-echo "[SIM] Starting telemetry dashboard (logging to $LOG_DIR/telemetry.log)..."
+echo "[SIM] Starting telemetry dashboard (human log: $LOG_DIR/telemetry.debug.log)..."
 (
     cd docker_workspace/src
-    LOG_DIR="$LOG_DIR" python3 telemetry.py > "$LOG_DIR/telemetry.log" 2>&1 &
+    LOG_DIR="$LOG_DIR" python3 telemetry.py &
     echo $! > "$TELEMETRY_PID_FILE"
 )
 sleep 2
@@ -399,6 +436,7 @@ echo "[SIM] Stack temiz baslatildi."
 echo "[SIM] SIM Loglar: $SIM_LOG_DIR (Gazebo, SITL, ROS2, bridges)"
 echo "[SIM] APP Loglar: $LOG_DIR (cam, telemetry, usv_main, CSV, video)"
 echo "[SIM] Kontrol dosyalari: $SIM_CONTROL_DIR"
+echo "[SIM] Mod: USV_MODE=$USV_MODE strict_compliance=$STRICT_COMPLIANCE"
 echo "[SIM] Varsayilan sim gorevi: $MISSION_FILE"
 echo "[SIM] Alternatif gorev: ./sim/bin/run_sim_stack.sh <mission_json_path>"
 echo "[SIM] Telemetry UI: http://127.0.0.1:8080"
@@ -407,11 +445,13 @@ echo "[SIM] Gorev otomatik baslamaz; web controller Start komutunu bekler."
 echo "[SIM] Gorevi baslat: dashboard Start veya POST /api/start_mission"
 echo "[SIM] Kapatmak: CTRL+C veya ESC (bu terminal odaktayken)"
 echo "[SIM] Simulation logs (debug):"
-echo "  $SIM_LOG_DIR/gazebo.log sitl.log pose.log cam_bridge.log ros_gz.log"
-echo "  $SIM_LOG_DIR/*debug.log *.trace.log  $SIM_LOG_DIR/check_stack.log  $SIM_LOG_DIR/ros2/*.log"
+echo "  $SIM_LOG_DIR/gazebo.log sitl.log ros_gz.log"
+echo "  $SIM_LOG_DIR/sitl_gazebo_bridge.debug.log ros_to_tcp_cam.debug.log *.trace.log"
+echo "  $SIM_LOG_DIR/sitl_gazebo_bridge.jsonl ros_to_tcp_cam.jsonl  $SIM_LOG_DIR/check_stack.log  $SIM_LOG_DIR/ros2/*.log"
 echo "[SIM] Application logs (debug):"
-echo "  $LOG_DIR/cam.log telemetry.log usv_main.log lidar_map.log telemetri_verisi.csv"
-echo "  $LOG_DIR/*.debug.log   $LOG_DIR/video/*.mp4"
+echo "  $LOG_DIR/cam.debug.log telemetry.debug.log usv_main.debug.log lidar_map.debug.log"
+echo "  $LOG_DIR/cam.jsonl telemetry.jsonl usv_main.jsonl lidar_map.jsonl telemetri_verisi.csv"
+echo "  $LOG_DIR/video/*.mp4"
 echo "[SIM] Tee: $ROOT_LOG_DIR/terminal.log"
 echo "============================================================"
 sleep 1
@@ -419,13 +459,13 @@ sleep 1
 cd docker_workspace/src
 # Start lidar_map service (port 5001)
 echo "[SIM] Starting lidar_map service (port 5001)..."
-LOG_DIR="$LOG_DIR" python3 lidar_map.py > "$LOG_DIR/lidar_map.log" 2>&1 &
+LOG_DIR="$LOG_DIR" python3 lidar_map.py &
 LIDAR_MAP_PID=$!
 register_pid "$LIDAR_MAP_PID"
 sleep 1
 # stdin ayrilir: ESC bu kabukta yakalanir, usv_main klavye beklemez
 # Export critical env vars: CONTROL_DIR for mission state/flags, USV_MODE for startup logic
-LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" MISSION_FILE="${MISSION_FILE}" python3 usv_main.py </dev/null > "$LOG_DIR/usv_main.log" 2>&1 &
+LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" MISSION_FILE="${MISSION_FILE}" python3 usv_main.py </dev/null &
 USV_PID=$!
 register_pid "$USV_PID"
 
@@ -441,16 +481,23 @@ echo "  ROS_LOG_DIR=$ROS_LOG_DIR"
 wait_for_startup_readiness || true
 
 # COMPLIANCE TESTING: Run race-level compliance checks after stack startup
-echo "[COMPLIANCE] Running race-level compliance tests..."
-python3 "$PROJ_ROOT/host_scripts/check_compliance_race.py" > "$ROOT_LOG_DIR/simulation/compliance_race_test.log" 2>&1
-COMPLIANCE_EXIT_CODE=$?
+echo "[COMPLIANCE] Running race-level compliance tests (strict=$STRICT_COMPLIANCE)..."
+if python3 "$PROJ_ROOT/host_scripts/check_compliance_race.py" > "$ROOT_LOG_DIR/simulation/compliance_race_test.log" 2>&1; then
+    COMPLIANCE_EXIT_CODE=0
+else
+    COMPLIANCE_EXIT_CODE=$?
+fi
 
 if [ $COMPLIANCE_EXIT_CODE -eq 0 ]; then
     echo "[COMPLIANCE] ✅ All 8 acceptance criteria PASSED"
 else
     echo "[COMPLIANCE] ❌ Compliance tests FAILED (exit code: $COMPLIANCE_EXIT_CODE)"
     echo "[COMPLIANCE] See logs: $ROOT_LOG_DIR/simulation/compliance_race_test.log"
-    # Log compliance failure but continue with AUTO_TEST if enabled
+    if [ "$STRICT_COMPLIANCE" = "1" ]; then
+        echo "[COMPLIANCE] Strict compliance aktif; simulasyon stack kapatilacak."
+        exit "$COMPLIANCE_EXIT_CODE"
+    fi
+    echo "[COMPLIANCE] Non-strict debug oturumu devam ediyor."
 fi
 
 # Auto-test flow: health check → mission start → motor validation

@@ -34,6 +34,8 @@ _TRACE_INCLUDE_PRIVATE_DEFAULT = os.environ.get("USV_TRACE_INCLUDE_PRIVATE", "1"
 _jsonl_loggers: dict[str, logging.Logger] = {}
 _jsonl_lock = threading.Lock()
 _trace_call_counter = count(1)
+_redirected_loggers: set[str] = set()
+_redirect_lock = threading.Lock()
 
 
 def _project_root() -> Path:
@@ -259,6 +261,63 @@ def log_debug_every(
     counter[0] = counter[0] + 1
     if counter[0] <= 3 or counter[0] % every == 0:
         logger.debug(fmt, *args)
+
+
+class _LoggerWriter:
+    def __init__(self, logger: logging.Logger, level: int, label: str) -> None:
+        self._logger = logger
+        self._level = level
+        self._label = label
+        self._buffer = ""
+        self.encoding = "utf-8"
+
+    def write(self, data: Any) -> int:
+        if data is None:
+            return 0
+        text = str(data)
+        if not text:
+            return 0
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit(line)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._emit(self._buffer)
+            self._buffer = ""
+
+    def isatty(self) -> bool:
+        return False
+
+    def fileno(self) -> int:
+        raise OSError("logger-backed stream has no file descriptor")
+
+    def _emit(self, line: str) -> None:
+        text = str(line).rstrip()
+        if not text:
+            return
+        self._logger.log(self._level, "[%s] %s", self._label, text)
+
+
+def redirect_std_streams(
+    logger: logging.Logger,
+    *,
+    stdout_level: int = logging.INFO,
+    stderr_level: int = logging.ERROR,
+) -> bool:
+    """
+    Yalnizca bir kez stdout/stderr -> debug.log yonlendirmesi kurar.
+    Boylece ayri process .log dosyasi yerine tek {component}.debug.log yeterli olur.
+    """
+    with _redirect_lock:
+        if logger.name in _redirected_loggers:
+            return False
+        sys.stdout = _LoggerWriter(logger, stdout_level, "STDOUT")
+        sys.stderr = _LoggerWriter(logger, stderr_level, "STDERR")
+        _redirected_loggers.add(logger.name)
+        return True
 
 
 def trace_function_calls(

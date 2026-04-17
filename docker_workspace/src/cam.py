@@ -29,6 +29,12 @@ from compliance_profile import (
     USV_MODE_RACE,
 )
 from mission_config import TARGET_STATE_FILE, load_target_state
+from runtime_debug_log import (
+    install_module_function_tracing,
+    log_jsonl,
+    redirect_std_streams,
+    setup_component_logger,
+)
 
 def clamp(value, min_val, max_val):
     return max(min_val, min(value, max_val))
@@ -37,17 +43,17 @@ print = make_console_printer("CAM")
 
 log = logging.getLogger("werkzeug")
 log.setLevel(logging.ERROR)
+_cam_file_log = setup_component_logger("cam")
+redirect_std_streams(_cam_file_log)
 
 RACE_MODE = USV_MODE == USV_MODE_RACE
 if RACE_MODE:
     print("[RACE] [cam.py] YARISMA MODU - web yayini kapali, onboard isleme aktif")
+    print("[RACE] [cam.py] Race modda sadece onboard isleme")
 
 CAM_SOURCE = os.environ.get("CAM_SOURCE", "hw")
 BEARING_HALF_DEG = 45.0 if CAM_SOURCE == "sim" else 35.0
 
-from runtime_debug_log import install_module_function_tracing, log_jsonl, setup_component_logger
-
-_cam_file_log = setup_component_logger("cam")
 _cam_file_log.info(
     "cam.py CAM_SOURCE=%s USV_MODE=%s LOG_DIR=%s",
     CAM_SOURCE,
@@ -63,6 +69,11 @@ else:
 
 PORT = 8888
 WEB_PORT = 5000
+# Default ~30 Hz processing cap; lower CAM_PROCESS_DT = lower latency, higher CPU.
+CAM_PROCESS_DT = max(0.02, float(os.environ.get("CAM_PROCESS_DT", "0.033")))
+CAM_RX_BUFFER_MAX = max(64 * 1024, int(os.environ.get("CAM_RX_BUFFER_MAX", "1048576")))
+CAM_DETECT_SCALE = float(os.environ.get("CAM_DETECT_SCALE", "0.5" if CAM_SOURCE == "sim" else "0.4"))
+CAM_DETECT_SCALE = clamp(CAM_DETECT_SCALE, 0.25, 1.0)
 CONTROL_DIR = os.environ.get("CONTROL_DIR", DEFAULT_CONTROL_DIR)
 STATUS_FILE = f"{CONTROL_DIR}/camera_status.json"
 MISSION_STATE_FILE = f"{CONTROL_DIR}/mission_state.json"
@@ -142,6 +153,10 @@ class VideoCamera:
         self.error_counters = {"status_write_error": 0}
         self.last_frame_ts = 0.0
         self._last_writer_frame_ts = 0.0
+        self._last_decode_ms = 0.0
+        self._last_process_ms = 0.0
+        self._last_rx_backlog_bytes = 0
+        self._dropped_frame_count = 0
         self.gate_seen_since = None
         self.last_gate_seen_ts = 0.0
         self.last_gate_stable = 0.0
@@ -156,10 +171,12 @@ class VideoCamera:
             "perception_policy": {
                 "gate": False,
                 "yellow_obstacle": False,
+                "orange_boundary": False,
                 "target": False,
             },
             "gate_actionable": False,
             "yellow_actionable": False,
+            "orange_actionable": False,
             "target_actionable": False,
             "gate_detected_raw": False,
             "gate_stable_s_raw": 0.0,
@@ -199,8 +216,13 @@ class VideoCamera:
         self._recording_active = False
         self._last_mission_state = {"active": False}
         self._target_state_mtime = 0.0
+        self._frame_lock = threading.Lock()
         self._process_lock = threading.Lock()
+        self._frame_seq = 0
         self._last_processed_frame_ts = 0.0
+        self._last_processed_seq = 0
+        self._last_output_jpeg_ts = 0.0
+        self._last_writer_seq = 0
         self._last_processed_frame = None
         self._last_processed_jpeg = b""
         
@@ -271,10 +293,12 @@ class VideoCamera:
 
     def _default_perception_policy(self, parkur_label):
         parkur = str(parkur_label or "IDLE").upper()
+        # NAV: tüm gezinti WP'leri; sarı engel (SARI_ENGEL) turuncu sınır (TURUNCU_SINIR) değil
         return {
-            "gate": parkur in ("P1", "P2"),
-            "yellow_obstacle": parkur == "P2",
-            "target": parkur == "P3",
+            "gate": parkur in ("P1", "P2", "NAV"),
+            "yellow_obstacle": parkur in ("P2", "NAV"),
+            "orange_boundary": parkur in ("P2", "NAV"),
+            "target": parkur in ("P3", "ENGAGE"),
         }
 
     def _sync_perception_context(self, mission_state):
@@ -430,45 +454,98 @@ class VideoCamera:
             threading.Thread(target=self.processing_loop, daemon=True).start()
         return self
 
+    def _publish_frame(self, image):
+        frame_ts = time.monotonic()
+        with self._frame_lock:
+            self.frame = image
+            self.last_frame_ts = frame_ts
+            self._frame_seq += 1
+            return self._frame_seq, frame_ts
+
+    def _snapshot_frame(self):
+        with self._frame_lock:
+            if self.frame is None:
+                return None, 0, 0.0
+            return self.frame.copy(), int(self._frame_seq), float(self.last_frame_ts or 0.0)
+
     def update(self):
         while not self.stopped:
+            sock = None
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, min(CAM_RX_BUFFER_MAX, 2 * 1024 * 1024))
                 sock.settimeout(5)
                 sock.connect((HOST, PORT))
-                stream = sock.makefile("rb")
                 self.connected = True
                 print("[OK] [CAM] Kamera baglandi")
 
                 stream_bytes = b""
                 while not self.stopped:
-                    data = stream.read(4096)
+                    data = sock.recv(65536)
                     if not data:
                         break
                     stream_bytes += data
-                    first = stream_bytes.find(b"\xff\xd8")
-                    last = stream_bytes.find(b"\xff\xd9")
+                    if len(stream_bytes) > CAM_RX_BUFFER_MAX:
+                        self._dropped_frame_count += 1
+                        stream_bytes = stream_bytes[-CAM_RX_BUFFER_MAX:]
+
+                    last = stream_bytes.rfind(b"\xff\xd9")
+                    if last != -1:
+                        first = stream_bytes.rfind(b"\xff\xd8", 0, last)
+                    else:
+                        first = -1
                     if first != -1 and last != -1:
                         jpg = stream_bytes[first : last + 2]
+                        discarded = stream_bytes[:first]
+                        if discarded:
+                            self._dropped_frame_count += 1
                         stream_bytes = stream_bytes[last + 2 :]
+                        self._last_rx_backlog_bytes = len(stream_bytes)
+                        decode_t0 = time.monotonic()
                         image = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                        self._last_decode_ms = (time.monotonic() - decode_t0) * 1000.0
                         if image is not None:
                             if image.shape[:2] != (720, 1280):
                                 image = cv2.resize(image, (1280, 720))
-                            self.frame = image
-                            self.last_frame_ts = time.monotonic()
+                            self._publish_frame(image)
             except Exception as exc:
                 self.connected = False
                 print(f"[WARN] [CAM] Baglanti yok: {exc}")
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
                 time.sleep(1.5)
+            finally:
+                self.connected = False
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
 
     def _write_status(self):
         try:
             self.status["error_counters"] = dict(self.error_counters)
             self.status["target_class"] = self.target_class
-            
             now = time.monotonic()
+            capture_age_s = 999.0 if self.last_frame_ts <= 0.0 else max(0.0, now - self.last_frame_ts)
+            output_age_s = 999.0 if self._last_output_jpeg_ts <= 0.0 else max(0.0, now - self._last_output_jpeg_ts)
+            self.status["pipeline"] = {
+                "decode_ms": round(float(self._last_decode_ms), 3),
+                "process_ms": round(float(self._last_process_ms), 3),
+                "rx_backlog_bytes": int(self._last_rx_backlog_bytes),
+                "dropped_frames": int(self._dropped_frame_count),
+                "process_dt_s": float(CAM_PROCESS_DT),
+                "detect_scale": float(CAM_DETECT_SCALE),
+                "capture_age_s": round(float(capture_age_s), 3),
+                "output_age_s": round(float(output_age_s), 3),
+                "frame_seq": int(self._frame_seq),
+                "processed_seq": int(self._last_processed_seq),
+            }
+
             logical_state_changed = True
             
             if self._last_written_status is not None:
@@ -483,6 +560,7 @@ class VideoCamera:
                     old.get('perception_policy') == self.status['perception_policy'] and
                     old.get('gate_actionable') == self.status['gate_actionable'] and
                     old.get('yellow_actionable') == self.status['yellow_actionable'] and
+                    old.get('orange_actionable') == self.status['orange_actionable'] and
                     old.get('target_actionable') == self.status['target_actionable'] and
                     old.get('gate_detected') == self.status['gate_detected'] and
                     old.get('gate_passed_event') == self.status['gate_passed_event'] and
@@ -491,6 +569,9 @@ class VideoCamera:
                     abs(old.get('gate_center_bearing_deg', 0) - self.status['gate_center_bearing_deg']) < 0.1 and
                     abs(old.get('yellow_obstacle_bearing_deg', 0) - self.status['yellow_obstacle_bearing_deg']) < 0.1 and
                     abs(old.get('yellow_obstacle_area_norm', 0) - self.status['yellow_obstacle_area_norm']) < 0.01 and
+                    old.get('orange_boundary_detected') == self.status['orange_boundary_detected'] and
+                    abs(old.get('orange_boundary_bearing_deg', 0) - self.status['orange_boundary_bearing_deg']) < 0.1 and
+                    abs(old.get('orange_boundary_area_norm', 0) - self.status['orange_boundary_area_norm']) < 0.01 and
                     abs(old.get('target_bearing_error_deg', 0) - self.status['target_bearing_error_deg']) < 0.1 and
                     abs(old.get('target_area_norm', 0) - self.status['target_area_norm']) < 0.01 and
                     old_adapt.get("mode") == new_adapt.get("mode") and
@@ -513,18 +594,21 @@ class VideoCamera:
             self._bump_error("status_write_error", f"[WARN] [CAM] Status yazma hatasi: {exc}")
 
     def _process_latest_frame(self):
-        frame = self.frame
-        frame_ts = float(self.last_frame_ts or 0.0)
+        frame, frame_seq, frame_ts = self._snapshot_frame()
         if frame is None or frame_ts <= 0.0:
             return None
         with self._process_lock:
-            if frame_ts <= float(self._last_processed_frame_ts or 0.0) and self._last_processed_frame is not None:
+            if frame_seq <= int(self._last_processed_seq or 0) and self._last_processed_frame is not None:
                 return self._last_processed_frame
-            processed = self.process_frame(frame.copy())
+            t0 = time.monotonic()
+            processed = self.process_frame(frame)
+            self._last_process_ms = (time.monotonic() - t0) * 1000.0
             self._last_processed_frame_ts = frame_ts
+            self._last_processed_seq = frame_seq
             self._last_processed_frame = processed
             ok, jpeg = cv2.imencode(".jpg", processed, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
             self._last_processed_jpeg = jpeg.tobytes() if ok else b""
+            self._last_output_jpeg_ts = time.monotonic()
             return processed
 
     def processing_loop(self):
@@ -532,22 +616,46 @@ class VideoCamera:
             try:
                 # Mission state'i kontrol et (recording start/stop)
                 self._check_mission_state()
-                
-                if self.frame is None:
+
+                if self._frame_seq <= 0:
                     self.status["ts_monotonic"] = round(time.monotonic(), 3)
                     self.status["frame_age_s"] = 999.0
                     self._write_status()
                 else:
                     processed = self._process_latest_frame()
-                    if processed is not None and self._recording_active and self.writer and self.last_frame_ts > self._last_writer_frame_ts:
+                    if (
+                        processed is not None
+                        and self._recording_active
+                        and self.writer
+                        and self._last_processed_seq > self._last_writer_seq
+                    ):
                         self.writer.write(processed)
-                        self._last_writer_frame_ts = self.last_frame_ts
+                        self._last_writer_frame_ts = self._last_processed_frame_ts
+                        self._last_writer_seq = self._last_processed_seq
             except Exception as exc:
                 self._warn_throttled("process_loop", f"[WARN] [CAM] Isleme dongusu hatasi: {exc}")
-            time.sleep(0.1)
+            now = time.monotonic()
+            if not hasattr(self, "_last_pipeline_jsonl_ts"):
+                self._last_pipeline_jsonl_ts = 0.0
+            if now - float(self._last_pipeline_jsonl_ts) >= 1.0:
+                self._last_pipeline_jsonl_ts = now
+                pipe = self.status.get("pipeline", {}) if isinstance(self.status, dict) else {}
+                log_jsonl(
+                    "cam",
+                    False,
+                    event="pipeline_metrics",
+                    capture_age_s=pipe.get("capture_age_s"),
+                    output_age_s=pipe.get("output_age_s"),
+                    decode_ms=pipe.get("decode_ms"),
+                    process_ms=pipe.get("process_ms"),
+                    rx_backlog_bytes=pipe.get("rx_backlog_bytes"),
+                    dropped_frames=pipe.get("dropped_frames"),
+                )
+            time.sleep(CAM_PROCESS_DT)
 
     def _extract_detections(self, frame, adapt_profile):
-        small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+        small = cv2.resize(frame, (0, 0), fx=CAM_DETECT_SCALE, fy=CAM_DETECT_SCALE)
+        scale_back = 1.0 / CAM_DETECT_SCALE
         blur_ksize = 3 if CAM_SOURCE == "sim" else 5
         hsv = cv2.cvtColor(cv2.GaussianBlur(small, (blur_ksize, blur_ksize), 0), cv2.COLOR_BGR2HSV)
         detections = []
@@ -597,7 +705,10 @@ class VideoCamera:
             for cnt in filtered_contours:
                 area = cv2.contourArea(cnt)
                 x, y, w, h = cv2.boundingRect(cnt)
-                x, y, w, h = x * 2, y * 2, w * 2, h * 2
+                x = int(round(x * scale_back))
+                y = int(round(y * scale_back))
+                w = int(round(w * scale_back))
+                h = int(round(h * scale_back))
                 detections.append(
                     {
                         "name": name,
@@ -752,6 +863,15 @@ class VideoCamera:
 
         gate_passed_event_raw = now < self.gate_passed_until
 
+        boundary_bearing_raw = 0.0
+        boundary_area_norm_raw = 0.0
+        boundary_detected_raw = False
+        if orange_sorted:
+            nearest_bo = min(orange_sorted, key=lambda d: abs(float(d["cx"]) - w * 0.5))
+            boundary_detected_raw = True
+            boundary_bearing_raw = ((nearest_bo["cx"] - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
+            boundary_area_norm_raw = clamp((nearest_bo["w"] * nearest_bo["h"]) / float(w * h), 0.0, 1.0)
+
         yellow_pool = [d for d in detections if d["name"] == "SARI_ENGEL"]
         yellow = max(yellow_pool, key=lambda d: d["area"]) if yellow_pool else None
         yellow_detected_raw = bool(yellow)
@@ -783,6 +903,7 @@ class VideoCamera:
 
         gate_actionable = bool(policy.get("gate", False))
         yellow_actionable = bool(policy.get("yellow_obstacle", False))
+        orange_boundary_actionable = bool(policy.get("orange_boundary", False))
         target_actionable = bool(policy.get("target", False))
 
         gate_detected = gate_detected_raw if gate_actionable else False
@@ -792,6 +913,9 @@ class VideoCamera:
         yellow_detected = yellow_detected_raw if yellow_actionable else False
         yellow_bearing = yellow_bearing_raw if yellow_actionable else 0.0
         yellow_area_norm = yellow_area_norm_raw if yellow_actionable else 0.0
+        boundary_detected = boundary_detected_raw if orange_boundary_actionable else False
+        boundary_bearing = boundary_bearing_raw if orange_boundary_actionable else 0.0
+        boundary_area_norm = boundary_area_norm_raw if orange_boundary_actionable else 0.0
         target_detected = target_detected_raw if target_actionable else False
         target_bearing = target_bearing_raw if target_actionable else 0.0
         target_area_norm = target_area_norm_raw if target_actionable else 0.0
@@ -824,10 +948,12 @@ class VideoCamera:
             "perception_policy": {
                 "gate": gate_actionable,
                 "yellow_obstacle": yellow_actionable,
+                "orange_boundary": orange_boundary_actionable,
                 "target": target_actionable,
             },
             "gate_actionable": gate_actionable,
             "yellow_actionable": yellow_actionable,
+            "orange_actionable": orange_boundary_actionable,
             "target_actionable": target_actionable,
             "gate_detected_raw": gate_detected_raw,
             "gate_stable_s_raw": round(self.last_gate_stable, 3),
@@ -843,6 +969,12 @@ class VideoCamera:
             "yellow_obstacle_detected": yellow_detected,
             "yellow_obstacle_bearing_deg": round(yellow_bearing, 3),
             "yellow_obstacle_area_norm": round(yellow_area_norm, 4),
+            "orange_boundary_detected_raw": boundary_detected_raw,
+            "orange_boundary_bearing_deg_raw": round(boundary_bearing_raw, 3),
+            "orange_boundary_area_norm_raw": round(boundary_area_norm_raw, 4),
+            "orange_boundary_detected": boundary_detected,
+            "orange_boundary_bearing_deg": round(boundary_bearing, 3),
+            "orange_boundary_area_norm": round(boundary_area_norm, 4),
             "target_detected_raw": target_detected_raw,
             "target_bearing_error_deg_raw": round(target_bearing_raw, 3),
             "target_area_norm_raw": round(target_area_norm_raw, 4),
@@ -884,7 +1016,11 @@ class VideoCamera:
         return frame
 
     def get_frame(self):
-        if self.frame is None:
+        if self._last_processed_jpeg:
+            return self._last_processed_jpeg
+
+        frame, _, _ = self._snapshot_frame()
+        if frame is None:
             sim = np.zeros((720, 1280, 3), dtype=np.uint8)
             cv2.putText(sim, "KAMERA BEKLENIYOR...", (430, 360), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
             self.status["ts_monotonic"] = round(time.monotonic(), 3)
@@ -894,8 +1030,8 @@ class VideoCamera:
             ok, jpeg = cv2.imencode(".jpg", sim)
             return jpeg.tobytes() if ok else b""
 
-        self._process_latest_frame()
-        return self._last_processed_jpeg
+        ok, jpeg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        return jpeg.tobytes() if ok else b""
 
     def close(self):
         self.stopped = True
@@ -926,12 +1062,18 @@ def run_headless_processing_loop():
     while True:
         # Mission state'i kontrol et
         camera_stream._check_mission_state()
-        
-        if camera_stream.frame is not None:
+
+        if camera_stream._frame_seq > 0:
             processed = camera_stream._process_latest_frame()
-            if processed is not None and camera_stream._recording_active and camera_stream.writer and camera_stream.last_frame_ts > camera_stream._last_writer_frame_ts:
+            if (
+                processed is not None
+                and camera_stream._recording_active
+                and camera_stream.writer
+                and camera_stream._last_processed_seq > camera_stream._last_writer_seq
+            ):
                 camera_stream.writer.write(processed)
-                camera_stream._last_writer_frame_ts = camera_stream.last_frame_ts
+                camera_stream._last_writer_frame_ts = camera_stream._last_processed_frame_ts
+                camera_stream._last_writer_seq = camera_stream._last_processed_seq
         else:
             camera_stream.status["ts_monotonic"] = round(time.monotonic(), 3)
             camera_stream.status["frame_age_s"] = 999.0
@@ -955,10 +1097,10 @@ def run_headless_processing_loop():
                     False,
                     event="headless_tick",
                     n=_loop_n,
-                    has_frame=camera_stream.frame is not None,
+                    has_frame=bool(camera_stream._frame_seq > 0),
                     frame_age_s=camera_stream.status.get("frame_age_s"),
                 )
-        time.sleep(0.1)
+        time.sleep(CAM_PROCESS_DT)
 
 install_module_function_tracing(
     globals(),

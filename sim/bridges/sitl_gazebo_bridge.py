@@ -17,9 +17,10 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT / "docker_workspace" / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "docker_workspace" / "src"))
-from runtime_debug_log import log_jsonl, setup_component_logger
+from runtime_debug_log import log_jsonl, redirect_std_streams, setup_component_logger
 
 log = setup_component_logger("sitl_gazebo_bridge", prefer_simulation=True)
+redirect_std_streams(log)
 
 CONTROL_DIR = os.environ.get("CONTROL_DIR", str(_ROOT / "sim" / "control"))
 POS_FILE = Path(CONTROL_DIR) / "vehicle_position.json"
@@ -153,12 +154,12 @@ class SitlGazeboBridge:
         v = msg.twist.twist.linear
         av = msg.twist.twist.angular
         
-        x_ned = p.y
-        y_ned = p.x
+        x_ned = p.x
+        y_ned = -p.y
         z_ned = -p.z
         
-        vx_ned = v.y
-        vy_ned = v.x
+        vx_ned = v.x
+        vy_ned = -v.y
         vz_ned = -v.z
         
         w, nx, ny, nz = q.w, q.x, q.y, q.z
@@ -175,16 +176,16 @@ class SitlGazeboBridge:
         lon = self.home_lon + (y_ned / (111320.0 * math.cos(math.radians(self.home_lat))))
         alt = self.home_alt - z_ned
         
-        # VALIDATION: Log coordinate transform periodically for diagnostics
         if self._msg_count_odom % 100 == 1:
-            log_jsonl("coordinate_transform", {
-                "msg_count": self._msg_count_odom,
-                "gazebo_xyz": [round(p.x, 3), round(p.y, 3), round(p.z, 3)],
-                "ned_xyz": [round(x_ned, 3), round(y_ned, 3), round(z_ned, 3)],
-                "gps_latlon": [round(lat, 7), round(lon, 7)],
-                "home_ref": [self.home_lat, self.home_lon],
-                "validation": "OK" if (-90 <= lat <= 90 and -180 <= lon <= 180) else "RANGE_ERROR"
-            })
+            log_jsonl("sitl_gazebo_bridge", True,
+                event="coordinate_transform",
+                msg_count=self._msg_count_odom,
+                gazebo_xyz=[round(p.x, 3), round(p.y, 3), round(p.z, 3)],
+                ned_xyz=[round(x_ned, 3), round(y_ned, 3), round(z_ned, 3)],
+                gps_latlon=[round(lat, 7), round(lon, 7)],
+                home_ref=[self.home_lat, self.home_lon],
+                validation="OK" if (-90 <= lat <= 90 and -180 <= lon <= 180) else "RANGE_ERROR",
+            )
 
         # Calculate roll, pitch, yaw
         # Roll (x-axis rotation)
@@ -206,11 +207,11 @@ class SitlGazeboBridge:
         payload = {
             "timestamp": t,
             "imu": {
-                "gyro": [av.y, av.x, -av.z],
+                "gyro": [av.x, -av.y, -av.z],
                 "accel_body": [0.0, 0.0, -9.81]
             },
             "position": [lat, lon, alt],
-            "attitude": [roll, pitch, yaw],
+            "attitude": [roll, -pitch, -yaw],
             "velocity": [vx_ned, vy_ned, vz_ned]
         }
         
@@ -277,21 +278,28 @@ class SitlGazeboBridge:
             c2 = self.motor_pwm_ch2
             count = self._msg_count_pwm
         
-        # [SIMULATION TEST MODE] Auto-inject motor commands when SITL disarmed
-        # Real system: stays at 1500 (safe, disarmed)
-        # Simulation: after POSE_ARM_S, inject test commands to move boat
-        if SIM_TEST_MODE_ENABLED and time.monotonic() > self._pose_arm_deadline:
-            if abs(c1 - 1500.0) < 10 and abs(c2 - 1500.0) < 10:  # SITL sending neutral (disarmed)
-                if not self._test_mode_active:
-                    log.info(f"[SIM-TEST] Activating simulation test motors: CH1={TEST_MOTOR_CH1} CH3={TEST_MOTOR_CH3}")
-                    self._test_mode_active = True
-                # Override with test motor values for simulation
-                c1 = TEST_MOTOR_CH1
-                c2 = TEST_MOTOR_CH3
-                # Update state for vehicle_position.json tracking (Adım 4: state sync)
-                with self.lock:
-                    self.motor_pwm_ch1 = c1
-                    self.motor_pwm_ch2 = c2
+        # [SIM MOTOR BYPASS] When SITL sends neutral (disarmed), read commands
+        # from motor_command.json written by usv_main.py
+        if abs(c1 - 1500.0) < 10 and abs(c2 - 1500.0) < 10:
+            try:
+                mc_path = Path(CONTROL_DIR) / "motor_command.json"
+                if mc_path.exists():
+                    mc = json.loads(mc_path.read_text())
+                    if time.time() - mc.get("ts", 0) < 2.0:
+                        c1 = float(mc["left_pwm"])
+                        c2 = float(mc["right_pwm"])
+                        if not self._test_mode_active:
+                            log.info(f"[SIM-BYPASS] Reading motor_command.json: CH1={c1:.0f} CH3={c2:.0f}")
+                            self._test_mode_active = True
+                        with self.lock:
+                            self.motor_pwm_ch1 = c1
+                            self.motor_pwm_ch2 = c2
+                    else:
+                        self._test_mode_active = False
+                else:
+                    self._test_mode_active = False
+            except Exception:
+                self._test_mode_active = False
             
         self.ros_node.pub_left.publish(Float64(data=c1))
         self.ros_node.pub_right.publish(Float64(data=c2))
@@ -405,10 +413,15 @@ class SitlGazeboBridge:
                     "motor_normalized": motor_norm,
                     "source": "sitl_gazebo_bridge_json"
                 }
-                POS_FILE.write_text(json.dumps(payload))
+                tmp_path = POS_FILE.with_suffix(f"{POS_FILE.suffix}.tmp")
+                with open(tmp_path, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, POS_FILE)
             except Exception as exc:
                 log.warning("JSON write error: %s", exc)
-            time.sleep(0.5)
+            time.sleep(0.1)
 
     def stats_loop(self):
         while self.running:

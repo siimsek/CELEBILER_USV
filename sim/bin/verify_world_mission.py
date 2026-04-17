@@ -15,7 +15,6 @@ POINTS = [
     (2.5, 10.5),
     (0.0, 14.0),
     (0.0, 27.0),
-    (-3.0, 29.8),
 ]
 
 
@@ -28,21 +27,21 @@ def load_base():
 
 
 def xy_to_gps(base_lat, base_lon, wx, wy):
-    meters_to_lat = 1.0 / 111111.0
+    meters_to_lat = 1.0 / 111320.0
     cos_lat = math.cos(math.radians(base_lat))
-    meters_to_lon = 1.0 / (111111.0 * cos_lat) if abs(cos_lat) > 1e-6 else meters_to_lat
+    meters_to_lon = 1.0 / (111320.0 * cos_lat) if abs(cos_lat) > 1e-6 else meters_to_lat
     return [
         round(base_lat + wy * meters_to_lat, 7),
-        round(base_lon - wx * meters_to_lon, 7),
+        round(base_lon + wx * meters_to_lon, 7),
     ]
 
 
 def gps_to_xy(base_lat, base_lon, lat, lon):
-    meters_to_lat = 1.0 / 111111.0
+    meters_to_lat = 1.0 / 111320.0
     cos_lat = math.cos(math.radians(base_lat))
-    meters_to_lon = 1.0 / (111111.0 * cos_lat) if abs(cos_lat) > 1e-6 else meters_to_lat
+    meters_to_lon = 1.0 / (111320.0 * cos_lat) if abs(cos_lat) > 1e-6 else meters_to_lat
     y = (lat - base_lat) / meters_to_lat
-    x = (base_lon - lon) / meters_to_lon
+    x = (lon - base_lon) / meters_to_lon
     return x, y
 
 

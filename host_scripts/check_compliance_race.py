@@ -50,10 +50,10 @@ def test_mission_schema_variable_length():
     func_names = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
     
     assert "adapt_mission_to_structured" in func_names, "adapt_mission_to_structured not defined"
-    assert "_adapt_flat_array_to_structured" in func_names, "flat array adapter missing"
-    assert "_validate_and_return_structured" in func_names, "structured validator missing"
+    assert "_adapt_flat_array" in func_names or "_adapt_flat_array_to_structured" in func_names, "flat array adapter missing"
+    assert "_adapt_structured_legacy" in func_names or "_validate_and_return_structured" in func_names, "structured validator missing"
     
-    print("  ✅ Mission schema: variable-length parkours supported, no fixed indices")
+    print("  ✅ Mission schema: variable-length supported, no fixed indices, split_nav_engage active")
 
 
 def test_image_transmission_hardened():
@@ -104,26 +104,41 @@ def test_image_transmission_hardened():
 
 
 def test_p1_race_pure_auto():
-    """✓ Criterion 3: P1 race execution is pure Pixhawk AUTO, no Pi fallback/override."""
+    """✓ Criterion 3: NAV race execution is pure Pixhawk AUTO, no Pi fallback/override."""
     
     usv_main_file = DOCKER_SRC / "usv_main.py"
     with open(usv_main_file) as f:
         usv_src = f.read()
     
-    # Verify run_parkur1() has race assertion
-    if "Race mode P1 must be pure Pixhawk AUTO" not in usv_src and "assert p1_mode == \"AUTO\"" not in usv_src:
-        # Check if assertion pattern exists
-        if "USV_MODE == USV_MODE_RACE" not in usv_src or "p1_mode" not in usv_src:
-            raise AssertionError("run_parkur1() missing race mode assertion")
-    
-    # Verify lidar avoidance is GUIDED-only (key indicators: either comment or if guard)
-    has_lidar_guard = (
-        ("Lidar avoidance and wind assist: GUIDED mode only" in usv_src) or
-        ("if USV_MODE != USV_MODE_RACE:" in usv_src and "lidar" in usv_src.lower())
-    )
-    
-    if not has_lidar_guard:
-        raise AssertionError("Lidar avoidance not documented or guarded for GUIDED-only")
+    run_nav_match = re.search(r"def run_nav\(self\):(?P<body>.*?)(?:\n    def |\Z)", usv_src, re.S)
+    if not run_nav_match:
+        raise AssertionError("run_nav() not found")
+    run_nav_src = run_nav_match.group("body")
+
+    auto_nav_match = re.search(r"def _run_nav_auto_mission\(self\):(?P<body>.*?)(?:\n    def |\Z)", usv_src, re.S)
+    if not auto_nav_match:
+        raise AssertionError("_run_nav_auto_mission() missing")
+    auto_nav_src = auto_nav_match.group("body")
+
+    required_run_nav_snippets = [
+        'nav_mode = "GUIDED" if USV_MODE != USV_MODE_RACE else "AUTO"',
+        'assert nav_mode == "AUTO", "Race mode NAV must be pure Pixhawk AUTO"',
+        'auto_result = self._run_nav_auto_mission()',
+        'if not self._wait_p2_ready():',
+        'if not self._navigate_p2_waypoint(wp[0], wp[1], leg_start=prev_wp):',
+    ]
+    for snippet in required_run_nav_snippets:
+        if snippet not in run_nav_src:
+            raise AssertionError(f"run_nav() missing required race/test split logic: {snippet}")
+
+    required_auto_nav_snippets = [
+        'self.guidance_mode = "nav_pixhawk_auto"',
+        'self._set_guidance_source("nav_auto_monitor")',
+        'self.motor_limit_reason = "pixhawk_auto"',
+    ]
+    for snippet in required_auto_nav_snippets:
+        if snippet not in auto_nav_src:
+            raise AssertionError(f"_run_nav_auto_mission() missing AUTO monitor behavior: {snippet}")
     
     # Verify _get_guidance_source method exists
     if "def _get_guidance_source" not in usv_src:
@@ -133,7 +148,7 @@ def test_p1_race_pure_auto():
     if "guidance_source" not in usv_src or "_get_guidance_source()" not in usv_src:
         raise AssertionError("guidance_source not in mission_state.json payload")
     
-    print("  ✅ P1 race purity: pure Pixhawk AUTO, no Pi fallback, lidar isolated to test mode")
+    print("  ✅ NAV race purity: pure Pixhawk AUTO, no Pi fallback, lidar isolated to test mode")
 
 
 def test_post_start_command_lock():
@@ -185,18 +200,17 @@ def test_mission_lifecycle_tracking():
 
 
 def test_guidance_source_clarity():
-    """✓ Criterion 6: Guidance source explicitly identifies execution mode (explicit not generic)."""
+    """✓ Criterion 6: Guidance source explicitly identifies execution mode."""
     
     usv_main_file = DOCKER_SRC / "usv_main.py"
     with open(usv_main_file) as f:
         usv_src = f.read()
     
-    # Verify _get_guidance_source() returns explicit modes
+    # Verify _get_guidance_source() returns explicit unified modes
     required_returns = [
-        "p1_pixhawk_auto",
-        "p1_pi_guided",
-        "p2_pi_guided",
-        "p3_pi_guided",
+        "nav_pixhawk_auto",
+        "nav_pi_guided",
+        "engage_pi_guided",
     ]
     
     for mode in required_returns:
@@ -207,7 +221,7 @@ def test_guidance_source_clarity():
     if '"guidance_source": self._get_guidance_source()' not in usv_src:
         raise AssertionError("guidance_source not explicitly calling _get_guidance_source()")
     
-    print("  ✅ Guidance clarity: explicit p1_pixhawk_auto/p1_pi_guided/p2_p3_pi_guided modes")
+    print("  ✅ Guidance clarity: explicit nav_pixhawk_auto / nav_pi_guided / engage_pi_guided modes")
 
 
 def test_adapter_backward_compatibility():
@@ -259,19 +273,19 @@ def test_compliance_enforcement():
     with open(profile_file) as f:
         profile_src = f.read()
     
-    # Verify explicit mission split profile is enforced in code
-    if "MISSION_SPLIT_P2_COUNT" not in profile_src or "MISSION_SPLIT_P3_COUNT" not in profile_src:
-        raise AssertionError("Mission split profile not defined in compliance profile")
+    # Verify split_nav_engage is in use (unified architecture)
+    if "def split_nav_engage" not in mission_cfg_src:
+        raise AssertionError("mission_config missing split_nav_engage unified split function")
     if "def get_mission_split_profile" not in mission_cfg_src:
         raise AssertionError("mission_config missing explicit split profile helper")
-    if "p1_end = total - MISSION_SPLIT_P2_COUNT - MISSION_SPLIT_P3_COUNT" not in mission_cfg_src:
-        raise AssertionError("Mission split boundaries not programmatically enforced")
+    if "split_nav_engage" not in open(DOCKER_SRC / "usv_main.py").read():
+        raise AssertionError("usv_main.py doesn't use split_nav_engage")
     
     # Verify min waypoint checks
-    min_checks = ["MISSION_P1_MIN_WAYPOINTS", "MISSION_P2_MIN_WAYPOINTS", "MISSION_P3_MIN_WAYPOINTS"]
+    min_checks = ["MISSION_P1_MIN_WAYPOINTS", "MISSION_P3_MIN_WAYPOINTS"]
     for check in min_checks:
         if check not in adapter_src and check not in mission_cfg_src:
-            raise AssertionError(f"{check} minimum not defined in adapter")
+            raise AssertionError(f"{check} minimum compatibility constant not defined")
     
     # Verify validation raises ValueError (not warnings)
     if "raise ValueError" not in adapter_src or "raise ValueError" not in mission_cfg_src:
@@ -282,12 +296,10 @@ def test_compliance_enforcement():
     if static_file.exists():
         with open(static_file) as f:
             static_src = f.read()
-        # Verify it doesn't use naive string matching for schema validation
         if 'len(mission) >= 6' in static_src:
-            # Old heuristic still present - warn but don't fail (might be kept for backward compat)
             pass
     
-    print("  ✅ Enforcement: explicit mission split profile and parkur min constraints enforced in code")
+    print("  ✅ Enforcement: split_nav_engage enforced, no fixed split counts, min constraints preserved")
 
 
 def main():

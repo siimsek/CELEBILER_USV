@@ -61,8 +61,7 @@ R_WP_M = 2.5
 T_HOLD_S = 2.0
 MISSION_INPUT_FORMAT = "flat_ordered"
 MISSION_ALLOW_STRUCTURED_LEGACY = os.environ.get("MISSION_ALLOW_STRUCTURED_LEGACY", "").strip() == "1"
-MISSION_SPLIT_P2_COUNT = max(1, int(os.environ.get("MISSION_SPLIT_P2_COUNT", "1")))
-MISSION_SPLIT_P3_COUNT = max(1, int(os.environ.get("MISSION_SPLIT_P3_COUNT", "2")))
+# Unified mission: split is done by split_nav_engage() — no fixed P2/P3 count needed.
 P1_SPEED_CRUISE_MPS = 1.2
 P1_SPEED_APPROACH_MPS = 0.6
 P2_WAIT_SPEED_MPS = 0.6
@@ -78,11 +77,38 @@ P3_REVERSE_DISTANCE_M = 3.0
 P3_REVERSE_TIMEOUT_S = 4.0
 D_MIN_M = 1.2
 # P2: lidar + kamera birlesik kacinma (warn mesafesinde yumuak, D_MIN altinda sert)
-P2_LIDAR_WARN_M = 3.0
-P2_ESCAPE_MAX_DEG = 40.0
+# WP4→5: ~2.5 m altı tehdit; bacak başı: 2.85’ten daraltıldı (kısa latch); histerezis dar.
+P2_LIDAR_WARN_M = 2.55
+P2_LIDAR_WARN_EXIT_MARGIN_M = 0.40
+# NAV: donmus bacak geometrisi yeterliyse lateral hata ile bearing düzeltmesi (saf WP bearing spiralını azaltır)
+NAV_CROSS_TRACK_K = 0.45
+NAV_CROSS_TRACK_L1_MIN_M = 2.8
+NAV_CROSS_TRACK_L1_MAX_M = 15.0
+NAV_CROSS_TRACK_CORR_CAP_DEG = 22.0
+NAV_CROSS_TRACK_MIN_LEG_M = 3.75  # max(R_WP_M * 1.5, 3.0) ile _waypoint_leg_progress ile uyumlu
+# NAV iki faz (her WP bacaginda): (1) yalnız yönelt — |err| <= HEADING_DONE olmadan gitme yok; (2) hat + ileri hız
+NAV_ALIGN_HEADING_DONE_DEG = 5.0
+# Geriye uyumluluk (eski ad); geçişler NAV_ALIGN_HEADING_DONE_DEG kullanır
+NAV_ALIGN_ENTER_ADVANCE_DEG = 9.5
+NAV_ALIGN_PIVOT_UNTIL_DEG = 11.0
+# İleri fazda burun şaşarsa tekrar (1) dönüşe dön — 24° çok gevşekti (log: 15°+ ile hâlâ advance)
+NAV_ALIGN_REVERT_ALIGN_DEG = 12.0
+NAV_ALIGN_MAX_SPEED_MPS = 0.26
+NAV_ALIGN_TIMEOUT_S = 14.0
+# Hiza fazinda dusuk hiz; onde dubalar yakinlasinca tam NAV+kaçınma (ileri faz) zorunlu
+NAV_ALIGN_SUSPEND_NEAR_M = 3.9
+# WP4→5 gibi uzun bacakta duba 2–3 m iken hâlâ align’da kalınmasın; bu altında mesafe şartsız advance
+NAV_ALIGN_TIGHT_OBSTACLE_M = 3.2
+# 3.2–3.9 m “yumuşak” bant: yalnız WP yakınında advance (açık su gürültüsünü uzakta kes)
+NAV_ALIGN_LIDAR_SUSPEND_MAX_DIST_M = 14.0
+P2_ESCAPE_MAX_DEG = 48.0
 P2_ESCAPE_MAX_DEG_LOCAL_MINIMA = 65.0
 P2_LOCAL_MINIMA_TIMEOUT_S = 8.0
 P2_CAM_YELLOW_WEIGHT = 0.55
+# Kamera (sarı duba) + lidar aynı tehdidi görünce sarı sapma ağırlığı
+P2_CAM_YELLOW_FUSION_MULT = 1.5
+# Turuncu kenar (TURUNCU_SINIR) — temas yasak; sarıdan biraz düşük ağırlık (kapı hizası ile çakışmayı azalt)
+P2_ORANGE_BOUNDARY_WEIGHT = 0.48
 HEARTBEAT_WARN_S = 5.0
 HEARTBEAT_FAIL_S = 30.0
 FAILSAFE_SLOW_MPS = 0.3
@@ -110,7 +136,7 @@ FUSION_CAMERA_ONLY_TIMEOUT_S = 3.0
 FUSION_GATE_EVENT_CONFIRM_WINDOW_S = 1.2
 FUSION_LOG_PERIOD_S = 2.0
 DYN_SPEED_ENABLED = bool(INNOVATION_SWITCHES.get("dynamic_speed_profile", True))
-DYN_SPEED_SCOPE = ("P1", "P2")
+DYN_SPEED_SCOPE = ("NAV",)  # Unified: active during all waypoint navigation
 DYN_SPEED_BAND_SOFT_DEG = 8.0
 DYN_SPEED_BAND_MEDIUM_DEG = 18.0
 DYN_SPEED_BAND_HARD_DEG = 30.0
@@ -118,11 +144,13 @@ DYN_SPEED_FACTOR_STRAIGHT = 1.00
 DYN_SPEED_FACTOR_SOFT = 0.90
 DYN_SPEED_FACTOR_MEDIUM = 0.78
 DYN_SPEED_FACTOR_HARD = 0.64
-DYN_SPEED_MIN_MPS_P1 = 0.35
-DYN_SPEED_MIN_MPS_P2 = 0.40
+DYN_SPEED_MIN_MPS_NAV = 0.40  # Unified: min speed during turns in NAV phase
+# Backward-compat aliases (deprecated, use DYN_SPEED_MIN_MPS_NAV)
+DYN_SPEED_MIN_MPS_P1 = DYN_SPEED_MIN_MPS_NAV
+DYN_SPEED_MIN_MPS_P2 = DYN_SPEED_MIN_MPS_NAV
 DYN_SPEED_LOG_PERIOD_S = 2.0
 WIND_ASSIST_ENABLED = bool(INNOVATION_SWITCHES.get("wind_assist", True))
-WIND_ASSIST_SCOPE = ("P1", "P2")
+WIND_ASSIST_SCOPE = ("NAV",)  # Unified: active during all waypoint navigation
 WIND_ASSIST_I_GAIN = 0.05
 WIND_ASSIST_BIAS_MAX_DEG = 12.0
 WIND_ASSIST_ACTIVE_ERR_MAX_DEG = 18.0
@@ -137,7 +165,7 @@ GEOFENCE_ANCHOR_PULSE_S = 0.8
 GEOFENCE_ANCHOR_COOLDOWN_S = 1.5
 GEOFENCE_LOG_PERIOD_S = 2.0
 HORIZON_LOCK_ENABLED = bool(INNOVATION_SWITCHES.get("horizon_lock", True))
-HORIZON_LOCK_SCOPE = ("P2", "P3")
+HORIZON_LOCK_SCOPE = ("NAV", "ENGAGE")  # Unified: active in both nav and engage phases
 HORIZON_LOCK_ROLL_GAIN = 1.0
 HORIZON_LOCK_PITCH_GAIN = 0.15
 HORIZON_LOCK_MIN_TILT_DEG = 1.0

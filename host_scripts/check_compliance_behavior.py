@@ -40,7 +40,7 @@ def main() -> int:
     sim_stack = read(ROOT / "sim" / "bin" / "run_sim_stack.sh")
 
     checks = {
-        "parkur_transition_auto_only": has(usv, "otomatik gecis (kullanici girdisi kapali)"),
+        "parkur_transition_auto_only": has(usv, "state = self.STATE_ENGAGE") and has(usv, "otomatik gecis (kullanici girdisi kapali)"),
         "manual_next_flag_removed": ("FLAG_NEXT" not in usv) and ("/api/next_parkur" not in telemetry),
         "mission_start_ready_gate": has(usv, "HEALTH_CHECK gecmedi"),
         "race_start_api_blocked": has(telemetry, "if USV_MODE == USV_MODE_RACE"),
@@ -50,13 +50,13 @@ def main() -> int:
         "api_includes_report_view": has(telemetry, "out['report_view'] ="),
         "camera_race_web_disabled": has(cam, "if RACE_MODE:") and has(cam, "Race modda sadece onboard isleme"),
         "lidar_race_exit": has(lidar, "YARIŞMA MODU - Harita yayını başlatılmıyor.") and has(lidar, "sys.exit(0)"),
-        "p1_runs_in_auto": has(usv, "[PARKUR-1] AUTO WAYPOINT TAKIBI") and has(usv, "auto_result = self._run_p1_auto_mission()"),
+        "nav_runs_in_auto": has(usv, "[NAV] WAYPOINT TAKIBI") and has(usv, "auto_result = self._run_nav_auto_mission()"),
         "p2_ready_gate_has_no_timeout_bypass": not has(usv, "Sensor bekleme zamani doldu") and has(usv, "mode=AUTO speed_cap<="),
-        "p2_guidance_order_logged": has(usv, "self._set_guidance_source(\"p2_avoid\")") and has(usv, "self._set_guidance_source(\"p2_gate\")") and has(usv, "self._set_guidance_source(\"p2_waypoint_fallback\")"),
+        "p2_guidance_order_logged": has(usv, 'self._set_guidance_source("p2_avoid")') and has(usv, 'self._set_guidance_source("p2_gate")') and has(usv, 'self._set_guidance_source("p2_waypoint_fallback")'),
         "startup_wait_is_probe_based": has(sim_stack, "probe_camera_endpoint") and not has(sim_stack, "sleep 12"),
         "shared_sim_nav_source_used": has(usv, "load_sim_nav_state(control_dir=CONTROL_DIR)") and has(telemetry, "load_sim_nav_state(control_dir=CONTROL_DIR)"),
         "sim_forced_sensor_ready_removed": not has(usv, "self.camera_ready = True") and not has(usv, "self.lidar_ready = True"),
-        "nav_diagnostics_exported": has(usv, "\"nav_position_source\":") and has(telemetry, "out['nav_position_source']") and has(telemetry, "'nav_target_bearing_deg': out['nav_target_bearing_deg']"),
+        "nav_diagnostics_exported": has(usv, '"nav_position_source":') and has(telemetry, "out['nav_position_source']") and has(telemetry, "'nav_target_bearing_deg': out['nav_target_bearing_deg']"),
         "nav_invalid_blocks_heading_solution": has(usv, "if not self.nav_fix_valid:") and has(usv, "self._log_nav_invalid(target_lat, target_lon)"),
     }
 
