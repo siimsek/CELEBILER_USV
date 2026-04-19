@@ -80,7 +80,7 @@ else
         for _ in $(seq 1 10); do
             CURRENT_IPS=$(hostname -I)
             [[ "$CURRENT_IPS" == *"$TARGET_IP"* ]] && break
-            sleep 0.1
+            sleep 0.05
         done
         CURRENT_IPS=$(hostname -I) # Güncelle
     else
@@ -148,7 +148,7 @@ else
         if sudo fuser 8888/tcp > /dev/null 2>&1; then
             break
         fi
-        sleep 0.1
+        sleep 0.05
     done
 fi
 

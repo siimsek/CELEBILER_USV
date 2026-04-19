@@ -425,9 +425,9 @@ class SitlGazeboBridge:
 
     def stats_loop(self):
         while self.running:
-            time.sleep(10.0)
+            time.sleep(5.0)
             mode_str = "[TEST]" if self._test_mode_active else "[ARMED]"
-            log.info(f"{mode_str} Stats - Odom Rx: {self._msg_count_odom/10.0:.1f} Hz | PWM Rx: {self._msg_count_pwm/10.0:.1f} Hz | Posi: {self.pos_x:.2f},{self.pos_y:.2f} | PWM: {self.motor_pwm_ch1:.0f},{self.motor_pwm_ch2:.0f}")
+            log.info(f"{mode_str} Stats - Odom Rx: {self._msg_count_odom/5.0:.1f} Hz | PWM Rx: {self._msg_count_pwm/5.0:.1f} Hz | Posi: {self.pos_x:.2f},{self.pos_y:.2f} | PWM: {self.motor_pwm_ch1:.0f},{self.motor_pwm_ch2:.0f}")
             self._msg_count_odom = 0
             self._msg_count_pwm = 0
 

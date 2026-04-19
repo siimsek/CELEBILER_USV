@@ -1001,7 +1001,7 @@ class SmartTelemetry:
                     self.last_csv_log_time = time.time()
             except Exception as exc:
                 self._bump_error("csv_write_error", f"[WARN] [CSV] Yazma hatasi: {exc}")
-            time.sleep(0.5)
+            time.sleep(0.2)
 
     def start(self):
         """Tüm threadleri başlatır."""

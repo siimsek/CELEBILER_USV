@@ -475,7 +475,7 @@ class VideoCamera:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, min(CAM_RX_BUFFER_MAX, 2 * 1024 * 1024))
-                sock.settimeout(5)
+                sock.settimeout(2)
                 sock.connect((HOST, PORT))
                 self.connected = True
                 print("[OK] [CAM] Kamera baglandi")

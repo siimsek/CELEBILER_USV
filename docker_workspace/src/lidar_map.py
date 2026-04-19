@@ -309,7 +309,7 @@ def ros_thread():
 
                 with lock:
                     output_frame = get_simulated_map()
-                time.sleep(0.1)
+                time.sleep(0.05)
                 
     except Exception as e:
         print(f"⚠️ [LIDAR] ROS Hatası: {e}")
@@ -317,7 +317,7 @@ def ros_thread():
         while True: # Crash etme, simülasyonda kal
             with lock:
                 output_frame = get_simulated_map()
-            time.sleep(0.1)
+            time.sleep(0.05)
     finally:
         if node: node.destroy_node()
         rclpy.shutdown()
