@@ -19,6 +19,9 @@ __pycache__/
 # === Compliance Reports (auto-generated) ===
 logs/*
 
+# === Ref ===
+moos_referans/
+
 # === Simulasyon Runtime (her calistirmada yeniden olusur) ===
 sim/control/
 sim/artifacts/

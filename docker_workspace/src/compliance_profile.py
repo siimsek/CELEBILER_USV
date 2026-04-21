@@ -95,6 +95,23 @@ NAV_ALIGN_PIVOT_UNTIL_DEG = 11.0
 NAV_ALIGN_REVERT_ALIGN_DEG = 12.0
 NAV_ALIGN_MAX_SPEED_MPS = 0.26
 NAV_ALIGN_TIMEOUT_S = 14.0
+# Heading damping (inner-loop style): error + yaw-rate feedback + command slew.
+NAV_HEADING_DAMPING_ENABLED = True
+NAV_HEADING_DAMPING_YAWRATE_GAIN = 0.32
+NAV_HEADING_DAMPING_LPF_ALPHA = 0.42
+NAV_HEADING_CMD_SLEW_DEG_PER_S = 140.0
+# Turn-priority speed caps.
+NAV_TURN_SPEED_CAP_SOFT_ERR_DEG = 25.0
+NAV_TURN_SPEED_CAP_MEDIUM_ERR_DEG = 40.0
+NAV_TURN_SPEED_CAP_HARD_ERR_DEG = 65.0
+NAV_TURN_SPEED_CAP_SOFT_MPS = 0.95
+NAV_TURN_SPEED_CAP_MEDIUM_MPS = 0.70
+NAV_TURN_SPEED_CAP_HARD_MPS = 0.45
+NAV_NEAR_WP_TURN_SPEED_CAP_DIST_M = 1.4
+NAV_NEAR_WP_TURN_ERR_DEG = 20.0
+NAV_NEAR_WP_TURN_SPEED_CAP_MPS = 0.30
+# Avoidance-bias slew: suppress one-scan spikes without weakening emergency turns.
+NAV_AVOID_BIAS_SLEW_DEG_PER_S = 180.0
 # Hiza fazinda dusuk hiz; onde dubalar yakinlasinca tam NAV+kaçınma (ileri faz) zorunlu
 NAV_ALIGN_SUSPEND_NEAR_M = 3.9
 # WP4→5 gibi uzun bacakta duba 2–3 m iken hâlâ align’da kalınmasın; bu altında mesafe şartsız advance

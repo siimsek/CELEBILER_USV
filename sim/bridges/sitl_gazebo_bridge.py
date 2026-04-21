@@ -38,7 +38,7 @@ RIGHT_MOTOR_REVERSED = os.environ.get("SIM_GZ_RIGHT_MOTOR_REVERSED", "0").lower(
 SIM_TEST_MODE_ENABLED = os.environ.get("SIM_TEST_MODE", "0").lower() in ("1", "true", "yes")
 TEST_MOTOR_CH1 = float(os.environ.get("SIM_TEST_MOTOR_CH1", "1600"))  # Test left motor (steering)
 TEST_MOTOR_CH3 = float(os.environ.get("SIM_TEST_MOTOR_CH3", "1600"))  # Test right motor (throttle)
-DRIVE_CMD_HZ = max(1.0, float(os.environ.get("SIM_GZ_DRIVE_CMD_HZ", "30")))
+DRIVE_CMD_HZ = max(1.0, float(os.environ.get("SIM_GZ_DRIVE_CMD_HZ", "50")))
 
 SITL_JSON_OUT = ("127.0.0.1", 9003) # Send physics here (DEPRECATED: now use sender_addr from PWM RX)
 SITL_JSON_IN_PORT = 9002            # Listen for PWM here (and respond to sender bidirectionally)

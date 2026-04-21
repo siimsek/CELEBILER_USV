@@ -80,18 +80,32 @@ from compliance_profile import (
     P2_GATE_CONFIRM_S,
     P2_LIDAR_WARN_EXIT_MARGIN_M,
     P2_LIDAR_WARN_M,
+    NAV_AVOID_BIAS_SLEW_DEG_PER_S,
     NAV_CROSS_TRACK_CORR_CAP_DEG,
     NAV_CROSS_TRACK_K,
     NAV_CROSS_TRACK_L1_MAX_M,
     NAV_CROSS_TRACK_L1_MIN_M,
     NAV_CROSS_TRACK_MIN_LEG_M,
     NAV_ALIGN_HEADING_DONE_DEG,
+    NAV_HEADING_CMD_SLEW_DEG_PER_S,
+    NAV_HEADING_DAMPING_ENABLED,
+    NAV_HEADING_DAMPING_LPF_ALPHA,
+    NAV_HEADING_DAMPING_YAWRATE_GAIN,
     NAV_ALIGN_LIDAR_SUSPEND_MAX_DIST_M,
     NAV_ALIGN_TIGHT_OBSTACLE_M,
     NAV_ALIGN_MAX_SPEED_MPS,
     NAV_ALIGN_REVERT_ALIGN_DEG,
     NAV_ALIGN_TIMEOUT_S,
     NAV_ALIGN_SUSPEND_NEAR_M,
+    NAV_NEAR_WP_TURN_ERR_DEG,
+    NAV_NEAR_WP_TURN_SPEED_CAP_DIST_M,
+    NAV_NEAR_WP_TURN_SPEED_CAP_MPS,
+    NAV_TURN_SPEED_CAP_HARD_ERR_DEG,
+    NAV_TURN_SPEED_CAP_HARD_MPS,
+    NAV_TURN_SPEED_CAP_MEDIUM_ERR_DEG,
+    NAV_TURN_SPEED_CAP_MEDIUM_MPS,
+    NAV_TURN_SPEED_CAP_SOFT_ERR_DEG,
+    NAV_TURN_SPEED_CAP_SOFT_MPS,
     P2_LOCAL_MINIMA_TIMEOUT_S,
     P2_STABLE_S,
     P2_WAIT_SPEED_MPS,
@@ -279,6 +293,7 @@ class USVStateMachine:
         self._heading_ema = None  # Initialize on first update
         self.current_roll_deg = 0.0
         self.current_pitch_deg = 0.0
+        self.current_yaw_rate_dps = 0.0
         self.gps_satellites_visible = 0
         self.gps_fix_type = 0
         self.gps_global_position_int_received = False  # Track if GLOBAL_POSITION_INT arrived (simulation GPS_RAW_INT fallback)
@@ -324,6 +339,10 @@ class USVStateMachine:
         self._wp_leg_valid = False
         self._nav_align_mode = "advance"
         self._nav_align_t0 = None
+        self._heading_cmd_filtered_deg = 0.0
+        self._heading_cmd_last_ts = time.monotonic()
+        self._avoid_bias_filtered_deg = 0.0
+        self._avoid_bias_last_ts = time.monotonic()
         self._wp_accept_hold_start = None
         self._nav_snapshot = {
             "lat": float(self.current_lat),
@@ -617,6 +636,10 @@ class USVStateMachine:
         self.waypoint_passed_gate = False
         self.waypoint_accept_reason = "idle"
         self.motor_limit_reason = "neutral"
+        self._heading_cmd_filtered_deg = 0.0
+        self._heading_cmd_last_ts = time.monotonic()
+        self._avoid_bias_filtered_deg = 0.0
+        self._avoid_bias_last_ts = time.monotonic()
 
     def _record_guidance_decision(self, decision: GuidanceDecision):
         self.guidance_mode = str(decision.mode)
@@ -2442,18 +2465,22 @@ class USVStateMachine:
         
         # CHECK 2: RC manual override (absolute preemption per AGENTS.md 2.1)
         if self._is_rc_stick_active():
-            # RC sticks are being manually moved → use RC values directly, ignore autonomy
-            rc_ch1 = self.rc_channels.get("ch1", 1500)  # Steering
-            rc_ch3 = self.rc_channels.get("ch3", 1500)  # Throttle
+            # RC sticks are being manually moved → map steer/throttle to twin-thruster PWM
+            rc_ch1 = int(self.rc_channels.get("ch1", 1500) or 1500)  # Steering
+            rc_ch3 = int(self.rc_channels.get("ch3", 1500) or 1500)  # Throttle
+            left_pwm, right_pwm = self._mix_rc_steer_throttle_to_twin_pwm(rc_ch1, rc_ch3)
             self._last_motor_command_source = "manual_rc"
-            self._set_rc_override(rc_ch1, rc_ch3)
+            self._set_rc_override(left_pwm, right_pwm)
             
             # Log RC override (throttled to avoid spam)
             if not hasattr(self, '_last_rc_override_log'):
                 self._last_rc_override_log = 0.0
             now = time.monotonic()
             if (now - self._last_rc_override_log) >= 2.0:
-                print(f"[RC_OVERRIDE] CH1={rc_ch1} CH3={rc_ch3} (ignoring autonomy speed={speed_mps:.2f}m/s)")
+                print(
+                    f"[RC_OVERRIDE] steer={rc_ch1} throttle={rc_ch3} -> left={left_pwm} right={right_pwm} "
+                    f"(ignoring autonomy speed={speed_mps:.2f}m/s)"
+                )
                 self._last_rc_override_log = now
             return
         
@@ -2567,6 +2594,10 @@ class USVStateMachine:
                 elif mtype == "ATTITUDE":
                     self.current_roll_deg = math.degrees(getattr(msg, "roll", 0.0))
                     self.current_pitch_deg = math.degrees(getattr(msg, "pitch", 0.0))
+                    try:
+                        self.current_yaw_rate_dps = math.degrees(float(getattr(msg, "yawspeed", 0.0) or 0.0))
+                    except (TypeError, ValueError):
+                        self.current_yaw_rate_dps = 0.0
                     # Yaw from ATTITUDE - DISABLED in SIM mode (use Gazebo heading instead)
                     # In SIM: vehicle_position.json heading_rad is updated every loop with Gazebo data
                     # In HW: uncomment below to use MAVLink ATTITUDE yaw
@@ -3003,9 +3034,11 @@ class USVStateMachine:
         self.progress_along_leg_m = round(float(progress_m), 3)
         self.waypoint_passed_gate = bool(passed_gate)
 
+        dist_m = float(distance_m)
         arrival_radius = 1.0
         hold_required_s = 1.0
-        within_arrival = float(distance_m) <= arrival_radius
+        pass_radius = max(arrival_radius + 0.4, min(float(R_WP_M), 2.8))
+        within_arrival = dist_m <= arrival_radius
 
         if within_arrival:
             if self._wp_accept_hold_start is None:
@@ -3015,6 +3048,18 @@ class USVStateMachine:
             self.nav_arrival_phase = "holding" if hold_s < hold_required_s else "accepted"
             accepted = hold_s >= hold_required_s
             return bool(accepted), True
+
+        # Fly-through acceptance: if craft clearly crossed waypoint along leg
+        # and is now moving away while still in pass radius, accept without
+        # requiring a long stop that can induce circling.
+        passed_margin = max(0.25, min(1.2, float(self._wp_leg_length_m or 0.0) * 0.08))
+        passed_stably = bool(passed_gate and progress_m >= (float(self._wp_leg_length_m or 0.0) + passed_margin))
+        moving_away = dist_m >= (float(self._closest_waypoint_distance_seen or dist_m) + 0.12)
+        if passed_stably and dist_m <= pass_radius and moving_away:
+            self._wp_accept_hold_start = None
+            self.waypoint_accept_reason = "leg_pass_trend"
+            self.nav_arrival_phase = "accepted"
+            return True, True
 
         self._wp_accept_hold_start = None
         self.waypoint_accept_reason = "tracking"
@@ -3532,6 +3577,107 @@ class USVStateMachine:
         )
         return clamp(raw, -float(NAV_CROSS_TRACK_CORR_CAP_DEG), float(NAV_CROSS_TRACK_CORR_CAP_DEG))
 
+    def _apply_avoid_bias_slew(self, target_bias_deg, emergency=False):
+        """Limit frame-to-frame avoidance bias jumps to reduce zig-zag on sparse scans."""
+        try:
+            target = float(target_bias_deg)
+        except (TypeError, ValueError):
+            target = 0.0
+        target = clamp(target, -95.0, 95.0)
+        now = time.monotonic()
+        if emergency:
+            self._avoid_bias_filtered_deg = target
+            self._avoid_bias_last_ts = now
+            return float(target)
+        dt = max(0.01, min(0.30, now - float(self._avoid_bias_last_ts or now)))
+        max_step = max(5.0, float(NAV_AVOID_BIAS_SLEW_DEG_PER_S) * dt)
+        prev = float(self._avoid_bias_filtered_deg or 0.0)
+        stepped = prev + clamp(target - prev, -max_step, max_step)
+        self._avoid_bias_filtered_deg = float(stepped)
+        self._avoid_bias_last_ts = now
+        return float(stepped)
+
+    def _apply_heading_damping(self, heading_error_deg):
+        """Heading inner-loop damping using yaw-rate feedback + command slew limiting."""
+        try:
+            heading_err = float(heading_error_deg)
+        except (TypeError, ValueError):
+            heading_err = 0.0
+        heading_err = clamp(heading_err, -95.0, 95.0)
+        now = time.monotonic()
+        if not NAV_HEADING_DAMPING_ENABLED:
+            self._heading_cmd_filtered_deg = float(heading_err)
+            self._heading_cmd_last_ts = now
+            return float(heading_err)
+
+        dt = max(0.01, min(0.30, now - float(self._heading_cmd_last_ts or now)))
+        try:
+            yaw_rate_dps = float(self.current_yaw_rate_dps)
+        except (TypeError, ValueError):
+            yaw_rate_dps = 0.0
+        raw_cmd = heading_err - (float(NAV_HEADING_DAMPING_YAWRATE_GAIN) * yaw_rate_dps)
+        raw_cmd = clamp(raw_cmd, -95.0, 95.0)
+        prev_cmd = float(self._heading_cmd_filtered_deg or 0.0)
+        max_step = max(5.0, float(NAV_HEADING_CMD_SLEW_DEG_PER_S) * dt)
+        slew_cmd = prev_cmd + clamp(raw_cmd - prev_cmd, -max_step, max_step)
+        alpha = clamp(float(NAV_HEADING_DAMPING_LPF_ALPHA), 0.01, 1.0)
+        filtered_cmd = prev_cmd + (alpha * (slew_cmd - prev_cmd))
+        filtered_cmd = clamp(filtered_cmd, -95.0, 95.0)
+        self._heading_cmd_filtered_deg = float(filtered_cmd)
+        self._heading_cmd_last_ts = now
+        return float(filtered_cmd)
+
+    def _apply_turn_priority_speed_caps(self, speed_mps, heading_error_deg, distance_m):
+        """Prefer turning over forward surge on large heading error and near-waypoint turns."""
+        speed = max(0.0, float(speed_mps))
+        heading_abs = abs(float(heading_error_deg))
+        if heading_abs >= float(NAV_TURN_SPEED_CAP_HARD_ERR_DEG):
+            speed = min(speed, float(NAV_TURN_SPEED_CAP_HARD_MPS))
+        elif heading_abs >= float(NAV_TURN_SPEED_CAP_MEDIUM_ERR_DEG):
+            speed = min(speed, float(NAV_TURN_SPEED_CAP_MEDIUM_MPS))
+        elif heading_abs >= float(NAV_TURN_SPEED_CAP_SOFT_ERR_DEG):
+            speed = min(speed, float(NAV_TURN_SPEED_CAP_SOFT_MPS))
+        if (
+            float(distance_m) <= float(NAV_NEAR_WP_TURN_SPEED_CAP_DIST_M)
+            and heading_abs >= float(NAV_NEAR_WP_TURN_ERR_DEG)
+        ):
+            speed = min(speed, float(NAV_NEAR_WP_TURN_SPEED_CAP_MPS))
+        return float(speed)
+
+    def _mix_rc_steer_throttle_to_twin_pwm(self, steer_pwm, throttle_pwm):
+        """Map manual RC steer/throttle semantics to left/right twin-thruster PWM."""
+        try:
+            steer = int(float(steer_pwm))
+        except (TypeError, ValueError):
+            steer = 1500
+        try:
+            throttle = int(float(throttle_pwm))
+        except (TypeError, ValueError):
+            throttle = 1500
+        steer = int(clamp(steer, 1100, 1900))
+        throttle = int(clamp(throttle, 1100, 1900))
+        throttle_norm = (float(throttle) - 1500.0) / 400.0
+        steer_norm = (float(steer) - 1500.0) / 400.0
+        if abs(throttle_norm) < 0.04:
+            throttle_norm = 0.0
+        if abs(steer_norm) < 0.04:
+            steer_norm = 0.0
+        left_mix = throttle_norm + steer_norm
+        right_mix = throttle_norm - steer_norm
+        max_mag = max(abs(left_mix), abs(right_mix), 1.0)
+        if max_mag > 1.0:
+            left_mix /= max_mag
+            right_mix /= max_mag
+        left_pwm = int(round(1500 + (left_mix * 400.0)))
+        right_pwm = int(round(1500 + (right_mix * 400.0)))
+        left_pwm = int(clamp(left_pwm, 1100, 1900))
+        right_pwm = int(clamp(right_pwm, 1100, 1900))
+        if abs(left_pwm - 1500) < 8:
+            left_pwm = 1500
+        if abs(right_pwm - 1500) < 8:
+            right_pwm = 1500
+        return left_pwm, right_pwm
+
     def _navigate_p2_waypoint(self, lat, lon, leg_start=None):
         self._sim_dist = 12.0
         start_snapshot = self._wait_for_stable_nav_solution(samples_required=5, timeout_s=3.0)
@@ -3688,6 +3834,7 @@ class USVStateMachine:
                 cam_weight=cam_w,
                 esc_orange_deg=esc_o,
             )
+            avoid = self._apply_avoid_bias_slew(avoid, emergency=bool(lidar_emergency))
             decision = compute_nav_decision(
                 distance_m=dist,
                 gps_heading_error_deg=gps_heading_for_nav,
@@ -3740,6 +3887,7 @@ class USVStateMachine:
                 self._set_wind_assist_idle()
 
             speed = self._apply_dynamic_speed(decision.speed_mps, corrected_heading_err, "NAV")
+            speed = self._apply_turn_priority_speed_caps(speed, corrected_heading_err, dist)
             if dist <= 1.5:
                 speed = min(speed, 0.35)
             if lidar_emergency or in_warn:
@@ -3772,6 +3920,11 @@ class USVStateMachine:
                     self.motor_limit_reason = "tracking_recovery"
                     self._set_guidance_source("p2_waypoint_fallback")
 
+            command_heading_err = self._apply_heading_damping(corrected_heading_err)
+            if unknown_escape:
+                command_heading_err = 0.0
+                self._heading_cmd_filtered_deg = 0.0
+                self._heading_cmd_last_ts = time.monotonic()
             self.avoidance_active = bool(decision.mode in ("nav_avoid", "nav_obstacle_wait"))
             if abs(esc_o) > 0.02:
                 self.avoidance_source = "lidar_yellow_orange" if abs(esc_c) > 0.01 else "lidar_orange"
@@ -3791,6 +3944,7 @@ class USVStateMachine:
                     dist_m=round(float(dist), 3),
                     gps_heading_err_deg=round(float(gps_heading_err), 3),
                     corrected_heading_err_deg=round(float(corrected_heading_err), 3),
+                    command_heading_err_deg=round(float(command_heading_err), 3),
                     decision_mode=str(decision.mode),
                     unknown_escape=bool(unknown_escape),
                     speed_mps=round(float(speed), 3),
@@ -3798,7 +3952,7 @@ class USVStateMachine:
                     align_follow=bool(align_follow),
                 )
 
-            self._command_speed_heading(speed, corrected_heading_err)
+            self._command_speed_heading(speed, command_heading_err)
             self._write_state()
             time.sleep(LOOP_DT)
         return False
