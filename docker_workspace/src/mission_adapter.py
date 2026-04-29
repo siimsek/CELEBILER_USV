@@ -3,8 +3,8 @@ Mission format adapter: unified flat-ordered mission format.
 
 Operational contract:
 - Flat ordered list: [[lat, lon], ...]
-- Last coordinate = engage waypoint (target duba)
-- All others = nav waypoints (obstacle avoidance + gate navigation)
+- Flat list defaults to nav waypoints only.
+- Engage waypoint is explicit in structured legacy payload (parkur3 / engage_wp).
 
 Legacy structured format (parkur1/parkur2/parkur3 dict) accepted only when
 MISSION_ALLOW_STRUCTURED_LEGACY is set; converted to flat list on load.
@@ -16,7 +16,6 @@ from typing import Any
 
 from compliance_profile import MISSION_ALLOW_STRUCTURED_LEGACY, MISSION_INPUT_FORMAT
 from mission_config import (
-    MISSION_MIN_WAYPOINTS,
     VALID_TARGET_COLORS,
     normalize_target_color,
     split_nav_engage,
@@ -84,7 +83,7 @@ def _adapt_flat_array(flat_array: list, strict: bool = True) -> dict[str, Any]:
     _log.info("flat array received: %d waypoint(s)", total_waypoints)
 
     coords = validate_coordinate_mission(flat_array)
-    nav_wps, engage_wp = split_nav_engage(coords)
+    nav_wps, engage_wp = split_nav_engage(coords, has_explicit_engage=False)
 
     _log.info(
         "split applied: nav=%d engage=%s",
@@ -99,12 +98,6 @@ def _adapt_flat_array(flat_array: list, strict: bool = True) -> dict[str, Any]:
         nav_count=len(nav_wps),
         has_engage=engage_wp is not None,
     )
-
-    if strict and engage_wp is None:
-        raise ValueError(
-            f"Mission must have at least {MISSION_MIN_WAYPOINTS} waypoints "
-            f"(nav + engage); got {total_waypoints}"
-        )
 
     engage_list = [engage_wp] if engage_wp is not None else []
     split_profile = get_mission_split_profile(total_waypoints)
@@ -144,15 +137,21 @@ def _adapt_structured_legacy(data: dict, strict: bool = True) -> dict[str, Any]:
     p2 = validate_waypoint_array(data["parkur2"], "parkur2") if "parkur2" in data else []
     p3 = validate_waypoint_array(data["parkur3"], "parkur3") if data.get("parkur3") else []
 
-    # Flatten all into a single ordered list and re-split
-    all_coords = p1 + p2 + p3
-    if not all_coords:
+    # Structured legacy: parkur3 explicitly carries engage leg.
+    nav_coords = p1 + p2
+    engage_wp = p3[-1] if p3 else None
+    if p3[:-1]:
+        nav_coords.extend(p3[:-1])
+    if not nav_coords and engage_wp is None:
         raise ValueError("Structured mission contains no waypoints")
 
     target_color = validate_target_color(data["target_color"])
-    nav_wps, engage_wp = split_nav_engage(all_coords)
+    nav_wps, engage_wp = split_nav_engage(
+        nav_coords + ([engage_wp] if engage_wp is not None else []),
+        has_explicit_engage=bool(engage_wp is not None),
+    )
     engage_list = [engage_wp] if engage_wp is not None else []
-    total_count = len(all_coords)
+    total_count = len(nav_wps) + len(engage_list)
     split_profile = get_mission_split_profile(total_count)
 
     _log.info(

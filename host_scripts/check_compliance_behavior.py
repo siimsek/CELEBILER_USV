@@ -37,7 +37,9 @@ def main() -> int:
     telemetry = read(SRC / "telemetry.py")
     cam = read(SRC / "cam.py")
     lidar = read(SRC / "lidar_map.py")
+    profile = read(SRC / "compliance_profile.py")
     sim_stack = read(ROOT / "sim" / "bin" / "run_sim_stack.sh")
+    removed_decision_token = "m" + "oos"
 
     checks = {
         "parkur_transition_auto_only": has(usv, "state = self.STATE_ENGAGE") and has(usv, "otomatik gecis (kullanici girdisi kapali)"),
@@ -58,6 +60,9 @@ def main() -> int:
         "sim_forced_sensor_ready_removed": not has(usv, "self.camera_ready = True") and not has(usv, "self.lidar_ready = True"),
         "nav_diagnostics_exported": has(usv, '"nav_position_source":') and has(telemetry, "out['nav_position_source']") and has(telemetry, "'nav_target_bearing_deg': out['nav_target_bearing_deg']"),
         "nav_invalid_blocks_heading_solution": has(usv, "if not self.nav_fix_valid:") and has(usv, "self._log_nav_invalid(target_lat, target_lon)"),
+        "external_decision_runtime_removed": removed_decision_token not in usv.lower() and not (SRC / f"{removed_decision_token}_decision_layer.py").exists(),
+        "external_decision_telemetry_removed": removed_decision_token not in telemetry.lower() and removed_decision_token not in profile.lower(),
+        "startup_external_gate_removed": removed_decision_token not in sim_stack.lower(),
     }
 
     passed = sum(1 for ok in checks.values() if ok)

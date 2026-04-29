@@ -11,6 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from motor_controller import mix_twin_thrusters
+from navigation import heading_first_waypoint_request
+
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(max_value, value))
@@ -116,8 +119,23 @@ def compute_nav_decision(
             1.0,
         )
 
-    heading_error = clamp(nominal_heading, -85.0, 85.0)
-    speed = max(0.0, float(base_speed_mps))
+    waypoint_request = heading_first_waypoint_request(
+        distance_m=distance_m,
+        heading_error_deg=nominal_heading,
+        cruise_speed_mps=base_speed_mps,
+        approach_speed_mps=min(float(base_speed_mps), float(failsafe_slow_mps)),
+        slow_down_radius_m=8.0,
+    )
+    heading_error = clamp(float(waypoint_request.heading_error_deg), -85.0, 85.0)
+    speed = max(0.0, float(waypoint_request.speed_mps))
+    if waypoint_request.phase == "TURN_TO_WAYPOINT":
+        mode = "nav_turn_to_waypoint"
+        reason = "heading_first"
+        limit_reason = "heading_first"
+    elif waypoint_request.phase == "WAYPOINT_REACHED":
+        mode = "nav_waypoint_reached"
+        reason = "acceptance_radius"
+        limit_reason = "waypoint_reached"
 
     if front_distance_m < stop_distance_m:
         # Emergency: 100% avoidance
@@ -309,61 +327,18 @@ def allocate_twin_thrusters(
     pwm_span: int = 400,
     max_speed_mps: float = 1.5,
 ) -> MotorAllocation:
-    speed = float(speed_mps)
-    heading_error = float(heading_error_deg)
-    surge_norm = clamp(speed / max(float(max_speed_mps), 0.1), -1.0, 1.0)
-    # /72 (eskiden /80): orta heading hatalarında diferansiyel dönüş biraz güçlenir (WP1’de önce buruna dönüş)
-    yaw_norm = clamp(heading_error / 72.0, -1.0, 1.0)
-    heading_abs = abs(heading_error)
-    limit_reason = "nominal"
-
-    # As turn demand grows we reserve more authority for yaw so the inner motor
-    # does not get starved by a too-large forward command.
-    if speed > 0.0:
-        if heading_abs >= 75.0:
-            surge_norm = min(surge_norm, 0.32)
-            limit_reason = "hard_turn_speed_cap"
-        elif heading_abs >= 50.0:
-            surge_norm = min(surge_norm, 0.48)
-            limit_reason = "medium_turn_speed_cap"
-        elif heading_abs >= 25.0:
-            surge_norm = min(surge_norm, 0.68)
-            limit_reason = "soft_turn_speed_cap"
-        elif heading_abs >= 10.0:
-            # 10–25°: önceki davranışta ileri güdüm yüksek, yaw zayıf kalıyordu → “düz gidip geç dönüyor”
-            surge_norm = min(surge_norm, 0.52)
-            limit_reason = "align_turn_speed_cap"
-        if 0.0 < surge_norm < 0.14:
-            surge_norm = 0.14
-
-    yaw_gain = 0.92 - (0.22 * abs(surge_norm))
-    left_mix = surge_norm - (yaw_norm * yaw_gain)
-    right_mix = surge_norm + (yaw_norm * yaw_gain)
-
-    clipped = False
-    max_mag = max(abs(left_mix), abs(right_mix), 1.0)
-    if max_mag > 1.0:
-        left_mix /= max_mag
-        right_mix /= max_mag
-        clipped = True
-        limit_reason = "mix_normalized"
-
-    left_pwm = int(round(int(neutral_pwm) + (left_mix * int(pwm_span))))
-    right_pwm = int(round(int(neutral_pwm) + (right_mix * int(pwm_span))))
-    left_pwm = int(clamp(left_pwm, 1100, 1900))
-    right_pwm = int(clamp(right_pwm, 1100, 1900))
-    # Narrow deadband so small heading corrections still produce differential thrust (WP1 approach).
-    _pwm_dead = 8
-    if abs(left_pwm - int(neutral_pwm)) < _pwm_dead:
-        left_pwm = int(neutral_pwm)
-    if abs(right_pwm - int(neutral_pwm)) < _pwm_dead:
-        right_pwm = int(neutral_pwm)
-
+    mix = mix_twin_thrusters(
+        speed_mps=speed_mps,
+        heading_error_deg=heading_error_deg,
+        neutral_pwm=neutral_pwm,
+        pwm_span=pwm_span,
+        max_speed_mps=max_speed_mps,
+    )
     return MotorAllocation(
-        left_pwm=left_pwm,
-        right_pwm=right_pwm,
-        surge_norm=float(surge_norm),
-        yaw_norm=float(yaw_norm),
-        clipped=bool(clipped),
-        limit_reason=limit_reason,
+        left_pwm=int(mix.left_pwm),
+        right_pwm=int(mix.right_pwm),
+        surge_norm=float(mix.surge_norm),
+        yaw_norm=float(mix.yaw_norm),
+        clipped=bool(mix.clipped),
+        limit_reason=str(mix.limit_reason),
     )

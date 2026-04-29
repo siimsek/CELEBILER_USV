@@ -82,6 +82,7 @@ LINK_STATE_FILE = f"{CONTROL_DIR}/telemetry_link_state.json"
 FLAG_START = f"{CONTROL_DIR}/start_mission.flag"
 FLAG_STOP = f"{CONTROL_DIR}/emergency_stop.flag"
 STATE_FILE = f"{CONTROL_DIR}/mission_state.json"
+MOTOR_COMMAND_FILE = f"{CONTROL_DIR}/motor_command.json"
 CAMERA_STREAM_PROXY_SOURCE = os.environ.get("CAMERA_STREAM_PROXY_SOURCE", "http://127.0.0.1:5000/")
 LIDAR_STREAM_PROXY_SOURCE = os.environ.get("LIDAR_STREAM_PROXY_SOURCE", "http://127.0.0.1:5001/")
 LIDAR_MAP_JPG = f"{LOG_DIR}/file3_local_map_latest.jpg"
@@ -97,9 +98,26 @@ telemetry_data = {
     "Sys_CPU": 0, "Sys_RAM": 0, "Sys_Temp": 0,
     "RC1": 0, "RC2": 0, "RC3": 0, "RC4": 0, "RC7": 0,
     "Out1": 0, "Out3": 0,
+    "CMD_Port": 1500, "CMD_Stbd": 1500, "CMD_Source": "--",
     "GPS_FixType": 0, "GPS_Satellites": 0,
 }
-COLUMNS = list(telemetry_data.keys())
+CSV_COLUMNS = [
+    "timestamp",
+    "lat",
+    "lon",
+    "ground_speed",
+    "roll",
+    "pitch",
+    "heading",
+    "speed_setpoint",
+    "heading_setpoint",
+    "left_pwm",
+    "right_pwm",
+    "mode",
+    "waypoint_index",
+    "obstacle_state",
+]
+COLUMNS = CSV_COLUMNS
 CSV_LOG_INTERVAL = 1.0  # Şartname: en az 1 Hz
 SIMULATION_MODE = False
 
@@ -115,6 +133,12 @@ mission_data = {
     "stop_requested": False,   # Acil durdur isteği
 }
 last_state_cache = dict(mission_data)
+last_motor_command_cache = {
+    "cmd_port_pwm": 1500,
+    "cmd_stbd_pwm": 1500,
+    "source": "--",
+    "mode_state": {},
+}
 EVENT_QUEUE = deque(maxlen=256)
 EVENT_ID = 0
 EVENT_LAST = {
@@ -124,6 +148,10 @@ EVENT_LAST = {
     "timeout_count": 0,
 }
 EVENT_LOCK = threading.Lock()
+SPATIAL_TRAIL = deque(maxlen=2000)
+SPATIAL_LAST_TRAIL_TS = 0.0
+SPATIAL_TRAIL_MIN_STEP_M = 0.20
+SPATIAL_ORIGIN = {"lat": None, "lon": None}
 _sim_ld = os.environ.get("SIM_LOG_DIR", "").strip()
 _sim_base = _sim_ld if _sim_ld else LOG_DIR
 LOG_FILE_ALLOWLIST = {
@@ -241,6 +269,14 @@ def _clear_flag(path):
     except Exception as exc:
         print(f"[WARN] [IPC] Flag silinemedi ({path}): {exc}")
         return False
+
+def _start_request_pending(state=None):
+    state_dict = state if isinstance(state, dict) else _read_mission_state()
+    if bool(mission_data.get("start_requested", False)):
+        return True
+    if bool(state_dict.get("start_requested", False)):
+        return True
+    return bool(os.path.exists(FLAG_START))
 
 
 def _atomic_write_json(path, payload):
@@ -448,6 +484,7 @@ HTML_PAGE = """
         /* === FEEDS === */
         .feed { background:#000; flex:1; display:flex; justify-content:center; align-items:center; position:relative; }
         .feed img { width:100%; height:100%; object-fit:contain; }
+        .feed canvas { width:100%; height:100%; display:block; background:#050812; }
         .feed-off { color:var(--text2); font-size:0.85rem; text-align:center; padding:20px; }
 
         /* === STATS ROW === */
@@ -529,10 +566,10 @@ HTML_PAGE = """
             <div class="feed"><img id="cam_img" alt="Camera" /></div>
         </div>
 
-        <!-- LIDAR MAP -->
+        <!-- UNIFIED SPATIAL MAP -->
         <div class="card">
-            <div class="card-h"><span>Lidar Map</span><span class="dot dot-g"></span></div>
-            <div class="feed"><img id="map_img" alt="Lidar Map" /></div>
+            <div class="card-h"><span>Unified Spatial Map</span><span class="dot dot-g"></span></div>
+            <div class="feed"><canvas id="unified_map_canvas" aria-label="Unified Spatial Map"></canvas></div>
         </div>
         {% else %}
         <!-- RACE MODE: No feeds -->
@@ -615,7 +652,7 @@ HTML_PAGE = """
     <script>
         // --- DATA UPDATE ---
         let missionStartTime = 0;
-        let missionRunning = false;
+        let missionStartPending = false;
 
         function updateStats() {
             fetch('/api/data')
@@ -675,8 +712,21 @@ HTML_PAGE = """
                         }
 
                         // Buttons
-                        document.getElementById('btn_start').disabled = d.mission_active || d.usv_mode === 'race' || !d.ready_state || !d.camera_ready || !d.lidar_ready;
+                        document.getElementById('btn_start').disabled =
+                            d.mission_active ||
+                            d.start_requested ||
+                            missionStartPending ||
+                            d.usv_mode === 'race' ||
+                            !d.ready_state ||
+                            !d.camera_ready ||
+                            !d.lidar_ready;
+                        if (!d.start_requested && !d.mission_active && !missionStartPending) {
+                            document.getElementById('btn_start').innerText = '▶ Görevi Başlat';
+                        }
                         document.getElementById('btn_stop').disabled = !d.mission_active;
+                        if (d.mission_active || !d.start_requested) {
+                            missionStartPending = false;
+                        }
 
                         // Mission dot
                         document.getElementById('mc_dot').className = 'dot ' + (d.mission_active ? 'dot-g' : 'dot-r');
@@ -707,8 +757,30 @@ HTML_PAGE = """
         }
 
         // Commands
-        function cmdStart() { fetch('/api/start_mission', {method:'POST'}).then(()=>{missionRunning=true;}); }
-        function cmdStop() { fetch('/api/emergency_stop', {method:'POST'}).then(()=>{missionRunning=false;}); }
+        function cmdStart() {
+            if (missionStartPending) return;
+            missionStartPending = true;
+            const btn = document.getElementById('btn_start');
+            btn.disabled = true;
+            btn.innerText = '⏳ Start Bekleniyor';
+            fetch('/api/start_mission', {method:'POST'})
+                .then(async (res) => {
+                    if (!res.ok) {
+                        missionStartPending = false;
+                        btn.innerText = '▶ Görevi Başlat';
+                    }
+                })
+                .catch(() => {
+                    missionStartPending = false;
+                    btn.innerText = '▶ Görevi Başlat';
+                });
+        }
+        function cmdStop() {
+            missionStartPending = false;
+            const btn = document.getElementById('btn_start');
+            btn.innerText = '▶ Görevi Başlat';
+            fetch('/api/emergency_stop', {method:'POST'});
+        }
         function cmdShutdown() { if(confirm('Sistemi kapatmak istediğinizden emin misiniz?')) { fetch('/api/shutdown', {method:'POST'}).then(()=>{alert('Sistem kapatılıyor...');}); } }
 
         function bindCameraFeed(el) {
@@ -739,49 +811,215 @@ HTML_PAGE = """
             el.dataset.camBound = '1';
         }
 
-        function bindLidarFeed(el) {
-            if (!el) return;
-            const host = window.location.hostname || '127.0.0.1';
-            const candidates = [
-                '/api/lidar_stream',
-                'http://' + host + ':5001/'
-            ];
-            if (!el.dataset.lidarHooked) {
-                el.dataset.lidarHooked = '1';
-                el.dataset.lidarIndex = el.dataset.lidarIndex || '0';
-                el.onerror = function() {
-                    const idx = Number(el.dataset.lidarIndex || '0');
-                    el.dataset.lidarIndex = String((idx + 1) % candidates.length);
-                    el.dataset.lidarBound = '0';
-                };
+        let spatialMapState = null;
+        let spatialMapFetchBusy = false;
+
+        async function refreshSpatialMapState() {
+            if (spatialMapFetchBusy) return;
+            spatialMapFetchBusy = true;
+            try {
+                const r = await fetch('/api/spatial_map');
+                if (!r.ok) return;
+                spatialMapState = await r.json();
+            } catch (_) {
+            } finally {
+                spatialMapFetchBusy = false;
             }
-            const lastAttempt = Number(el.dataset.lidarAttemptTs || '0');
-            const currentSrc = el.getAttribute('src') || '';
-            const shouldRetry = !currentSrc || el.naturalWidth === 0 || el.dataset.lidarBound !== '1';
-            if (!shouldRetry && (Date.now() - lastAttempt) < 5000) {
-                return;
+        }
+
+        function drawUnifiedSpatialMap(canvas, payload) {
+            if (!canvas || !payload) return;
+            const rect = canvas.getBoundingClientRect();
+            const width = Math.max(320, Math.floor(rect.width || 0));
+            const height = Math.max(240, Math.floor(rect.height || 0));
+            if (canvas.width !== width || canvas.height !== height) {
+                canvas.width = width;
+                canvas.height = height;
             }
-            const idx = Number(el.dataset.lidarIndex || '0') % candidates.length;
-            el.src = candidates[idx] + '?t=' + Date.now();
-            el.dataset.lidarAttemptTs = String(Date.now());
-            el.dataset.lidarBound = '1';
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+
+            ctx.fillStyle = '#050812';
+            ctx.fillRect(0, 0, width, height);
+
+            const boat = payload.boat || null;
+            const trail = (payload.trail && Array.isArray(payload.trail.points)) ? payload.trail.points : [];
+            const wps = Array.isArray(payload.waypoints) ? payload.waypoints : [];
+            const lidarPts = (payload.lidar && Array.isArray(payload.lidar.points)) ? payload.lidar.points : [];
+            const lidarWorldPts = [];
+            if (boat) {
+                const bx = Number(boat.x_m || 0);
+                const by = Number(boat.y_m || 0);
+                const hdgRad = Number(boat.heading_deg || 0) * Math.PI / 180.0;
+                const c = Math.cos(hdgRad);
+                const s = Math.sin(hdgRad);
+                for (const p of lidarPts) {
+                    if (!Array.isArray(p) || p.length < 2) continue;
+                    const lx = Number(p[0]);
+                    const ly = Number(p[1]);
+                    if (!Number.isFinite(lx) || !Number.isFinite(ly)) continue;
+                    const wx = bx + (lx * c) - (ly * s);
+                    const wy = by + (lx * s) + (ly * c);
+                    lidarWorldPts.push([wx, wy]);
+                }
+            } else {
+                for (const p of lidarPts) {
+                    if (!Array.isArray(p) || p.length < 2) continue;
+                    const x = Number(p[0]);
+                    const y = Number(p[1]);
+                    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                    lidarWorldPts.push([x, y]);
+                }
+            }
+
+            const allPts = [];
+            for (const p of trail) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
+            for (const w of wps) allPts.push([Number(w.x_m || 0), Number(w.y_m || 0)]);
+            for (const p of lidarWorldPts) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
+            if (boat) allPts.push([Number(boat.x_m || 0), Number(boat.y_m || 0)]);
+
+            let cx = boat ? Number(boat.x_m || 0) : 0;
+            let cy = boat ? Number(boat.y_m || 0) : 0;
+            if (!boat && allPts.length) {
+                let sx = 0, sy = 0;
+                for (const p of allPts) { sx += p[0]; sy += p[1]; }
+                cx = sx / allPts.length;
+                cy = sy / allPts.length;
+            }
+
+            let span = 20.0;
+            for (const p of allPts) {
+                const dx = p[0] - cx;
+                const dy = p[1] - cy;
+                span = Math.max(span, Math.hypot(dx, dy) * 1.3);
+            }
+            const scale = Math.min(width, height) / (2.0 * span);
+            const toPx = (x, y) => {
+                const px = (width * 0.5) + ((x - cx) * scale);
+                const py = (height * 0.5) - ((y - cy) * scale);
+                return [px, py];
+            };
+
+            // Grid
+            const gridStepM = span <= 30 ? 2.0 : 5.0;
+            ctx.strokeStyle = 'rgba(110,130,170,0.22)';
+            ctx.lineWidth = 1;
+            const leftM = cx - span;
+            const rightM = cx + span;
+            const bottomM = cy - span;
+            const topM = cy + span;
+            let gx = Math.floor(leftM / gridStepM) * gridStepM;
+            while (gx <= rightM) {
+                const p0 = toPx(gx, bottomM);
+                const p1 = toPx(gx, topM);
+                ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
+                gx += gridStepM;
+            }
+            let gy = Math.floor(bottomM / gridStepM) * gridStepM;
+            while (gy <= topM) {
+                const p0 = toPx(leftM, gy);
+                const p1 = toPx(rightM, gy);
+                ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
+                gy += gridStepM;
+            }
+
+            // LiDAR points
+            const lidarAge = payload.lidar && payload.lidar.age_s != null ? Number(payload.lidar.age_s) : null;
+            const lidarAlpha = (lidarAge != null && lidarAge > 0.35) ? 0.25 : 0.65;
+            ctx.fillStyle = `rgba(56,189,248,${lidarAlpha})`;
+            for (const p of lidarWorldPts) {
+                if (!Array.isArray(p) || p.length < 2) continue;
+                const q = toPx(Number(p[0]), Number(p[1]));
+                ctx.fillRect(q[0] - 1, q[1] - 1, 2, 2);
+            }
+
+            // Trail
+            if (trail.length >= 2) {
+                ctx.strokeStyle = 'rgba(34,197,94,0.95)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                const p0 = toPx(Number(trail[0][0]), Number(trail[0][1]));
+                ctx.moveTo(p0[0], p0[1]);
+                for (let i = 1; i < trail.length; i++) {
+                    const pt = trail[i];
+                    if (!Array.isArray(pt) || pt.length < 2) continue;
+                    const q = toPx(Number(pt[0]), Number(pt[1]));
+                    ctx.lineTo(q[0], q[1]);
+                }
+                ctx.stroke();
+            }
+
+            // Waypoints + route
+            if (wps.length >= 2) {
+                ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                const p0 = toPx(Number(wps[0].x_m || 0), Number(wps[0].y_m || 0));
+                ctx.moveTo(p0[0], p0[1]);
+                for (let i = 1; i < wps.length; i++) {
+                    const q = toPx(Number(wps[i].x_m || 0), Number(wps[i].y_m || 0));
+                    ctx.lineTo(q[0], q[1]);
+                }
+                ctx.stroke();
+            }
+            for (const w of wps) {
+                const q = toPx(Number(w.x_m || 0), Number(w.y_m || 0));
+                let color = '#94a3b8';
+                if (w.status === 'active') color = '#f59e0b';
+                else if (w.status === 'past') color = '#22c55e';
+                else if (w.status === 'future') color = '#e2e8f0';
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(q[0], q[1], 4, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#cbd5e1';
+                ctx.font = '11px monospace';
+                ctx.fillText(String((w.idx ?? 0) + 1), q[0] + 6, q[1] - 6);
+            }
+
+            // Boat pose
+            if (boat) {
+                const bx = Number(boat.x_m || 0);
+                const by = Number(boat.y_m || 0);
+                const hdg = Number(boat.heading_deg || 0) * Math.PI / 180.0;
+                const q = toPx(bx, by);
+                const boatR = 9;
+                ctx.save();
+                ctx.translate(q[0], q[1]);
+                ctx.rotate(-hdg + Math.PI / 2.0);
+                ctx.fillStyle = '#fb7185';
+                ctx.beginPath();
+                ctx.moveTo(0, -boatR);
+                ctx.lineTo(boatR * 0.65, boatR * 0.8);
+                ctx.lineTo(-boatR * 0.65, boatR * 0.8);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+            }
+
+            // Frame label
+            ctx.fillStyle = 'rgba(203,213,225,0.8)';
+            ctx.font = '12px monospace';
+            ctx.fillText('ENU local', 10, 16);
         }
 
         function refreshVisualFeeds() {
             {% if usv_mode == 'test' %}
             var camEl = document.getElementById('cam_img');
-            var mapEl = document.getElementById('map_img');
+            var mapEl = document.getElementById('unified_map_canvas');
             bindCameraFeed(camEl);
-            bindLidarFeed(mapEl);
+            drawUnifiedSpatialMap(mapEl, spatialMapState);
             {% endif %}
         }
 
         setInterval(updateStats, 200);
         setInterval(updateTimer, 1000);
-        setInterval(refreshVisualFeeds, 1000);
+        setInterval(refreshSpatialMapState, 200);
+        setInterval(refreshVisualFeeds, 200);
 
         // Load feeds (test mode only)
         window.onload = function() {
+            refreshSpatialMapState();
             refreshVisualFeeds();
         };
     </script>
@@ -898,8 +1136,8 @@ class SmartTelemetry:
         else:
             self.link_heartbeat_age_s = 999.0
 
-        # KRITIK: Minimum interval reduced from 0.2s to 0.05s for faster heartbeat updates
-        if not force and (now - self._last_link_state_write) < 0.05:
+        # Keep updates frequent enough for watchdog while avoiding needless disk churn.
+        if not force and (now - self._last_link_state_write) < 0.20:
             return
 
         payload = {
@@ -964,6 +1202,9 @@ class SmartTelemetry:
                 telemetry_data["RC7"] = RC7_ESTOP_FORCE_PWM
                 telemetry_data["Out1"] = 1500
                 telemetry_data["Out3"] = 1500
+                telemetry_data["CMD_Port"] = 1500
+                telemetry_data["CMD_Stbd"] = 1500
+                telemetry_data["CMD_Source"] = "ESTOP"
                 telemetry_data["Manual_Lock_Reason"] = "ESTOP"
             print("🚨 [ESTOP] RC7+HOLD+PWM1500+DISARM gönderildi")
             return True
@@ -983,8 +1224,49 @@ class SmartTelemetry:
                         telemetry_data["Speed_Setpoint"] = round(float(v_t), 3)
                     if h_t is not None:
                         telemetry_data["Heading_Setpoint"] = round(float(h_t), 3)
+            motor_cmd = _read_motor_command()
+            cmd_port = _pick_primary_fallback(
+                motor_cmd.get("cmd_port_pwm"),
+                telemetry_data.get("Out1"),
+                default=1500,
+            )
+            cmd_stbd = _pick_primary_fallback(
+                motor_cmd.get("cmd_stbd_pwm"),
+                telemetry_data.get("Out3"),
+                default=1500,
+            )
+            telemetry_data["Out1"] = cmd_port
+            telemetry_data["Out3"] = cmd_stbd
+            telemetry_data["CMD_Port"] = cmd_port
+            telemetry_data["CMD_Stbd"] = cmd_stbd
+            telemetry_data["CMD_Source"] = str(motor_cmd.get("source", "--") or "--")
         except Exception:
             pass
+
+    def _csv_row(self):
+        state = _read_mission_state()
+        obstacle_state = (
+            state.get("obstacle_threat_source")
+            or state.get("avoidance_source")
+            or state.get("lidar_frame_status")
+            or "none"
+        )
+        return [
+            self._csv_timestamp(),
+            telemetry_data.get("Lat"),
+            telemetry_data.get("Lon"),
+            telemetry_data.get("Speed"),
+            telemetry_data.get("Roll"),
+            telemetry_data.get("Pitch"),
+            telemetry_data.get("Heading"),
+            telemetry_data.get("Speed_Setpoint"),
+            telemetry_data.get("Heading_Setpoint"),
+            telemetry_data.get("CMD_Port", telemetry_data.get("Out1", 1500)),
+            telemetry_data.get("CMD_Stbd", telemetry_data.get("Out3", 1500)),
+            telemetry_data.get("Mode"),
+            state.get("active_waypoint_index", -1),
+            obstacle_state,
+        ]
 
     def csv_logger(self):
         """Şartname Bölüm 6: Telemetri CSV 1 Hz kayıt"""
@@ -993,9 +1275,7 @@ class SmartTelemetry:
                 if time.time() - self.last_csv_log_time >= CSV_LOG_INTERVAL:
                     self._sync_setpoints_from_state()
                     with self.lock:
-                        row = [telemetry_data.get(k, '') for k in COLUMNS]
-                        if row:
-                            row[0] = self._csv_timestamp()
+                        row = self._csv_row()
                     with open(CSV_FILE, 'a', newline='') as f:
                         csv_mod.writer(f).writerow(row)
                     self.last_csv_log_time = time.time()
@@ -1182,7 +1462,7 @@ class SmartTelemetry:
         
         while self.running:
             if not self.pixhawk:
-                self._publish_link_state(force=True)  # Force write when no pixhawk
+                self._publish_link_state()
                 time.sleep(0.1); continue
                 
             try:
@@ -1193,11 +1473,10 @@ class SmartTelemetry:
                         if msg.chan3_raw > 0:
                             print(f"🎮 [RC] Sinyal Tespit Edildi: CH3={msg.chan3_raw}")
                             rc_logged = True
-                    self._publish_link_state(force=True)  # Force write on every message
+                    self._publish_link_state()
                 else:
                     log_jsonl("telemetry", False, event="rx_timeout", blocking_timeout_s=1.0)
-                    # KRITIK: No message received (timeout) - still write heartbeat
-                    self._publish_link_state(force=True)  # Force write on timeout
+                    self._publish_link_state()
             except Exception as e:
                 self._bump_error("mav_read_error", f"[WARN] [MAV] Okuma hatasi: {e}")
                 self._publish_link_state(force=True)  # Force write on error
@@ -1566,6 +1845,9 @@ class MotorController:
                     if safety_lock:
                         telemetry_data["Out1"] = 1500
                         telemetry_data["Out3"] = 1500
+                        telemetry_data["CMD_Port"] = 1500
+                        telemetry_data["CMD_Stbd"] = 1500
+                        telemetry_data["CMD_Source"] = "SAFETY_LOCK"
                     telemetry_data["Manual_Lock_Reason"] = lock_reason
                 continue
 
@@ -1593,6 +1875,9 @@ class MotorController:
                 with self.parent.lock:
                     telemetry_data["Out1"] = 1500
                     telemetry_data["Out3"] = 1500
+                    telemetry_data["CMD_Port"] = 1500
+                    telemetry_data["CMD_Stbd"] = 1500
+                    telemetry_data["CMD_Source"] = "RC_TIMEOUT"
                     telemetry_data["Manual_Lock_Reason"] = "RC_TIMEOUT"
                 continue
              
@@ -1673,6 +1958,9 @@ class MotorController:
                     with self.parent.lock:
                         telemetry_data["Out1"] = left_pwm_out
                         telemetry_data["Out3"] = right_pwm_out
+                        telemetry_data["CMD_Port"] = left_pwm_out
+                        telemetry_data["CMD_Stbd"] = right_pwm_out
+                        telemetry_data["CMD_Source"] = "MANUAL_ACTIVE"
                         telemetry_data["Manual_Lock_Reason"] = "MANUAL_ACTIVE"
                         
                         thrust_norm = (self.current_pwm - 1500) / 400.0
@@ -2053,9 +2341,9 @@ CONTROLLER_PAGE = """
                 </div>
             </div>
             <div class="card">
-                <header><h2>Lidar Haritası</h2><span class="mini">latest local map</span></header>
+                <header><h2>Unified Spatial Map</h2><span class="mini">ENU overlay</span></header>
                 <div class="body">
-                    <img id="controllerLidarFeed" class="feed-shell" alt="Lidar Preview" />
+                    <canvas id="controllerUnifiedMapCanvas" class="feed-shell" aria-label="Unified Spatial Map"></canvas>
                 </div>
             </div>
         </section>
@@ -2084,6 +2372,7 @@ CONTROLLER_PAGE = """
         const stateMap = {0: 'BEKLEME', 1: 'NAV', 2: 'ENGAGE', 4: 'TAMAMLANDI', 5: 'HOLD'};
         let latestEventId = 0;
         let logFilesLoaded = false;
+        let startPending = false;
 
         function fmtNum(v, d=3) {
             if (v === null || v === undefined || Number.isNaN(Number(v))) return '--';
@@ -2187,32 +2476,174 @@ CONTROLLER_PAGE = """
             el.dataset.camBound = '1';
         }
 
-        function bindLidarFeed(el) {
-            if (!el) return;
-            const host = window.location.hostname || '127.0.0.1';
-            const candidates = [
-                '/api/lidar_stream',
-                `http://${host}:5001/`
-            ];
-            if (!el.dataset.lidarHooked) {
-                el.dataset.lidarHooked = '1';
-                el.dataset.lidarIndex = el.dataset.lidarIndex || '0';
-                el.onerror = function() {
-                    const idx = Number(el.dataset.lidarIndex || '0');
-                    el.dataset.lidarIndex = String((idx + 1) % candidates.length);
-                    el.dataset.lidarBound = '0';
-                };
+        let spatialMapState = null;
+        let spatialMapFetchBusy = false;
+
+        async function refreshSpatialMapState() {
+            if (spatialMapFetchBusy) return;
+            spatialMapFetchBusy = true;
+            try {
+                const r = await fetch('/api/spatial_map');
+                if (!r.ok) return;
+                spatialMapState = await r.json();
+            } catch (_) {
+            } finally {
+                spatialMapFetchBusy = false;
             }
-            const lastAttempt = Number(el.dataset.lidarAttemptTs || '0');
-            const currentSrc = el.getAttribute('src') || '';
-            const shouldRetry = !currentSrc || el.naturalWidth === 0 || el.dataset.lidarBound !== '1';
-            if (!shouldRetry && (Date.now() - lastAttempt) < 5000) {
-                return;
+        }
+
+        function drawUnifiedSpatialMap(canvas, payload) {
+            if (!canvas || !payload) return;
+            const rect = canvas.getBoundingClientRect();
+            const width = Math.max(320, Math.floor(rect.width || 0));
+            const height = Math.max(240, Math.floor(rect.height || 0));
+            if (canvas.width !== width || canvas.height !== height) {
+                canvas.width = width;
+                canvas.height = height;
             }
-            const idx = Number(el.dataset.lidarIndex || '0') % candidates.length;
-            el.src = `${candidates[idx]}?t=${Date.now()}`;
-            el.dataset.lidarAttemptTs = String(Date.now());
-            el.dataset.lidarBound = '1';
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+
+            ctx.fillStyle = '#050812';
+            ctx.fillRect(0, 0, width, height);
+
+            const boat = payload.boat || null;
+            const trail = (payload.trail && Array.isArray(payload.trail.points)) ? payload.trail.points : [];
+            const wps = Array.isArray(payload.waypoints) ? payload.waypoints : [];
+            const lidarPts = (payload.lidar && Array.isArray(payload.lidar.points)) ? payload.lidar.points : [];
+            const lidarWorldPts = [];
+            if (boat) {
+                const bx = Number(boat.x_m || 0);
+                const by = Number(boat.y_m || 0);
+                const hdgRad = Number(boat.heading_deg || 0) * Math.PI / 180.0;
+                const c = Math.cos(hdgRad);
+                const s = Math.sin(hdgRad);
+                for (const p of lidarPts) {
+                    if (!Array.isArray(p) || p.length < 2) continue;
+                    const lx = Number(p[0]);
+                    const ly = Number(p[1]);
+                    if (!Number.isFinite(lx) || !Number.isFinite(ly)) continue;
+                    const wx = bx + (lx * c) - (ly * s);
+                    const wy = by + (lx * s) + (ly * c);
+                    lidarWorldPts.push([wx, wy]);
+                }
+            } else {
+                for (const p of lidarPts) {
+                    if (!Array.isArray(p) || p.length < 2) continue;
+                    const x = Number(p[0]);
+                    const y = Number(p[1]);
+                    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                    lidarWorldPts.push([x, y]);
+                }
+            }
+            const allPts = [];
+            for (const p of trail) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
+            for (const w of wps) allPts.push([Number(w.x_m || 0), Number(w.y_m || 0)]);
+            for (const p of lidarWorldPts) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
+            if (boat) allPts.push([Number(boat.x_m || 0), Number(boat.y_m || 0)]);
+
+            let cx = boat ? Number(boat.x_m || 0) : 0;
+            let cy = boat ? Number(boat.y_m || 0) : 0;
+            if (!boat && allPts.length) {
+                let sx = 0, sy = 0;
+                for (const p of allPts) { sx += p[0]; sy += p[1]; }
+                cx = sx / allPts.length;
+                cy = sy / allPts.length;
+            }
+            let span = 20.0;
+            for (const p of allPts) {
+                span = Math.max(span, Math.hypot(p[0] - cx, p[1] - cy) * 1.3);
+            }
+            const scale = Math.min(width, height) / (2.0 * span);
+            const toPx = (x, y) => [(width * 0.5) + ((x - cx) * scale), (height * 0.5) - ((y - cy) * scale)];
+
+            const gridStepM = span <= 30 ? 2.0 : 5.0;
+            ctx.strokeStyle = 'rgba(110,130,170,0.22)';
+            ctx.lineWidth = 1;
+            const leftM = cx - span, rightM = cx + span, bottomM = cy - span, topM = cy + span;
+            let gx = Math.floor(leftM / gridStepM) * gridStepM;
+            while (gx <= rightM) {
+                const p0 = toPx(gx, bottomM), p1 = toPx(gx, topM);
+                ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
+                gx += gridStepM;
+            }
+            let gy = Math.floor(bottomM / gridStepM) * gridStepM;
+            while (gy <= topM) {
+                const p0 = toPx(leftM, gy), p1 = toPx(rightM, gy);
+                ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
+                gy += gridStepM;
+            }
+
+            const lidarAge = payload.lidar && payload.lidar.age_s != null ? Number(payload.lidar.age_s) : null;
+            const lidarAlpha = (lidarAge != null && lidarAge > 0.35) ? 0.25 : 0.65;
+            ctx.fillStyle = `rgba(56,189,248,${lidarAlpha})`;
+            for (const p of lidarWorldPts) {
+                if (!Array.isArray(p) || p.length < 2) continue;
+                const q = toPx(Number(p[0]), Number(p[1]));
+                ctx.fillRect(q[0] - 1, q[1] - 1, 2, 2);
+            }
+
+            if (trail.length >= 2) {
+                ctx.strokeStyle = 'rgba(34,197,94,0.95)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                const p0 = toPx(Number(trail[0][0]), Number(trail[0][1]));
+                ctx.moveTo(p0[0], p0[1]);
+                for (let i = 1; i < trail.length; i++) {
+                    const pt = trail[i];
+                    if (!Array.isArray(pt) || pt.length < 2) continue;
+                    const q = toPx(Number(pt[0]), Number(pt[1]));
+                    ctx.lineTo(q[0], q[1]);
+                }
+                ctx.stroke();
+            }
+
+            if (wps.length >= 2) {
+                ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                const p0 = toPx(Number(wps[0].x_m || 0), Number(wps[0].y_m || 0));
+                ctx.moveTo(p0[0], p0[1]);
+                for (let i = 1; i < wps.length; i++) {
+                    const q = toPx(Number(wps[i].x_m || 0), Number(wps[i].y_m || 0));
+                    ctx.lineTo(q[0], q[1]);
+                }
+                ctx.stroke();
+            }
+            for (const w of wps) {
+                const q = toPx(Number(w.x_m || 0), Number(w.y_m || 0));
+                let color = '#94a3b8';
+                if (w.status === 'active') color = '#f59e0b';
+                else if (w.status === 'past') color = '#22c55e';
+                else if (w.status === 'future') color = '#e2e8f0';
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(q[0], q[1], 4, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#cbd5e1';
+                ctx.font = '11px monospace';
+                ctx.fillText(String((w.idx ?? 0) + 1), q[0] + 6, q[1] - 6);
+            }
+
+            if (boat) {
+                const q = toPx(Number(boat.x_m || 0), Number(boat.y_m || 0));
+                const hdg = Number(boat.heading_deg || 0) * Math.PI / 180.0;
+                ctx.save();
+                ctx.translate(q[0], q[1]);
+                ctx.rotate(-hdg + Math.PI / 2.0);
+                ctx.fillStyle = '#fb7185';
+                ctx.beginPath();
+                ctx.moveTo(0, -9);
+                ctx.lineTo(6, 7);
+                ctx.lineTo(-6, 7);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+            }
+
+            ctx.fillStyle = 'rgba(203,213,225,0.8)';
+            ctx.font = '12px monospace';
+            ctx.fillText('ENU local', 10, 16);
         }
 
         function refreshVisualFeeds() {
@@ -2221,10 +2652,10 @@ CONTROLLER_PAGE = """
                 const el = document.getElementById(id);
                 bindCameraFeed(el);
             }
-            const lidarIds = ['controllerLidarFeed', 'map_img'];
-            for (const id of lidarIds) {
+            const mapIds = ['controllerUnifiedMapCanvas', 'unified_map_canvas'];
+            for (const id of mapIds) {
                 const el = document.getElementById(id);
-                bindLidarFeed(el);
+                drawUnifiedSpatialMap(el, spatialMapState);
             }
         }
 
@@ -2232,7 +2663,9 @@ CONTROLLER_PAGE = """
             const res = await fetch('/api/data');
             const data = await res.json();
             text('usvMode', data.usv_mode || '--');
-            text('vehicleMode', data.Mode || '--');
+            const canonicalMode = data.mode_state_mode || '--';
+            const canonicalSrc = data.mode_state_source || '--';
+            text('vehicleMode', `${data.Mode || '--'} | ${canonicalMode} (${canonicalSrc})`);
             text('missionFile', data.mission_file || '--');
             text('activeParkur', data.active_parkur || 'IDLE');
             text('missionState', `${data.mission_state} / ${stateMap[data.mission_state] || 'UNKNOWN'}`);
@@ -2253,7 +2686,7 @@ CONTROLLER_PAGE = """
             text('manualLock', data.manual_lock_reason || '--');
             text('commandLock', `command_lock=${Boolean(data.command_lock)}`);
             text('rcSummary', `${data.RC1 ?? '--'} / ${data.RC3 ?? '--'}`);
-            text('outSummary', `${data.Out1 ?? '--'} / ${data.Out3 ?? '--'}`);
+            text('outSummary', `${data.CMD_Port ?? data.Out1 ?? '--'} / ${data.CMD_Stbd ?? data.Out3 ?? '--'}`);
             text('cameraReady', String(Boolean(data.camera_ready)));
             text('lidarReady', String(Boolean(data.lidar_ready)));
             text('healthReady', String(Boolean(data.ready_state)));
@@ -2268,7 +2701,19 @@ CONTROLLER_PAGE = """
             const dot = document.getElementById('readyDot');
             dot.className = 'dot ' + (active ? 'ok' : (ready ? 'ok' : 'bad'));
             text('readyText', active ? 'Görev Aktif' : (ready ? 'Hazır' : 'Hazır Değil'));
-            document.getElementById('startBtn').disabled = active || !ready || !Boolean(data.camera_ready) || !Boolean(data.lidar_ready);
+            if (active || !Boolean(data.start_requested)) {
+                startPending = false;
+            }
+            document.getElementById('startBtn').disabled =
+                active ||
+                Boolean(data.start_requested) ||
+                startPending ||
+                !ready ||
+                !Boolean(data.camera_ready) ||
+                !Boolean(data.lidar_ready);
+            if (!startPending && !Boolean(data.start_requested) && !active) {
+                document.getElementById('startBtn').textContent = 'Görevi Başlat';
+            }
         }
 
         async function pollEvents() {
@@ -2287,11 +2732,28 @@ CONTROLLER_PAGE = """
         }
 
         async function doPost(url) {
+            if (url === '/api/start_mission') {
+                if (startPending) return;
+                startPending = true;
+                const btn = document.getElementById('startBtn');
+                btn.disabled = true;
+                btn.textContent = 'Start Bekleniyor';
+            }
             const res = await fetch(url, {method: 'POST'});
             const data = await res.json().catch(() => ({}));
             if (!res.ok) {
+                if (url === '/api/start_mission') {
+                    startPending = false;
+                    const btn = document.getElementById('startBtn');
+                    btn.textContent = 'Görevi Başlat';
+                }
                 prependEvent('request_error', `${url} -> ${JSON.stringify(data)}`);
                 return;
+            }
+            if (url === '/api/emergency_stop') {
+                startPending = false;
+                const btn = document.getElementById('startBtn');
+                btn.textContent = 'Görevi Başlat';
             }
             prependEvent('request_ok', `${url} -> ${JSON.stringify(data)}`);
             await refreshData();
@@ -2312,10 +2774,12 @@ CONTROLLER_PAGE = """
             await loadLogFiles();
             await refreshData();
             await refreshLogs();
+            await refreshSpatialMapState();
             refreshVisualFeeds();
             setInterval(refreshData, 1500);
             setInterval(refreshLogs, 2500);
-            setInterval(refreshVisualFeeds, 1000);
+            setInterval(refreshSpatialMapState, 200);
+            setInterval(refreshVisualFeeds, 200);
             pollEvents();
         })();
     </script>
@@ -2444,16 +2908,206 @@ def _read_mission_state():
         pass
     return last_state_cache
 
+
+def _read_motor_command():
+    """usv_main motor komut dosyasını oku; parse hatasında son geçerli değere düş."""
+    global last_motor_command_cache
+    try:
+        if os.path.exists(MOTOR_COMMAND_FILE):
+            with open(MOTOR_COMMAND_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict):
+                port = payload.get("cmd_port_pwm", payload.get("left_pwm", 1500))
+                stbd = payload.get("cmd_stbd_pwm", payload.get("right_pwm", 1500))
+                last_motor_command_cache = {
+                    "cmd_port_pwm": _pick_primary_fallback(port, last_motor_command_cache.get("cmd_port_pwm"), default=1500),
+                    "cmd_stbd_pwm": _pick_primary_fallback(stbd, last_motor_command_cache.get("cmd_stbd_pwm"), default=1500),
+                    "source": str(payload.get("source", "--") or "--"),
+                    "mode_state": payload.get("mode_state", {}),
+                    "ts_monotonic": payload.get("ts_monotonic"),
+                }
+                return last_motor_command_cache
+    except Exception:
+        pass
+    return last_motor_command_cache
+
+
+def _resolve_spatial_origin(state):
+    if SPATIAL_ORIGIN["lat"] is not None and SPATIAL_ORIGIN["lon"] is not None:
+        return float(SPATIAL_ORIGIN["lat"]), float(SPATIAL_ORIGIN["lon"])
+
+    candidates = [
+        (telemetry_data.get("Lat"), telemetry_data.get("Lon")),
+        (state.get("Lat"), state.get("Lon")),
+    ]
+    mission_file = os.environ.get("MISSION_FILE", MISSION_FILE_DEFAULT)
+    try:
+        if os.path.exists(mission_file):
+            with open(mission_file, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, list) and payload and isinstance(payload[0], (list, tuple)) and len(payload[0]) >= 2:
+                candidates.append((payload[0][0], payload[0][1]))
+    except Exception:
+        pass
+
+    for lat_raw, lon_raw in candidates:
+        try:
+            lat = float(lat_raw)
+            lon = float(lon_raw)
+        except (TypeError, ValueError):
+            continue
+        if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and (abs(lat) > 1e-6 or abs(lon) > 1e-6):
+            SPATIAL_ORIGIN["lat"] = lat
+            SPATIAL_ORIGIN["lon"] = lon
+            return lat, lon
+    return None, None
+
+
+def _latlon_to_enu_m(lat, lon, origin_lat, origin_lon):
+    lat_scale = 111320.0
+    lon_scale = 111320.0 * math.cos(math.radians(float(origin_lat)))
+    east_m = (float(lon) - float(origin_lon)) * lon_scale
+    north_m = (float(lat) - float(origin_lat)) * lat_scale
+    return float(east_m), float(north_m)
+
+
+def _load_mission_waypoints():
+    mission_file = os.environ.get("MISSION_FILE", MISSION_FILE_DEFAULT)
+    if not os.path.exists(mission_file):
+        return []
+    try:
+        with open(mission_file, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if isinstance(payload, list):
+            coords = validate_coordinate_mission(payload)
+            nav_wps, engage_wp = split_nav_engage(coords)
+            out = list(nav_wps)
+            if engage_wp is not None:
+                out.append(engage_wp)
+            return out
+        if isinstance(payload, dict) and MISSION_ALLOW_STRUCTURED_LEGACY:
+            mission = adapt_mission_to_structured(payload, strict=True)
+            out = list(mission.get("parkur1", [])) + list(mission.get("parkur2", [])) + list(mission.get("parkur3", []))
+            return out
+    except Exception:
+        pass
+    return []
+
+
+def _build_spatial_payload(state):
+    origin_lat, origin_lon = _resolve_spatial_origin(state)
+    if origin_lat is None or origin_lon is None:
+        return {
+            "frame": {"name": "enu_local", "origin_lat": None, "origin_lon": None, "x_axis": "east", "y_axis": "north"},
+            "boat": None,
+            "trail": {"points": [], "max_points": int(SPATIAL_TRAIL.maxlen or 0)},
+            "waypoints": [],
+            "lidar": {"points": [], "ts_monotonic": state.get("ts_monotonic"), "age_s": None, "source": "state"},
+        }
+
+    lat = telemetry_data.get("Lat")
+    lon = telemetry_data.get("Lon")
+    boat = None
+    try:
+        if lat is not None and lon is not None:
+            x_m, y_m = _latlon_to_enu_m(float(lat), float(lon), origin_lat, origin_lon)
+            boat = {
+                "x_m": round(x_m, 3),
+                "y_m": round(y_m, 3),
+                "heading_deg": round(float(telemetry_data.get("Heading", 0.0) or 0.0), 3),
+                "ts_monotonic": state.get("ts_monotonic"),
+            }
+    except Exception:
+        boat = None
+
+    now_mono = time.monotonic()
+    if boat is not None:
+        global SPATIAL_LAST_TRAIL_TS
+        should_add = False
+        if not SPATIAL_TRAIL:
+            should_add = True
+        else:
+            px, py = SPATIAL_TRAIL[-1]
+            step = math.hypot(float(boat["x_m"]) - float(px), float(boat["y_m"]) - float(py))
+            if step >= float(SPATIAL_TRAIL_MIN_STEP_M):
+                should_add = True
+        if should_add or (now_mono - float(SPATIAL_LAST_TRAIL_TS)) >= 1.0:
+            SPATIAL_TRAIL.append((float(boat["x_m"]), float(boat["y_m"])))
+            SPATIAL_LAST_TRAIL_TS = now_mono
+
+    wps = []
+    all_wps = _load_mission_waypoints()
+    active_idx = int(state.get("active_waypoint_index", -1) or -1)
+    for idx, wp in enumerate(all_wps):
+        try:
+            lat_wp = float(wp[0])
+            lon_wp = float(wp[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        wx, wy = _latlon_to_enu_m(lat_wp, lon_wp, origin_lat, origin_lon)
+        status = "future"
+        if active_idx >= 0 and idx < active_idx:
+            status = "past"
+        elif active_idx >= 0 and idx == active_idx:
+            status = "active"
+        wps.append(
+            {
+                "idx": int(idx),
+                "x_m": round(float(wx), 3),
+                "y_m": round(float(wy), 3),
+                "status": status,
+            }
+        )
+
+    lidar_points_raw = state.get("lidar_points_local", [])
+    lidar_points = []
+    if isinstance(lidar_points_raw, list):
+        for item in lidar_points_raw[:8192]:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            try:
+                lidar_points.append([round(float(item[0]), 2), round(float(item[1]), 2)])
+            except (TypeError, ValueError):
+                continue
+    state_ts = float(state.get("ts_monotonic", 0.0) or 0.0)
+    age_s = round(max(0.0, time.monotonic() - state_ts), 3) if state_ts > 0.0 else None
+
+    return {
+        "frame": {
+            "name": "enu_local",
+            "origin_lat": round(float(origin_lat), 7),
+            "origin_lon": round(float(origin_lon), 7),
+            "x_axis": "east",
+            "y_axis": "north",
+        },
+        "boat": boat,
+        "trail": {
+            "points": [[round(float(x), 3), round(float(y), 3)] for x, y in SPATIAL_TRAIL],
+            "max_points": int(SPATIAL_TRAIL.maxlen or 0),
+        },
+        "waypoints": wps,
+        "lidar": {
+            "points": lidar_points,
+            "ts_monotonic": state.get("ts_monotonic"),
+            "age_s": age_s,
+            "source": "state",
+        },
+    }
+
 @app.route('/api/data')
 def get_data():
     out = dict(telemetry_data)
     out['usv_mode'] = USV_MODE
     out['mission_file'] = os.environ.get('MISSION_FILE', '--')
     state = _read_mission_state()
+    mission_data['start_requested'] = _start_request_pending(state)
+    motor_cmd = _read_motor_command()
     target_state = load_target_state(TARGET_STATE_FILE)
     _sync_events_from_state(state)
     out['mission_state'] = state.get('state', mission_data['state'])
     out['mission_active'] = state.get('active', mission_data['active'])
+    out['mission_end_reason'] = state.get('mission_end_reason', 'none')
+    out['start_requested'] = _start_request_pending(state)
     out['mission_target'] = state.get('target', mission_data['target'])
     out['mission_wp_info'] = state.get('wp_info', mission_data['wp_info'])
     out['guidance_source'] = state.get('guidance_source', '--')
@@ -2465,6 +3119,32 @@ def get_data():
     out['health_check'] = state.get('health_check', {})
     out['ready_state'] = state.get('ready_state', False)
     out['ready_missing'] = state.get('ready_missing', [])
+    mode_state = state.get('mode_state', {})
+    if not isinstance(mode_state, dict):
+        mode_state = {}
+    out['mode_state'] = mode_state
+    out['mode_state_mode'] = mode_state.get('canonical_mode', '--')
+    out['mode_state_source'] = mode_state.get('source', '--')
+    out['mode_state_reason'] = mode_state.get('reason', '--')
+    out['mode_state_armed'] = bool(mode_state.get('armed', False))
+    cmd_port = _pick_primary_fallback(
+        motor_cmd.get("cmd_port_pwm"),
+        state.get("cmd_port_pwm"),
+        default=out.get('Out1', 1500),
+    )
+    cmd_stbd = _pick_primary_fallback(
+        motor_cmd.get("cmd_stbd_pwm"),
+        state.get("cmd_stbd_pwm"),
+        default=out.get('Out3', 1500),
+    )
+    out['Out1'] = cmd_port
+    out['Out3'] = cmd_stbd
+    out['CMD_Port'] = cmd_port
+    out['CMD_Stbd'] = cmd_stbd
+    out['CMD_Source'] = str(motor_cmd.get("source", state.get("motor_command_source", "--")) or "--")
+    out['motor_command_source'] = out['CMD_Source']
+    out['cmd_port_pwm'] = cmd_port
+    out['cmd_stbd_pwm'] = cmd_stbd
     out['heartbeat_age_s'] = state.get('heartbeat_age_s', 0.0)
     out['link_heartbeat_age_s'] = state.get(
         'link_heartbeat_age_s',
@@ -2503,6 +3183,11 @@ def get_data():
     out['lidar_center_m'] = state.get('lidar_center_m')
     out['lidar_right_m'] = state.get('lidar_right_m')
     out['min_obstacle_m'] = state.get('min_obstacle_m')
+    out['lidar_local_obstacle_valid'] = bool(state.get('lidar_local_obstacle_valid', False))
+    out['lidar_degraded_mode'] = str(state.get('lidar_degraded_mode', 'normal') or 'normal')
+    out['lidar_degraded_age_s'] = float(state.get('lidar_degraded_age_s', 0.0) or 0.0)
+    out['lidar_clock_source'] = state.get('lidar_clock_source', 'none')
+    out['lidar_stamp_age_s'] = state.get('lidar_stamp_age_s')
     out['active_parkur'] = state.get('active_parkur', '--')
     out['active_waypoint_index'] = state.get('active_waypoint_index', -1)
     out['guidance_detail_source'] = state.get('guidance_detail_source', '--')
@@ -2516,6 +3201,11 @@ def get_data():
     out['waypoint_passed_gate'] = bool(state.get('waypoint_passed_gate', False))
     out['waypoint_accept_reason'] = state.get('waypoint_accept_reason', '--')
     out['motor_limit_reason'] = state.get('motor_limit_reason', '--')
+    out['obstacle_threat_active'] = bool(state.get('obstacle_threat_active', False))
+    out['obstacle_threat_source'] = str(state.get('obstacle_threat_source', 'none') or 'none')
+    out['both_reverse_count'] = int(state.get('both_reverse_count', 0) or 0)
+    out['single_side_reverse_count'] = int(state.get('single_side_reverse_count', 0) or 0)
+    out['reverse_while_heading_small_count'] = int(state.get('reverse_while_heading_small_count', 0) or 0)
     camera_pipeline = state.get('camera_pipeline', {})
     out['camera_pipeline'] = camera_pipeline if isinstance(camera_pipeline, dict) else {}
     out['target_color'] = target_state.get('target_color', state.get('target_color', '--'))
@@ -2639,12 +3329,17 @@ def get_data():
         'mode_state': {
             'usv_mode': USV_MODE,
             'vehicle_mode': telemetry_data.get('Mode', '--'),
+            'canonical_mode': out.get('mode_state_mode', '--'),
+            'canonical_source': out.get('mode_state_source', '--'),
+            'canonical_reason': out.get('mode_state_reason', '--'),
+            'canonical_armed': out.get('mode_state_armed', False),
             'mission_state': out['mission_state'],
             'active_parkur': out['active_parkur'],
         },
         'mission_progress': {
             'target': out['mission_target'],
             'wp_info': out['mission_wp_info'],
+            'mission_end_reason': out['mission_end_reason'],
             'active_waypoint_index': out['active_waypoint_index'],
             'target_color': out['target_color'],
             'gate_count': out['gate_count'],
@@ -2691,6 +3386,8 @@ def get_data():
             'lidar_center_m': state.get('lidar_center_m'),
             'lidar_right_m': state.get('lidar_right_m'),
             'min_obstacle_m': state.get('min_obstacle_m'),
+            'lidar_clock_source': out['lidar_clock_source'],
+            'lidar_stamp_age_s': out['lidar_stamp_age_s'],
             'heartbeat_age_s': out['heartbeat_age_s'],
             'link_heartbeat_age_s': out['link_heartbeat_age_s'],
             'state_age_s': out['state_age_s'],
@@ -2713,6 +3410,9 @@ def get_data():
             'estop_state': out['estop_state'],
             'estop_source': out['estop_source'],
             'manual_lock_reason': out['manual_lock_reason'],
+            'motor_command_source': out.get('motor_command_source', '--'),
+            'cmd_port_pwm': out.get('cmd_port_pwm'),
+            'cmd_stbd_pwm': out.get('cmd_stbd_pwm'),
             'health_ready': out['ready_state'],
             'health_missing': out['ready_missing'],
         },
@@ -2721,6 +3421,15 @@ def get_data():
         },
     }
     return jsonify(out)
+
+
+@app.route('/api/spatial_map')
+def spatial_map():
+    if USV_MODE == USV_MODE_RACE:
+        return jsonify({'error': 'Spatial map disabled in race mode'}), 403
+    state = _read_mission_state()
+    payload = _build_spatial_payload(state if isinstance(state, dict) else {})
+    return jsonify(payload)
 
 
 @app.route('/api/log_files')
@@ -2944,13 +3653,19 @@ def start_mission():
         return jsonify({'error': 'Race modunda gorev baslatma sadece RC CH5 ile yapilir (API politikasi kapali).'}), 403
     state = _read_mission_state()
     if state.get('active', False):
+        mission_data['start_requested'] = False
         return jsonify({'error': 'Gorev zaten aktif.'}), 409
+    if _start_request_pending(state):
+        return jsonify({'error': 'Start isteği zaten beklemede.'}), 409
     if not state.get('ready_state', False):
+        mission_data['start_requested'] = False
         return jsonify({'error': 'Sistem hazir degil. Kamera/lidar/telemetri hazir olmadan start kabul edilmez.'}), 409
     if not state.get('camera_ready', False) or not state.get('lidar_ready', False):
+        mission_data['start_requested'] = False
         return jsonify({'error': 'Kamera veya lidar hazir degil. Web controller readiness yesil olmadan start kabul edilmez.'}), 409
     mission_data['start_requested'] = True
     if not _touch_flag(FLAG_START):
+        mission_data['start_requested'] = False
         return jsonify({'error': 'Start flag yazilamadi'}), 500
     print("📡 [DASHBOARD] Görev başlat isteği alındı")
     return jsonify({'ok': True})

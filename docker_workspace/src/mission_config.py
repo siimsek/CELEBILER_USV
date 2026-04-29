@@ -3,8 +3,8 @@ Mission coordinate schema and target-state helpers.
 
 Unified mission contract:
 - Waypoints are a flat ordered list: [[lat, lon], ...]
-- split_nav_engage() separates nav waypoints from the final engage waypoint.
-- The last coordinate in the list is always the engage (target) waypoint.
+- split_nav_engage() separates nav waypoints from an optional explicit engage waypoint.
+- Flat list defaults to NAV-only unless engage is explicitly declared.
 - Target color is loaded separately from target_state.json.
 """
 
@@ -16,7 +16,7 @@ import os
 from typing import Any
 
 
-MISSION_MIN_WAYPOINTS = 2  # At minimum: 1 nav + 1 engage waypoint
+MISSION_MIN_WAYPOINTS = 1  # At minimum: 1 nav waypoint
 TARGET_STATE_FILE = os.environ.get("TARGET_STATE_FILE", f"{os.environ.get('CONTROL_DIR', '')}/target_state.json")
 
 VALID_TARGET_COLORS = (
@@ -64,7 +64,7 @@ def validate_coordinate_mission(data: Any) -> list[list[float]]:
     if len(coords) < MISSION_MIN_WAYPOINTS:
         raise ValueError(
             f"Mission must have at least {MISSION_MIN_WAYPOINTS} waypoints "
-            f"(nav waypoints + 1 engage waypoint); got {len(coords)}"
+            f"(nav waypoints); got {len(coords)}"
         )
     return coords
 
@@ -84,21 +84,24 @@ def validate_coordinate_pair(wp: Any, idx: int | str = "?") -> list[float]:
 
 def split_nav_engage(
     coords: list[list[float]],
+    *,
+    has_explicit_engage: bool = False,
 ) -> tuple[list[list[float]], list[float] | None]:
     """
     Split flat waypoint list into nav waypoints and engage (target) waypoint.
 
     Contract:
-    - Last coordinate = engage waypoint (target duba contact point)
-    - Everything before = nav waypoints (obstacle avoidance + gate navigation)
-    - If only 1 waypoint given: treat it as engage, nav is empty
+    - Default (flat mission): all coordinates are nav waypoints.
+    - Explicit engage (structured mission): last coordinate is engage waypoint.
     - If empty: both empty/None
     """
     if len(coords) == 0:
         return [], None
+    if not bool(has_explicit_engage):
+        return list(coords), None
     if len(coords) == 1:
         return [], coords[0]
-    return coords[:-1], coords[-1]
+    return list(coords[:-1]), coords[-1]
 
 
 def load_coordinate_mission_file(path: str) -> list[list[float]]:
@@ -129,10 +132,8 @@ def load_target_state(path: str | None = None) -> dict[str, Any]:
 
 def default_sim_mission(base_lat: float, base_lon: float) -> list[list[float]]:
     """
-    Default simulation mission: 5 nav waypoints + 1 engage waypoint.
-    Same GPS coordinates as before; now interpreted as:
-    - [0..4] = nav_waypoints (gate navigation + obstacle avoidance)
-    - [5]    = engage_wp (kamikaze target contact)
+    Default simulation mission: flat NAV waypoint list.
+    Explicit engage is optional and must come from structured payload.
     """
     meters_to_lat = 1.0 / 111320.0
     cos_lat = math.cos(math.radians(base_lat))
@@ -150,7 +151,7 @@ def default_sim_mission(base_lat: float, base_lon: float) -> list[list[float]]:
         xy_to_gps(2.5, 10.5),
         xy_to_gps(0.0, 14.0),
         xy_to_gps(0.0, 27.0),
-        xy_to_gps(-3.0, 29.8),   # engage_wp (target duba)
+        xy_to_gps(-3.0, 29.8),
     ]
 
 
@@ -161,17 +162,18 @@ def default_sim_mission(base_lat: float, base_lon: float) -> list[list[float]]:
 
 def get_mission_split_profile(total_count: int) -> dict[str, Any]:
     """Deprecated: unified mission does not split by fixed counts."""
-    nav_count = max(0, total_count - 1)
+    nav_count = max(0, int(total_count))
+    engage_count = 0
     return {
         "input_format": "flat_ordered",
         "allow_structured_legacy": False,
         "nav_count": nav_count,
-        "engage_count": 1 if total_count >= 1 else 0,
+        "engage_count": engage_count,
         "total_count": int(total_count),
         # legacy keys kept for dashboard/telemetry backward compat
         "p1_count": nav_count,
         "p2_count": 0,
-        "p3_count": 1 if total_count >= 1 else 0,
+        "p3_count": engage_count,
     }
 
 

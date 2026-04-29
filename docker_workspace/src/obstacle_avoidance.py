@@ -1,0 +1,85 @@
+"""
+Small three-sector obstacle avoidance helper.
+
+Lidar remains the primary safety sensor. Camera detections may bias guidance in
+the caller, but they never make a blocked lidar sector safe.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+def clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(max_value, value))
+
+
+@dataclass(frozen=True)
+class AvoidanceDecision:
+    active: bool
+    state: str
+    yaw_bias_deg: float
+    speed_limit_mps: float | None
+    escape_side: str
+    reason: str
+
+
+def _finite_or_clear(value: float | None) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 99.0
+    if parsed <= 0.0:
+        return 99.0
+    return parsed
+
+
+def decide_three_sector_avoidance(
+    *,
+    left_m: float | None,
+    front_m: float | None,
+    right_m: float | None,
+    stop_distance_m: float,
+    warn_distance_m: float,
+    clear_hysteresis_m: float,
+    previous_escape_side: str | None = None,
+    failsafe_slow_mps: float = 0.3,
+    max_yaw_bias_deg: float = 48.0,
+) -> AvoidanceDecision:
+    left = _finite_or_clear(left_m)
+    front = _finite_or_clear(front_m)
+    right = _finite_or_clear(right_m)
+    stop = max(0.05, float(stop_distance_m))
+    warn = max(stop + 0.05, float(warn_distance_m))
+    clear = warn + max(0.0, float(clear_hysteresis_m))
+
+    if front >= clear:
+        return AvoidanceDecision(False, "clear", 0.0, None, "none", "front_clear")
+
+    prev = str(previous_escape_side or "").lower()
+    if prev in ("left", "right") and front < clear:
+        escape_side = prev
+    else:
+        escape_side = "left" if left >= right else "right"
+
+    side_sign = -1.0 if escape_side == "left" else 1.0
+    if front <= stop:
+        level = 1.0
+        state = "blocked"
+        speed_limit = 0.0
+        reason = "front_stop"
+    else:
+        level = clamp((warn - front) / max(warn - stop, 0.05), 0.0, 1.0)
+        state = "avoid"
+        speed_limit = float(failsafe_slow_mps)
+        reason = "front_warn"
+
+    yaw_bias = side_sign * (18.0 + ((float(max_yaw_bias_deg) - 18.0) * level))
+    return AvoidanceDecision(
+        active=True,
+        state=state,
+        yaw_bias_deg=float(yaw_bias),
+        speed_limit_mps=float(speed_limit),
+        escape_side=escape_side,
+        reason=reason,
+    )

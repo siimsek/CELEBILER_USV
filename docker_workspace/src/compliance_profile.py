@@ -24,6 +24,13 @@ def resolve_usv_mode(raw_mode: str | None = None) -> str:
 USV_MODE = resolve_usv_mode()
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _resolve_runtime_root() -> Path:
     env_root = os.environ.get("USV_PROJECT_ROOT", "").strip()
     if env_root:
@@ -77,8 +84,8 @@ P3_REVERSE_DISTANCE_M = 3.0
 P3_REVERSE_TIMEOUT_S = 4.0
 D_MIN_M = 1.2
 # P2: lidar + kamera birlesik kacinma (warn mesafesinde yumuak, D_MIN altinda sert)
-# WP4→5: ~2.5 m altı tehdit; bacak başı: 2.85’ten daraltıldı (kısa latch); histerezis dar.
-P2_LIDAR_WARN_M = 2.55
+# Operatör isteği: kaçınma tetiği 1.5 m civarında başlasın.
+P2_LIDAR_WARN_M = 1.5
 P2_LIDAR_WARN_EXIT_MARGIN_M = 0.40
 # NAV: donmus bacak geometrisi yeterliyse lateral hata ile bearing düzeltmesi (saf WP bearing spiralını azaltır)
 NAV_CROSS_TRACK_K = 0.45
@@ -93,7 +100,7 @@ NAV_ALIGN_ENTER_ADVANCE_DEG = 9.5
 NAV_ALIGN_PIVOT_UNTIL_DEG = 11.0
 # İleri fazda burun şaşarsa tekrar (1) dönüşe dön — 24° çok gevşekti (log: 15°+ ile hâlâ advance)
 NAV_ALIGN_REVERT_ALIGN_DEG = 12.0
-NAV_ALIGN_MAX_SPEED_MPS = 0.26
+NAV_ALIGN_MAX_SPEED_MPS = 0.45
 NAV_ALIGN_TIMEOUT_S = 14.0
 # Heading damping (inner-loop style): error + yaw-rate feedback + command slew.
 NAV_HEADING_DAMPING_ENABLED = True
@@ -109,7 +116,7 @@ NAV_TURN_SPEED_CAP_MEDIUM_MPS = 0.70
 NAV_TURN_SPEED_CAP_HARD_MPS = 0.45
 NAV_NEAR_WP_TURN_SPEED_CAP_DIST_M = 1.4
 NAV_NEAR_WP_TURN_ERR_DEG = 20.0
-NAV_NEAR_WP_TURN_SPEED_CAP_MPS = 0.30
+NAV_NEAR_WP_TURN_SPEED_CAP_MPS = 0.40
 # Avoidance-bias slew: suppress one-scan spikes without weakening emergency turns.
 NAV_AVOID_BIAS_SLEW_DEG_PER_S = 180.0
 # Hiza fazinda dusuk hiz; onde dubalar yakinlasinca tam NAV+kaçınma (ileri faz) zorunlu
@@ -142,9 +149,17 @@ INNOVATION_SWITCHES = {
     "horizon_lock": True,
     "camera_adaptation": True,
     "autonomy_health_trust_bar": True,
+    # Unified execution path: when True, both TEST and RACE modes route through the
+    # same Pi-guided decision engine (_run_nav_unified). Pixhawk acts as actuator
+    # interface only (GUIDED mode). Eliminates all behavioral divergence between
+    # TEST/RACE and ensures simulation produces identical outputs to real hardware.
+    "unified_execution_path": True,
 }
 
 FUSION_ENABLED = bool(INNOVATION_SWITCHES.get("sensor_fusion", True))
+# Single deterministic execution path: Pi computes all decisions in both modes.
+# Set to False only to revert to legacy split (Pixhawk AUTO in race, Pi GUIDED in test).
+UNIFIED_EXECUTION_PATH = bool(INNOVATION_SWITCHES.get("unified_execution_path", True))
 FUSION_BEARING_WINDOW_DEG = 10.0
 FUSION_LIDAR_MIN_VALID_M = 0.4
 FUSION_LIDAR_CONFIRM_MAX_M = 12.0
@@ -161,7 +176,7 @@ DYN_SPEED_FACTOR_STRAIGHT = 1.00
 DYN_SPEED_FACTOR_SOFT = 0.90
 DYN_SPEED_FACTOR_MEDIUM = 0.78
 DYN_SPEED_FACTOR_HARD = 0.64
-DYN_SPEED_MIN_MPS_NAV = 0.40  # Unified: min speed during turns in NAV phase
+DYN_SPEED_MIN_MPS_NAV = 0.45  # Unified: min speed during turns in NAV phase
 # Backward-compat aliases (deprecated, use DYN_SPEED_MIN_MPS_NAV)
 DYN_SPEED_MIN_MPS_P1 = DYN_SPEED_MIN_MPS_NAV
 DYN_SPEED_MIN_MPS_P2 = DYN_SPEED_MIN_MPS_NAV
@@ -219,6 +234,31 @@ RC7_ESTOP_PWM = 1900
 RC7_ESTOP_FORCE_PWM = 2011
 RC_RACE_START_PWM = 1700
 
+# Canonical mode-state / mixer profile (sim-first: same logic in sim + real).
+MODE_NEUTRAL_DWELL_S = float(os.environ.get("MODE_NEUTRAL_DWELL_S", "1.0"))
+
+HEADING_DEADZONE_DEG = float(os.environ.get("HEADING_DEADZONE_DEG", "2.0"))
+HEADING_HYST_ENTER_DEG = float(os.environ.get("HEADING_HYST_ENTER_DEG", "3.0"))
+HEADING_HYST_EXIT_DEG = float(os.environ.get("HEADING_HYST_EXIT_DEG", "1.5"))
+
+HEADING_WRONG_TURN_ERR_DEG = float(os.environ.get("HEADING_WRONG_TURN_ERR_DEG", "7.0"))
+HEADING_WRONG_TURN_YAWRATE_DPS = float(os.environ.get("HEADING_WRONG_TURN_YAWRATE_DPS", "0.25"))
+HEADING_WRONG_TURN_TRIGGER_S = float(os.environ.get("HEADING_WRONG_TURN_TRIGGER_S", "0.35"))
+HEADING_WRONG_TURN_GAIN = float(os.environ.get("HEADING_WRONG_TURN_GAIN", "1.25"))
+HEADING_WRONG_TURN_SPEED_CAP_MPS = float(os.environ.get("HEADING_WRONG_TURN_SPEED_CAP_MPS", "0.32"))
+
+PWM_NEUTRAL_US = int(float(os.environ.get("PWM_NEUTRAL_US", "1500")))
+PWM_MIN_US = int(float(os.environ.get("PWM_MIN_US", "1100")))
+PWM_MAX_US = int(float(os.environ.get("PWM_MAX_US", "1900")))
+PWM_DEADBAND_US = int(float(os.environ.get("PWM_DEADBAND_US", "20")))
+PWM_MIN_EFFECTIVE_US = int(float(os.environ.get("PWM_MIN_EFFECTIVE_US", "60")))
+PWM_SLEW_RATE_US_PER_S = float(os.environ.get("PWM_SLEW_RATE_US_PER_S", "120"))
+PWM_JERK_LIMIT_US_PER_S2 = float(os.environ.get("PWM_JERK_LIMIT_US_PER_S2", "360"))
+PWM_TRIM_MAX_US = int(float(os.environ.get("PWM_TRIM_MAX_US", "40")))
+PWM_TRIM_LEARN_GAIN = float(os.environ.get("PWM_TRIM_LEARN_GAIN", "0.12"))
+PWM_TRIM_ERR_BAND_DEG = float(os.environ.get("PWM_TRIM_ERR_BAND_DEG", "4.0"))
+PWM_TRIM_YAW_RATE_BAND_DPS = float(os.environ.get("PWM_TRIM_YAW_RATE_BAND_DPS", "0.8"))
+
 def _default_control_dir() -> str:
     if os.environ.get("USV_SIM") == "1":
         sim_control = RUNTIME_ROOT / "sim" / "control"
@@ -258,6 +298,7 @@ def _default_mission_file() -> str:
 CONTROL_DIR = os.environ.get("CONTROL_DIR", _default_control_dir())
 LOG_DIR = os.environ.get("LOG_DIR", _default_log_dir())
 MISSION_FILE_DEFAULT = os.environ.get("MISSION_FILE", _default_mission_file())
+
 USB_STORAGE_CANDIDATES = (
     "/home/siimsek/Desktop/CELEBILER_USV/logs/usb",
     "/media/usb",

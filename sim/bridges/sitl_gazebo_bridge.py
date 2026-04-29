@@ -252,7 +252,7 @@ class SitlGazeboBridge:
                     with self.lock:
                         self.motor_pwm_ch1 = ch1
                         self.motor_pwm_ch2 = ch2
-                        self.servo_response_addr = addr  # Store sender for response (VEXP: bidirectional protocol fix)
+                        self.servo_response_addr = addr  # Store sender for response (bidirectional protocol fix)
                         first_pwm = not self._first_pwm_received
                         if first_pwm:
                             self._first_pwm_received = True
@@ -274,36 +274,52 @@ class SitlGazeboBridge:
     def publish_forces(self):
         if not self.ros_node: return
         with self.lock:
-            c1 = self.motor_pwm_ch1
-            c2 = self.motor_pwm_ch2
+            c1_sitl = self.motor_pwm_ch1
+            c2_sitl = self.motor_pwm_ch2
             count = self._msg_count_pwm
-        
-        # [SIM MOTOR BYPASS] When SITL sends neutral (disarmed), read commands
-        # from motor_command.json written by usv_main.py
-        if abs(c1 - 1500.0) < 10 and abs(c2 - 1500.0) < 10:
-            try:
-                mc_path = Path(CONTROL_DIR) / "motor_command.json"
-                if mc_path.exists():
-                    mc = json.loads(mc_path.read_text())
-                    if time.time() - mc.get("ts", 0) < 2.0:
-                        c1 = float(mc["left_pwm"])
-                        c2 = float(mc["right_pwm"])
-                        if not self._test_mode_active:
-                            log.info(f"[SIM-BYPASS] Reading motor_command.json: CH1={c1:.0f} CH3={c2:.0f}")
-                            self._test_mode_active = True
-                        with self.lock:
-                            self.motor_pwm_ch1 = c1
-                            self.motor_pwm_ch2 = c2
-                    else:
-                        self._test_mode_active = False
+
+        # ── MOTOR SOURCE SELECTION ───────────────────────────────────
+        # ALWAYS prefer motor_command.json written by usv_main.py.
+        #
+        # Why: ArduRover SITL remixes RC-override inputs through its internal
+        # skid-steering mixer before outputting servo values.  The bridge
+        # receives SITL's *servo outputs* (post-remix), NOT the RC-override
+        # values that usv_main.py intended.  This causes inverted differential
+        # thrust → the boat turns the wrong direction → heading error diverges.
+        #
+        # motor_command.json contains the exact left/right PWM that usv_main.py
+        # computed — no ArduRover remix.  We use it as the primary motor source
+        # whenever it is fresh (< 2 seconds old).  SITL servo values are only
+        # used as fallback when the JSON file is missing or stale.
+        c1, c2 = c1_sitl, c2_sitl
+        motor_source = "sitl_servo"
+        try:
+            mc_path = Path(CONTROL_DIR) / "motor_command.json"
+            if mc_path.exists():
+                mc = json.loads(mc_path.read_text())
+                if time.time() - mc.get("ts", 0) < 2.0:
+                    c1 = float(mc["left_pwm"])
+                    c2 = float(mc["right_pwm"])
+                    motor_source = "motor_command_json"
+                    if not self._test_mode_active:
+                        log.info(
+                            f"[SIM-MOTOR] Using motor_command.json: left={c1:.0f} right={c2:.0f} "
+                            f"(SITL servo was CH1={c1_sitl:.0f} CH3={c2_sitl:.0f})"
+                        )
+                        self._test_mode_active = True
+                    with self.lock:
+                        self.motor_pwm_ch1 = c1
+                        self.motor_pwm_ch2 = c2
                 else:
                     self._test_mode_active = False
-            except Exception:
+            else:
                 self._test_mode_active = False
-            
+        except Exception:
+            self._test_mode_active = False
+
         self.ros_node.pub_left.publish(Float64(data=c1))
         self.ros_node.pub_right.publish(Float64(data=c2))
-        
+
         # PWM (1500 neutral, 1100-1900 range) => -1 to +1 normalized.
         # Rover skid defaults drive the starboard output reversed, so apply the
         # configured sign correction before generating hull wrench.
@@ -329,15 +345,15 @@ class SitlGazeboBridge:
                 if count % 1000 == 0:
                     log.debug(
                         f"[MOTOR-CMD] vx={avg_velocity:.2f}m/s wz={yaw_rate:.2f}rad/s "
-                        f"left_n={left_n:.2f} right_n={right_n:.2f}"
+                        f"left_n={left_n:.2f} right_n={right_n:.2f} src={motor_source}"
                     )
         except Exception as e:
             if count % 500 == 0:
                 log.error(f"[MOTOR-CMD-ERROR] Exception: {type(e).__name__}: {e}")
-        
+
         # Debug: Log motor commands every 100 publishes
         if count % 100 == 0:
-            mode_str = "[TEST]" if self._test_mode_active else "[ARMED]"
+            mode_str = f"[{motor_source.upper()}]"
             log.debug(f"{mode_str} [MOTOR] PWM: CH1={c1:.0f} CH3={c2:.0f} → left_n={left_n:.2f} right_n={right_n:.2f}")
 
     def send_servo_response_to_ardupilot(self, force_response_on_first_packet=False):

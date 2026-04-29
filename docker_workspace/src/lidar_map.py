@@ -34,20 +34,22 @@ INSET_SIZE = 200
 INSET_SCALE = (INSET_SIZE // 2 - 10) / MAX_RANGE_M
 
 
-def _read_vehicle_heading_rad():
-    """Gazebo/SITL köprüsü vehicle_position.json — kuzey-yukarı alt harita için."""
+def _read_vehicle_pose():
+    """Gazebo/SITL köprüsü vehicle_position.json — pos_x, pos_y, heading_rad."""
     try:
         p = Path(CONTROL_DIR) / "vehicle_position.json"
         if not p.is_file():
-            return None
+            return None, None, None
         with open(p, "r", encoding="utf-8") as f:
             j = json.load(f)
         hr = j.get("heading_rad")
-        if hr is None:
-            return None
-        return float(hr)
+        x = j.get("pos_x")
+        y = j.get("pos_y")
+        if hr is None or x is None or y is None:
+            return None, None, None
+        return float(x), float(y), float(hr)
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return None
+        return None, None, None
 
 
 def build_north_up_inset(msg: LaserScan, heading_rad: float) -> np.ndarray:
@@ -100,6 +102,9 @@ _lidar_dbg.info(
     os.environ.get("LOG_DIR"),
 )
 
+GLOBAL_MAP_SIZE = 4000
+GLOBAL_CENTER = GLOBAL_MAP_SIZE // 2
+
 class LidarMapper(Node):
     def __init__(self):
         super().__init__('lidar_mapper_web')
@@ -120,11 +125,8 @@ class LidarMapper(Node):
             lidar_qos,  # Changed from qos_profile_sensor_data to match ros_gz_bridge
         )
         
-        # Boş siyah harita
-        self.blank_image = np.zeros((MAP_SIZE, MAP_SIZE, 3), dtype=np.uint8)
-        # CRITICAL FIX: Initialize last_msg_time with buffer for GPU_lidar plugin init (~3-5 sec)
-        # Without this, first 3 seconds trigger SIMULATION_MODE false negative timeout
-        # By setting to 6.5 seconds ago, we grant 10 total seconds for sensor startup
+        # Kalıcı Dünya Haritası (SLAM tarzı iz bırakma için)
+        self.global_map = np.zeros((GLOBAL_MAP_SIZE, GLOBAL_MAP_SIZE, 3), dtype=np.uint8)
         self.last_msg_time = time.time() - 6.5
         
         _lidar_dbg.info(f"[LIDAR] Subscription created with BEST_EFFORT QoS (match ros_gz_bridge)")
@@ -135,106 +137,103 @@ class LidarMapper(Node):
         self.last_msg_time = time.time()
         SIMULATION_MODE = False
         self._scan_cb_n += 1
-        if self._scan_cb_n <= 3 or self._scan_cb_n % 60 == 0:
-            _lidar_dbg.info(  # Changed from debug to info for first few messages
-                "[LIDAR_CALLBACK] scan n=%s ranges=%s angle_min=%.4f inc=%.6f",
-                self._scan_cb_n,
-                len(msg.ranges),
-                msg.angle_min,
-                msg.angle_increment,
-            )
-        if self._scan_cb_n <= 5 or self._scan_cb_n % 10 == 0:
-            log_jsonl(
-                "lidar_map",
-                False,
-                event="scan",
-                n=self._scan_cb_n,
-                n_ranges=len(msg.ranges),
-            )
         
-        # Haritayı Temizle
-        img = self.blank_image.copy()
-        
-        # Merkez
-        cx, cy = MAP_SIZE // 2, MAP_SIZE // 2
-        
-        # Tekneyi Çiz
-        cv2.arrowedLine(img, (cx, cy + 10), (cx, cy - 20), (0, 255, 0), 2)
-        cv2.circle(img, (cx, cy), 5, (0, 0, 255), -1)
+        # Pozisyon Bilgisi Al (Dünya koordinatları için)
+        pos_x, pos_y, hdg = _read_vehicle_pose()
+        if pos_x is None:
+            pos_x, pos_y, hdg = 0.0, 0.0, 0.0
 
-        # --- VECTORIZED PROCESSING (Optimize Edilmiş) ---
+        # --- DÜNYA HARİTASINI HAFİFÇE KARART (Decay) ---
+        if self._scan_cb_n % 5 == 0:
+            self.global_map = cv2.addWeighted(self.global_map, 0.98, np.zeros_like(self.global_map), 0.02, 0)
+
+        # --- VECTORIZED PROCESSING (Polar -> Global Cartesian) ---
         ranges = np.array(msg.ranges)
-        
-        # Geçersiz verileri filtrele
         valid_indices = (ranges > 0.1) & (ranges < MAX_RANGE_M)
         ranges = ranges[valid_indices]
         
         if len(ranges) > 0:
-            # Açıları hesapla
             angles = msg.angle_min + np.arange(len(msg.ranges))[valid_indices] * msg.angle_increment
             
-            # Polar -> Cartesian (Vektörel)
-            x = ranges * np.cos(angles)
-            y = ranges * np.sin(angles)
+            # Tekneye Göre Lokal Koordinatlar
+            local_x = ranges * np.cos(angles)
+            local_y = ranges * np.sin(angles)
             
-            # Koordinat Dönüşümü (Ekran)
-            # px = cx - (y * SCALE)
-            # py = cy - (x * SCALE)
-            # Float -> Int
-            px = (cx - (y * SCALE)).astype(int)
-            py = (cy - (x * SCALE)).astype(int)
+            # Dünya Koordinatlarına Çevir (Odometri Entegrasyonu)
+            c = math.cos(hdg)
+            s = math.sin(hdg)
+            global_x_m = pos_x + (local_x * c - local_y * s)
+            global_y_m = pos_y + (local_x * s + local_y * c)
             
-            # Sınır Kontrolü (Harita dışına taşmayı önle)
-            mask = (px >= 0) & (px < MAP_SIZE) & (py >= 0) & (py < MAP_SIZE)
-            px = px[mask]
-            py = py[mask]
+            # Global Harita Piksel İndeksleri
+            map_px = (GLOBAL_CENTER - global_y_m * SCALE).astype(int)
+            map_py = (GLOBAL_CENTER - global_x_m * SCALE).astype(int)
             
-            # Hızlı Çizim (Piksel Atama)
-            # cv2.circle yerine direkt matris ataması çok daha hızlıdır
-            img[py, px] = (255, 255, 255)
+            # Sınır Kontrolü
+            mask = (map_px >= 0) & (map_px < GLOBAL_MAP_SIZE) & (map_py >= 0) & (map_py < GLOBAL_MAP_SIZE)
+            map_px = map_px[mask]
+            map_py = map_py[mask]
             
-            # Görünürlüğü artırmak için biraz kalınlaştır (Opsiyonel, CPU yerse kapatılabilir)
-            # cv2.dilate(img, kernel, ...) yapılabilir ama şimdilik gerek yok.
+            # Global Haritaya Çiz (Kalınlaştırılmış 2x2 Noktalar)
+            self.global_map[map_py, map_px] = (255, 255, 255)
+            mask_y1 = (map_py + 1 < GLOBAL_MAP_SIZE)
+            self.global_map[map_py[mask_y1] + 1, map_px[mask_y1]] = (255, 255, 255)
+            mask_x1 = (map_px + 1 < GLOBAL_MAP_SIZE)
+            self.global_map[map_py[mask_x1], map_px[mask_x1] + 1] = (255, 255, 255)
 
-        # Engel Mesafesi Uyarısı (1.5m)
+        # --- ARAYÜZ (UI) İÇİN HARİTAYI KES VE DÖNDÜR ---
+        # Tekne merkezli ROI (Bölge) çıkart
+        boat_px = int(GLOBAL_CENTER - pos_y * SCALE)
+        boat_py = int(GLOBAL_CENTER - pos_x * SCALE)
+        
+        crop_size = int(MAP_SIZE * 1.5)  # Rotasyon için ekstra pay
+        half_crop = crop_size // 2
+        
+        x1 = max(0, boat_px - half_crop)
+        y1 = max(0, boat_py - half_crop)
+        x2 = min(GLOBAL_MAP_SIZE, boat_px + half_crop)
+        y2 = min(GLOBAL_MAP_SIZE, boat_py + half_crop)
+        
+        roi = np.zeros((crop_size, crop_size, 3), dtype=np.uint8)
+        
+        # ROI sınırlarını güvenli kopyala
+        roi_x1 = max(0, half_crop - (boat_px - x1))
+        roi_y1 = max(0, half_crop - (boat_py - y1))
+        roi_x2 = roi_x1 + (x2 - x1)
+        roi_y2 = roi_y1 + (y2 - y1)
+        roi[roi_y1:roi_y2, roi_x1:roi_x2] = self.global_map[y1:y2, x1:x2]
+        
+        # ROI'yi Tekne "Yukarı" Bakacak Şekilde Döndür
+        center = (half_crop, half_crop)
+        M = cv2.getRotationMatrix2D(center, math.degrees(hdg), 1.0)
+        rotated_roi = cv2.warpAffine(roi, M, (crop_size, crop_size), flags=cv2.INTER_LINEAR)
+        
+        # 600x600 Final Görüntüyü Kes
+        final_x1 = half_crop - (MAP_SIZE // 2)
+        final_y1 = half_crop - (MAP_SIZE // 2)
+        img = rotated_roi[final_y1:final_y1+MAP_SIZE, final_x1:final_x1+MAP_SIZE].copy()
+        
+        # --- TEKNEYİ ÇİZ ---
+        cx, cy = MAP_SIZE // 2, MAP_SIZE // 2
+        cv2.arrowedLine(img, (cx, cy + 10), (cx, cy - 20), (0, 255, 0), 2)
+        cv2.circle(img, (cx, cy), 5, (0, 0, 255), -1)
         r_px = int(1.5 * SCALE)
         cv2.circle(img, (cx, cy), r_px, (0, 0, 100), 1)
         
-        # Bilgi
-        cv2.putText(img, f"LIVE LIDAR | PTS: {len(ranges)}", (10, 30), 
+        # --- BİLGİ METİNLERİ ---
+        cv2.putText(img, f"SLAM MAP | PTS: {len(ranges)}", (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(
-            img,
-            "burun yukari (lidar govde)",
-            (10, MAP_SIZE - 14),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (140, 200, 140),
-            1,
-        )
+        cv2.putText(img, "burun yukari (lidar govde)", (10, MAP_SIZE - 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (140, 200, 140), 1)
 
-        hdg = _read_vehicle_heading_rad()
-        if hdg is not None:
+        if pos_x is not None:
             inset = build_north_up_inset(msg, hdg)
             x0 = MAP_SIZE - INSET_SIZE - 10
             y0 = 10
             img[y0 : y0 + INSET_SIZE, x0 : x0 + INSET_SIZE] = inset
-            cv2.rectangle(
-                img,
-                (x0 - 1, y0 - 1),
-                (x0 + INSET_SIZE, y0 + INSET_SIZE),
-                (0, 200, 255),
-                1,
-            )
-            cv2.putText(
-                img,
-                f"hdg {math.degrees(hdg):.0f}deg",
-                (x0, y0 + INSET_SIZE + 16),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.42,
-                (0, 220, 255),
-                1,
-            )
+            cv2.rectangle(img, (x0 - 1, y0 - 1), (x0 + INSET_SIZE, y0 + INSET_SIZE), (0, 200, 255), 1)
+            cv2.putText(img, f"hdg {math.degrees(hdg):.0f}deg", (x0, y0 + INSET_SIZE + 16),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 220, 255), 1)
         else:
             cv2.putText(
                 img,
