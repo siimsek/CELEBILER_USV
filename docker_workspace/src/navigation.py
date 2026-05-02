@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
-from compliance_profile import NAV_ALIGN_HEADING_DONE_DEG, R_WP_M
+from compliance_profile import NAV_ALIGN_HEADING_DONE_DEG, NAV_ALIGN_CREEP_SPEED_MPS, R_WP_M
 
 
 EARTH_RADIUS_M = 6_371_000.0
@@ -67,6 +67,7 @@ def heading_first_waypoint_request(
     acceptance_radius_m: float = R_WP_M,
     slow_down_radius_m: float = 6.0,
     heading_threshold_deg: float = NAV_ALIGN_HEADING_DONE_DEG,
+    creep_speed_mps: float = NAV_ALIGN_CREEP_SPEED_MPS,
 ) -> WaypointRequest:
     distance = max(0.0, float(distance_m))
     heading_error = wrap_180(heading_error_deg)
@@ -82,12 +83,14 @@ def heading_first_waypoint_request(
         )
 
     if heading_abs > float(heading_threshold_deg):
+        # Creep forward slowly while turning instead of full stop (prevents sim/real hang)
+        creep = max(0.0, min(float(creep_speed_mps), float(approach_speed_mps) * 0.5))
         return WaypointRequest(
-            speed_mps=0.0,
+            speed_mps=float(creep),
             heading_error_deg=heading_error,
             phase="TURN_TO_WAYPOINT",
             reached=False,
-            reason="heading_first",
+            reason="heading_first_creep",
         )
 
     slow_radius = max(float(slow_down_radius_m), float(acceptance_radius_m) + 0.1)

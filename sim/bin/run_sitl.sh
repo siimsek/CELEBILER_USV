@@ -38,7 +38,7 @@ echo "[SIM] SITL home: $HOME_LOCATION"
 echo "[SIM] SITL dir: $SITL_DIR"
 echo "[SIM] ARDUROVER_BIN: $ARDUROVER_BIN"
 echo "[SIM] MAVLink control: tcp 5760 (usv_main)"
-echo "[SIM] MAVLink out: udp 14550 (telemetry), udp 14551 (pose bridge)"
+echo "[SIM] MAVLink out: udp 14550 (telemetry), udp 14551 (pose bridge), udp 14552 (Mission Planner)"
 echo "[SIM] GPS and sensor simulation enabled via parameters"
 
 # DEBUG: Print exact command being executed
@@ -51,6 +51,7 @@ echo "[SIM-DEBUG] Defaults: $DEFAULTS"
 # Use array to properly handle parameters with spaces/special chars
 run_cmd=(
     "$ARDUROVER_BIN"
+    "--wipe"
     "--model" "JSON"
     "--speedup" "$SPEEDUP"
     "--home" "$HOME_LOCATION"
@@ -59,9 +60,12 @@ run_cmd=(
     "--serial1" "udpclient:127.0.0.1:14550"
     "--serial2" "udpclient:127.0.0.1:14551"
     "--serial3" "udpclient:127.0.0.1:9002"
-    # NOTE: ArduPilot SITL doesn't support --set from command line.
-    # Parameter settings are applied via --defaults files instead.
-    # Original unsupported params were: --set AHRS_EKF_TYPE=3, --set SIM_GPS_DELAY_MS=100, --set SIM_LIDAR_ENABLE=1
+    "--serial4" "udpclient:127.0.0.1:14552"
+    # NOTE: --wipe kritik: eeprom.bin icindeki eski param cache'ini temizler,
+    # --defaults dosyasindaki guncel parametrelerin gercekten uygulanmasini saglar.
+    # Onceden SITL eeprom cache'lenmis GPS/SIM_GPS1_* parametrelerini kullaniyordu.
+    # ArduPilot SITL --set ile komut satirinda param ayarini desteklemez,
+    # ayarlamalar --defaults dosyasi uzerinden yapilir.
 )
 
 echo "[SIM-DEBUG] Full command array (${#run_cmd[@]} args):"

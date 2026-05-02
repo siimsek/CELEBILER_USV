@@ -55,14 +55,19 @@ def main() -> int:
         "nav_runs_in_auto": has(usv, "[NAV] WAYPOINT TAKIBI") and has(usv, "auto_result = self._run_nav_auto_mission()"),
         "p2_ready_gate_has_no_timeout_bypass": not has(usv, "Sensor bekleme zamani doldu") and has(usv, "mode=AUTO speed_cap<="),
         "p2_guidance_order_logged": has(usv, 'self._set_guidance_source("p2_avoid")') and has(usv, 'self._set_guidance_source("p2_gate")') and has(usv, 'self._set_guidance_source("p2_waypoint_fallback")'),
+        "p3_wrong_target_avoidance_logged": has(usv, "P3_WRONG_TARGET_AVOID") and has(usv, "wrong_target_contact_risk") and has(cam, "wrong_target_detected"),
+        "p3_contact_confirmation_exported": has(usv, "p3_contact_confirmation_source") and has(usv, '"p3_contact_confirmation_source":'),
         "startup_wait_is_probe_based": has(sim_stack, "probe_camera_endpoint") and not has(sim_stack, "sleep 12"),
         "shared_sim_nav_source_used": has(usv, "load_sim_nav_state(control_dir=CONTROL_DIR)") and has(telemetry, "load_sim_nav_state(control_dir=CONTROL_DIR)"),
         "sim_forced_sensor_ready_removed": not has(usv, "self.camera_ready = True") and not has(usv, "self.lidar_ready = True"),
         "nav_diagnostics_exported": has(usv, '"nav_position_source":') and has(telemetry, "out['nav_position_source']") and has(telemetry, "'nav_target_bearing_deg': out['nav_target_bearing_deg']"),
         "nav_invalid_blocks_heading_solution": has(usv, "if not self.nav_fix_valid:") and has(usv, "self._log_nav_invalid(target_lat, target_lon)"),
+        "waypoint_accept_profile_aligned": has(usv, "arrival_radius = float(R_WP_M)") and has(usv, "hold_required_s = float(T_HOLD_S)"),
+        "waypoint_reached_no_active_disarm": has(usv, "def _hold_waypoint_neutral") and has(usv, 'self._hold_waypoint_neutral("waypoint_reached")'),
         "external_decision_runtime_removed": removed_decision_token not in usv.lower() and not (SRC / f"{removed_decision_token}_decision_layer.py").exists(),
         "external_decision_telemetry_removed": removed_decision_token not in telemetry.lower() and removed_decision_token not in profile.lower(),
         "startup_external_gate_removed": removed_decision_token not in sim_stack.lower(),
+        "telemetry_exposes_mp_gcs_heartbeat_age": has(telemetry, "out['mission_planner_gcs_age_s']"),
     }
 
     passed = sum(1 for ok in checks.values() if ok)

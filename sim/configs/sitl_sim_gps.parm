@@ -1,30 +1,34 @@
 # CELEBILER USV - SITL GPS Simulation Parameters
-# Bu dosya ArduPilot JSON backend modunda GPS simülasyonunu aktif eder.
-# run_sitl.sh tarafından --defaults listesine eklenir.
+# run_sitl.sh tarafindan --defaults listesinde son siraya eklenir (override).
 #
-# Sorun: GPS_TYPE=0 (default) → EKF GPS fix almıyor → GLOBAL_POSITION_INT yok
-# Çözüm: GPS_TYPE=1 (simülasyon GPS) + EKF3 aktif + gerekli stream parametreleri
+# MIMARI: JSON physics backend (--model JSON) + SITL GPS
+# - --model JSON ile SITL JSON formatinda fizik motorundan (sitl_gazebo_bridge.py)
+#   latitude/longitude/altitude + pose/IMU verisi alir.
+# - GPS1_TYPE=100 ArduPilot SITL GPS driver'ini kullanir; JSON backend
+#   konumunu FC GPS/EKF zincirine tasir.
+#
+# ARMING_CHECK=0 sim only: cift IMU "Accels inconsistent" normal ARM'i engellemesin.
 
-# GPS: Simülasyon GPS'i aktif et (GPS_TYPE=1 = UBLOX sim, JSON backend ile uyumlu)
-GPS_TYPE 1
-GPS_TYPE2 0
+# Ana GPS driver: SITL GPS. GPS_INPUT yolu simde opsiyonel bench tanidir,
+# gorev baslatma hazirligi bu JSON->FC GPS/EKF hattindan gelir.
+# ArduPilot current parameter names are GPS1_TYPE/GPS2_TYPE.
+GPS1_TYPE 100
+GPS2_TYPE 0
 
-# EKF: EKF3 kullan (ArduPilot modern EKF, JSON backend ile tam uyumlu)
+# Arming: simde pre-arm checklerini bypass et
+ARMING_CHECK 0
+
+# EKF: EKF3 (modern ArduPilot EKF)
 AHRS_EKF_TYPE 3
 EK3_ENABLE 1
 EK2_ENABLE 0
 
-# EKF3 GPS ağırlıkları (simülasyonda GPS güvenilir sayılsın)
+# EKF3 GPS ayarlari
 EK3_GPS_TYPE 0
-
-# GPS gecikme (simülasyonda 0 gecikme → anlık fix)
 GPS_DELAY_MS 0
-
-# ArduRover için GPS önceliği
 GPS_PRIMARY 0
 
-# MAVLink veri akışı hızları (GLOBAL_POSITION_INT için)
-# Rover SITL default stream rate'lerini zorla
+# MAVLink veri akisi hizlari
 SR0_POSITION 10
 SR0_RAW_SENSORS 10
 SR0_EXT_STAT 10
@@ -34,18 +38,18 @@ SR0_EXTRA1 10
 SR0_EXTRA2 10
 SR0_EXTRA3 10
 
-# Deniz simülasyonu GPS gürültüsü — sıfır (test için temiz GPS)
+# Simulasyon sensorleri
+SIM_BATT_VOLTAGE 12.6
+SIM_BATT_CAP_AH 10
+
+# Compass simulasyonu (EKF icin gerekli)
+COMPASS_USE 1
+COMPASS_USE2 0
+COMPASS_USE3 0
+
+# Deniz simulasyonu GPS gurultusu kapali: statik ve tekrar edilebilir test.
 SIM_GPS_GLITCH_X 0
 SIM_GPS_GLITCH_Y 0
 SIM_GPS_GLITCH_Z 0
 SIM_GPS_NOISE 0
 SIM_GPS_DELAY 0
-
-# Simülasyon sensörleri
-SIM_BATT_VOLTAGE 12.6
-SIM_BATT_CAP_AH 10
-
-# Compass simülasyonu (EKF için gerekli)
-COMPASS_USE 1
-COMPASS_USE2 0
-COMPASS_USE3 0

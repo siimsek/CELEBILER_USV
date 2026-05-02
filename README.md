@@ -1,277 +1,207 @@
 # CELEBILER USV - TEKNOFEST 2026 IDA
 
-TEKNOFEST 2026 Insansiz Deniz Araci yarismasi icin gelistirilen sim-first otonomi, telemetri ve sim-to-real altyapisidir. Sistem once simulasyonda ayni MAVLink/state-machine akisi ile dogrulanir; ayni runtime kodlari daha sonra gercek IDA uzerinde calisir.
+Bu depo, TEKNOFEST 2026 Insansiz Deniz Araci yarismasi icin gelistirilen otonomi, telemetri, simulasyon ve saha calisma altyapisini icerir.
 
-## Sistem Ozeti
+README dosyasi proje hakkinda genel bilgi vermek icindir. Kod dosyasi, endpoint, port, algoritma, tuning, PWM veya dusuk seviye kontrol detaylari burada tutulmaz. Guncel teknik kurallar ve operasyon sozlesmesi icin proje dokumanlari ve dogrulama betikleri esas alinir.
 
-- Gelistirme stratejisi: Sim-first. `USV_SIM=1` yalniz fiziksel donanim yoklugunu ayirir; is mantigi sim ve gercekte ortaktir.
-- Gorev modeli: Degisken uzunlukta mission girisi, otomatik waypoint/parkur ilerlemesi, post-start mission reload/retarget kilidi.
-- Start politikasi: Gorev otomatik baslamaz. Test modunda dashboard/API start; race modunda yalniz RC CH5 `>= 1700`.
-- Stop politikasi: E-stop RC CH7/API flag ve yazilim neutral/disarm; fiziksel guc kesme zinciri zayiflatilmaz.
-- Goruntu politikasi: Race modunda yer tarafina goruntu veya lidar harita yayini yoktur. Kamera onboard isleme icin calisir.
-- Motor kontrati: `1500` neutral, `1100-1500` reverse, `1500-1900` forward.
-- Telemetri CSV header:
-  `timestamp,lat,lon,ground_speed,roll,pitch,heading,speed_setpoint,heading_setpoint,left_pwm,right_pwm,mode,waypoint_index,obstacle_state`
+---
 
-## Ana Bilesenler
+## 1. Genel Sistem
 
-### Runtime
+Sistem; tekne uzerindeki otopilot, otonomi bilgisayari, kamera, lidar, RC kontrol, telemetri baglantisi, yer kontrol istasyonu ve simulasyon altyapisindan olusur.
 
-| Dosya | Sorumluluk |
+Temel yaklasim:
+
+- Gelistirme once simulasyonda dogrulanir.
+- Simulasyon ve gercek sistem ayni ana gorev mantigini kullanir.
+- Pixhawk/ArduPilot dusuk seviye arac kontrolunden sorumludur.
+- Raspberry Pi ust seviye gorev, algilama, kayit ve telemetri islerini yurutur.
+- Manuel kontrol ve acil durdurma otonomiden onceliklidir.
+- Gorev operator komutu olmadan otomatik baslamaz.
+
+---
+
+## 2. Kullanilan Ana Parcalar
+
+| Parca | Genel Amac |
 |---|---|
-| `docker_workspace/src/usv_main.py` | Ana state machine, mission lifecycle, safety gate, MAVLink komutlari |
-| `docker_workspace/src/telemetry.py` | Dashboard, REST API, mission upload, start/estop IPC, CSV log |
-| `docker_workspace/src/cam.py` | Onboard kamera isleme; test modda web stream, race modda stream kapali |
-| `docker_workspace/src/lidar_map.py` | Test modu lidar haritasi; race modda baslamaz |
-| `docker_workspace/src/compliance_profile.py` | Mod, esik, PWM, failsafe, frekans ve policy sabitleri |
-| `docker_workspace/src/mission_config.py` | Mission split/profil ve hedef renk state okuma |
-| `docker_workspace/src/mission_adapter.py` | Flat/structured mission adapter uyumlulugu |
-| `docker_workspace/src/nav_guidance.py` | Waypoint guidance karar shimleri ve motor allocation wrapper |
-| `docker_workspace/src/navigation.py` | Saf waypoint distance/bearing ve heading-first request helper |
-| `docker_workspace/src/obstacle_avoidance.py` | Uc sektorlu lidar avoidance helper |
-| `docker_workspace/src/motor_controller.py` | Ortak PWM clamp, mixer, trim, deadband, ramp ve jerk limiter |
-| `docker_workspace/src/sensors.py` | Ortak sensor snapshot ve freshness kontratlari |
-| `docker_workspace/src/adapters/` | Sim/real adapter sinir siniflari |
+| Pixhawk | Otopilot, arac modu, GNSS/IMU bilgisi ve motor cikislari |
+| Raspberry Pi | Otonomi, sensor isleme, kayit ve telemetri yazilimlari |
+| Kamera | Duba, kapi, hedef ve renk algilama |
+| Lidar | Yakin cevre, mesafe ve engel bilgisi |
+| STM32 | Yardimci sensor veya cevresel donanim okumalari |
+| Crossfire RC | Manuel surus, yarista start tetigi ve uzaktan E-stop |
+| 433 MHz telemetri | Mission yukleme ve MAVLink telemetri |
+| YKI bilgisayari | Gorev hazirlama, izleme ve operator arayuzu |
+| ESC ve motorlar | Teknenin itki sistemi |
+| Fiziksel E-stop/kontaktor | Motor gucunu guvenli sekilde kesme |
 
-### Baslatma ve Simulasyon
+---
 
-| Yol | Sorumluluk |
+## 3. Yazilim Gorev Gruplari
+
+Yazilim yapisi belirli dosya adlariyla tarif edilmez. Sistem genel olarak su gorev gruplarindan olusur:
+
+| Gorev Grubu | Genel Amac |
 |---|---|
-| `host_scripts/system_start.sh` | Gercek donanim preflight, Docker ve servis baslatma |
-| `host_scripts/system_stop.sh` | Host kamera, portlar ve Docker kapatma |
-| `docker_workspace/scripts/internal_start.sh` | Docker icinde MAVProxy, lidar, cam, telemetry, usv_main baslatma |
-| `sim/bin/run_sim_stack.sh` | Gazebo, ROS-GZ bridge, SITL, sim bridge, cam, telemetry, lidar_map, usv_main orkestrasyonu |
-| `sim/bridges/sitl_gazebo_bridge.py` | SITL MAVLink ile Gazebo pose/motor/JSON koprusu |
-| `sim/bridges/ros_to_tcp_cam.py` | ROS2 Image topic -> TCP JPEG kamera donanim arayuzu |
+| Ana gorev yonetimi | Hazirlik, start/stop, parkur gecisleri ve gorev durumunu takip eder |
+| Pixhawk/MAVLink baglantisi | Otopilot ile mod, konum, gorev, telemetri ve hedef haberlesmesini saglar |
+| Kamera isleme | Goruntu uzerinden yaris nesneleri ve hedef bilgisi uretir |
+| Lidar isleme | Yakin cevre ve engel bilgisini arac uzerinde uretir |
+| Telemetri ve arayuz | Operator ekranina durum, saglik ve kayit bilgilerini sunar |
+| Mission isleme | Yuklenen gorev bilgisini sistemin ortak gorev yapisina cevirir |
+| Kayit ve loglama | Gorev olaylari, sensor durumu, telemetri ve hata bilgilerini saklar |
+| Simulasyon kopruleri | Gercek donanim yerine kullanilan simulasyon parcalarini ayni akisla baglar |
 
-## Baslatma Sirasi
+Bu bolum mimariyi genel seviyede anlatir. Dosya isimleri, sinif yapilari, servis ayrimlari ve algoritmalar gelistirme sirasinda degisebilir.
 
-### Simulasyon
+---
 
-`./sim/bin/run_sim_stack.sh` su sirayi uygular:
+## 4. Gorev Akisi
 
-1. Gazebo
-2. ROS-GZ Bridge
-3. ArduPilot SITL
-4. `sitl_gazebo_bridge.py`
-5. `ros_to_tcp_cam.py`
-6. `cam.py`
-7. `telemetry.py`
-8. `lidar_map.py`
-9. `usv_main.py`
-10. `check_stack`
-11. startup readiness kontrolu
-12. compliance kontrolleri
+Genel gorev akisi:
 
-Gorev otomatik baslamaz. Test modunda operator dashboard Start butonunu veya `POST /api/start_mission` endpointini kullanir.
+1. Sistem acilir.
+2. Pixhawk, Raspberry Pi ve sensorler hazirlanir.
+3. Kamera, lidar, RC, telemetri ve E-stop saglik kontrolleri yapilir.
+4. Mission YKI veya uygun gorev araci ile hazirlanir.
+5. Mission Pixhawk/sistem tarafina yuklenir.
+6. Sistem hazir durumdayken operator gorevi baslatir.
+7. Parkur1, Parkur2 ve Parkur3 sirayla yurutulur.
+8. Parkurlar arasi gecisler otonom olarak yapilir.
+9. Gorev tamamlandiginda arac guvenli bekleme durumuna alinir.
+10. Geri kazanim ve saha islemleri manuel yapilir.
 
-### Gercek Donanim
+Gorev basladiktan sonra acil durdurma haric yeni operator komutlari kabul edilmez.
 
-```bash
-./host_scripts/system_start.sh test
-./host_scripts/system_start.sh race
-```
+---
 
-Gercek baslatma akisi:
+## 5. Parkur Ozeti
 
-1. Lidar IP/preflight
-2. Pixhawk + STM32 seri port kontrolu
-3. Kamera kontrolu
-4. Host kamera yayini: test modda acik, race modda kapali
-5. Docker `ege_ros`
-6. `internal_start.sh`
-7. MAVProxy
-8. ROS lidar driver
-9. `cam.py`, `telemetry.py`, `usv_main.py`
+### Parkur1
 
-Race modda `WIFI_DISABLE=true` ayari `config/usv_mode.cfg` icinde verilebilir.
+Waypoint tabanli seyir bolumudur. Yarista bu bolumde Pixhawk gorev yurutmesi ana roldedir. Raspberry Pi saglik, log ve gorev ilerlemesini izler.
 
-## Mod Kurallari
+### Parkur2
 
-| Konu | Test Modu | Race Modu |
-|---|---|---|
-| Mission start | Dashboard veya `/api/start_mission` | Yalniz RC CH5 `>= 1700` |
-| `/api/start_mission` | Hazirlik gate gecerse flag yazar | `403` doner |
-| Kamera web stream | Acik | Kapali, onboard isleme aktif |
-| Lidar map web | Acik | Baslamaz / endpoint `403` |
-| Mission upload | Start oncesi | Start oncesi |
-| Start sonrasi komut | E-stop haric reddedilir | E-stop haric reddedilir |
+Kamera ve lidar bilgilerinin kullanildigi bolumdur. Sistem ust seviye hedef bilgisi uretir; arac kontrolu otopilot tarafinda uygulanir.
 
-Hazirlik gate kosullari: `ready_state=true`, `camera_ready=true`, `lidar_ready=true`.
+### Parkur3
 
-## Otonomi Akisi
+Hedef rengi ve hedef konumu uzerinden angajmanin degerlendirildigi bolumdur. Yanlis hedef algisi emniyet amaciyla gorev durumuna yansitilir.
 
-Aktif runtime state machine:
+---
 
-```text
-IDLE -> NAV -> ENGAGE -> COMPLETED/HOLD
-```
+## 6. Haberlesme ve Kisitlar
 
-Minimal hedef state modeli su sekilde temsil edilir:
+Sistemde haberlesme kanallari gorevlerine gore ayrilir:
 
-```text
-IDLE -> LOAD_MISSION -> ARM_READY -> TURN_TO_WAYPOINT
--> GO_TO_WAYPOINT -> AVOID_OBSTACLE -> WAYPOINT_REACHED
--> NEXT_WAYPOINT -> MISSION_DONE -> FAILSAFE
-```
+- RC linki manuel kontrol, start ve E-stop icin kullanilir.
+- 433 MHz telemetri mission yukleme ve MAVLink izleme icin kullanilir.
+- Pixhawk ile Raspberry Pi arasinda arac ici MAVLink haberlesmesi bulunur.
+- Yardimci mikrodenetleyici ve sensorler kablolu baglantilarla sisteme dahil edilir.
 
-Uygulamada NAV fazi waypoint listesini sirayla yurutur. Heading-first davranis `navigation.py` ve `nav_guidance.py` icinde uygulanir:
+Yaris seviyesinde temel kisitlar:
 
-- Heading hatasi buyukse forward `0`, yaw duzeltme onceliklidir.
-- Heading esik icine girince ileri hiz aktif olur.
-- Waypoint yaklasiminda hiz dusurulur.
-- Kabul yaricapi icinde motor neutral olur.
+- 2.4 GHz ve 5 GHz tabanli yeni gorev/telemetri/goruntu aktarimi eklenmez.
+- Hucresel modem, hotspot veya Wi-Fi tabanli gorev aktarimi kullanilmaz.
+- Goruntu isleme ve sensor isleme arac uzerinde kalir.
+- YKI yalniz arayuz, mission yukleme ve telemetri amaciyla kullanilir.
+- Yaris modunda goruntu aktarimi acilmaz.
 
-Obstacle avoidance:
+---
 
-- Lidar ana guvenlik sensorudur.
-- Sektorler: left/front/right.
-- `D_MIN_M=1.2`, `P2_LIDAR_WARN_M=1.5`.
-- Front blocked ise hiz `0` veya `FAILSAFE_SLOW_MPS`, yaw daha acik sektore verilir.
-- Kamera yalniz yardimci sinyal uretir; lidar yokken carpismasiz guvenlik varsaymaz.
+## 7. Emniyet ve Kontrol Sahipligi
 
-## Motor Kontrol
+Kontrol sahipligi genel olarak su sekildedir:
 
-Ortak motor profili `motor_controller.py` icindedir:
+- Pixhawk/ArduPilot:
+  - Dusuk seviye arac kontrolu
+  - Arac modu
+  - Motor/ESC cikislari
+  - Manuel RC onceligi
+  - Otopilot guvenlik davranislari
 
-- Neutral: `PWM_NEUTRAL_US=1500`
-- Clamp: `PWM_MIN_US=1100`, `PWM_MAX_US=1900`
-- Deadband ve minimum efektif PWM tek noktadan uygulanir.
-- Ramp limiter: `PWM_SLEW_RATE_US_PER_S`
-- Jerk limiter: `PWM_JERK_LIMIT_US_PER_S2`
-- Failsafe, E-stop, mission inactive, command lock durumlarinda cikis `1500/1500`.
+- Raspberry Pi:
+  - Gorev durumu
+  - Kamera/lidar isleme
+  - Ust seviye hedef uretimi
+  - Telemetri, kayit ve saglik izleme
 
-Sim bridge `sim/control/motor_command.json` icindeki son `left/right` PWM kontratini okur; gercek donanimda MAVLink RC override/passthrough yolu kullanilir.
+Manuel kontrol ve E-stop her zaman otonomiden onceliklidir. Fiziksel guc kesme zinciri yazilimsal durdurma mantigiyla zayiflatilmaz.
 
-## API Ozeti
+PWM araligi: `PWM_NEUTRAL_US=1500`, min 1100, max 1900. RC override ana otonomi yolu degildir.
 
-| Endpoint | Yontem | Mod | Aciklama |
-|---|---|---|---|
-| `/` | GET | test/race | Dashboard |
-| `/api/data` | GET | test/race | Telemetri, health, mission state, report_view |
-| `/api/mission_status` | GET | test/race | Gorev aktiflik/ilerleme ozeti |
-| `/api/events` | GET | test/race | Kritik olay long-poll |
-| `/api/start_mission` | POST | test | Start flag yazar; hazir degilse `409` |
-| `/api/start_mission` | POST | race | Politika geregi `403` |
-| `/api/emergency_stop` | POST | test/race | E-stop flag ve neutral/disarm |
-| `/api/mission` | POST | test/race | Start oncesi mission upload; start sonrasi `409` |
-| `/api/target_color` | POST | test/race | Start oncesi hedef renk; start sonrasi `409` |
-| `/api/camera_stream` | GET | test | Kamera proxy |
-| `/api/camera_stream` | GET | race | `403` |
-| `/api/lidar_stream` / `/api/lidar_map` / `/api/spatial_map` | GET | test | Harita/gorsel debug |
-| `/api/lidar_stream` / `/api/lidar_map` / `/api/spatial_map` | GET | race | `403` |
-| `/api/log_files`, `/api/log_tail`, `/api/log_file` | GET | test/race | Yerel log goruntuleme |
+Yaris konfigurasyonu: Race modunda `USV_RACE_P1_AUTO_WAYPOINTS` ortam degiskeni ile P1 parkurundaki kac waypoint'in Pixhawk AUTO'da calistirilacagi belirtilmelidir. Varsayilan 1'dir; bu birden fazla waypoint varsa P2'ye erken gecise neden olabilir.
 
-## Loglar
+---
 
-Tum cekirdek servisler merkezi log init kullanir ve yerel dosya sistemine yazar.
+## 8. Simulasyon ve Gercek Sistem
 
-| Konum | Icerik |
+Proje simulasyon oncelikli gelistirilir. Simulasyonda gercek sistemle ayni ana gorev mantigi, ayni telemetri yaklasimi ve ayni otopilot haberlesme prensibi korunur.
+
+Simulasyonda fiziksel parcalar yazilim karsiliklariyla temsil edilir:
+
+| Gercek Sistem | Simulasyon Karsiligi |
 |---|---|
-| `logs/terminal.log` | `run_sim_stack.sh` ana tee cikisi |
-| `logs/system/` | `cam`, `telemetry`, `usv_main`, `lidar_map`, CSV ve video artefaktlari |
-| `logs/simulation/` | Gazebo, SITL, ROS-GZ, bridge ve compliance race loglari |
-| `logs/host/` | Host start/trace loglari |
-| `logs/system/compliance/` | Static/behavior compliance raporlari |
+| Pixhawk | ArduPilot SITL |
+| Tekne ve parkur | Gazebo |
+| Kamera | Simulasyon kamera akisi |
+| Lidar | Simulasyon lidar akisi |
+| MAVLink baglantisi | SITL MAVLink baglantilari |
 
-Her servis en az su formatlari hedefler:
+Simulasyon dogrulamasi tamamlanmadan gercek donanim testi yapilmaz.
 
-- `{component}.debug.log`
-- `{component}.jsonl`
+---
 
-Fonksiyon trace simde varsayilan aciktir. Log rotasyonu `runtime_debug_log.py` tarafindan yapilir.
+## 9. Kayitlar ve Izleme
 
-## Dogrulama
+Sistem gorev sirasinda yerel dosya sistemine kayit alir.
 
-Her kod veya dokumantasyon degisikliginden sonra en az:
+Genel kayit turleri:
 
-```bash
-python3 -m py_compile docker_workspace/src/*.py docker_workspace/src/adapters/*.py
-python3 host_scripts/check_compliance_static.py
-python3 host_scripts/check_compliance_behavior.py
-python3 host_scripts/check_compliance_race.py
-```
+- Telemetri verileri
+- Gorev durumu
+- Sensor hazirlik ve saglik bilgileri
+- Kamera/lidar isleme sonuclari
+- Servis loglari
+- Simulasyon ve dogrulama loglari
+- Hata, uyari ve E-stop olaylari
 
-Bu ajan/otomasyon kendi kendine `./sim/bin/run_sim_stack.sh --auto-test` calistirmaz ve otomatik gorev baslatan sim turevlerini kullanmaz. Surus, motion ve mission progression testi operator tarafindan manuel yapilir.
+Loglar, gorev sonrasi analiz ve sistem dogrulama icin kullanilir. Yaris modunda kayit sistemi goruntu aktarimi amaciyla kullanilmaz.
 
-Manuel sim testi:
+---
 
-```bash
-./sim/bin/run_sim_stack.sh
-```
+## 10. Operasyon ve Dogrulama
 
-Dashboard hazir oldugunda test modda Start verilir. Beklenen ana gostergeler:
+Operasyon ve dogrulama akislari icin proje kurallari takip edilir:
 
-- `ready_state=true`
-- `camera_ready=true`
-- `lidar_ready=true`
-- CSV minimal header ile yazilir
-- `active_waypoint_index` artar
-- Motor PWM ani sicrama yapmadan `1100-1900` icinde kalir
-- Race modda stream endpointleri kapali kalir
+- Ana otomasyon ve kontrol sahipligi icin `OTOMASYON.md`
+- Ajan, gelistirme ve test kurallari icin `AGENTS.md`
+- Sistem calisma ozeti icin `documents/rapor_calismasistemi.md`
+- Yaris sartname uyumu icin `documents/ida_sartname.md`
+- Host/sim baslatma ve dogrulama akislarinda ilgili betikler
 
-## Port Haritasi
+Otomatik gorev baslatan simulasyon veya hareket testleri operator kontrolu olmadan calistirilmaz. Kod ve dokuman degisikliklerinden sonra proje dogrulama betikleriyle uyum kontrolu yapilir.
 
-| Port | Protokol | Kullanim |
-|---|---|---|
-| `8080` | HTTP | Dashboard + API |
-| `5000` | HTTP/MJPEG | Kamera web stream, test modu |
-| `5001` | HTTP | Lidar haritasi, test modu |
-| `8888` | TCP | Ham kamera kaynagi / sim TCP JPEG |
-| `14550` | UDP/MAVLink | MAVProxy -> telemetry |
-| `14551` | UDP/MAVLink | MAVProxy -> usv_main; sim bridge tarafinda tek MAVLink kopru |
-| `5760` | TCP/MAVLink | ArduPilot SITL |
-| `20108` | UDP | RPLidar S2E |
+---
 
-## Dizin Yapisi
+## 11. Genel Dizin Yapisi
 
-```text
-CELEBILER_USV/
-├── documents/
-│   ├── ida_sartname.md
-│   └── rapor_calismasistemi.md
-├── host_scripts/
-│   ├── system_start.sh
-│   ├── system_stop.sh
-│   ├── check_compliance_static.py
-│   ├── check_compliance_behavior.py
-│   └── check_compliance_race.py
-├── docker_workspace/
-│   ├── src/
-│   │   ├── usv_main.py
-│   │   ├── telemetry.py
-│   │   ├── cam.py
-│   │   ├── lidar_map.py
-│   │   ├── motor_controller.py
-│   │   ├── navigation.py
-│   │   ├── obstacle_avoidance.py
-│   │   ├── sensors.py
-│   │   └── adapters/
-│   ├── scripts/internal_start.sh
-│   └── mission.json
-├── sim/
-│   ├── bin/run_sim_stack.sh
-│   ├── bridges/
-│   ├── configs/
-│   └── control/
-├── logs/
-│   ├── system/
-│   ├── simulation/
-│   └── host/
-├── AGENTS.md
-└── README.md
-```
+| Dizin/Dosya | Genel Icerik |
+|---|---|
+| `documents/` | Sartname, calisma sistemi ve destek dokumanlari |
+| `config/` | Sistem ve Pixhawk konfigurasyon dosyalari |
+| `docker_workspace/` | Arac uzerinde calisan runtime yazilimlari |
+| `host_scripts/` | Host baslatma, durdurma ve dogrulama araclari |
+| `sim/` | Simulasyon ortami, kopruler ve sim konfigurasyonlari |
+| `logs/` | Sistem, host ve simulasyon loglari |
+| `AGENTS.md` | Proje ajan ve otomasyon kurallari |
+| `OTOMASYON.md` | Ana otomasyon mimarisi ve operasyon sozlesmesi |
 
-## Yarismaya Uyum Notlari
+---
 
-- 2.4-2.8 GHz ve 5.15-5.85 GHz bandinda yeni haberlesme yolu eklenmez.
-- Hucresel modem, hotspot veya Wi-Fi tabanli gorev/telemetri/goruntu aktarimi eklenmez.
-- Otonomi, goruntu isleme ve sensor isleme onboard kalir.
-- YKI yalniz arayuz, mission yukleme ve telemetri icindir.
-- Race modda goruntu aktarimi ve lidar map yayini kapali kalir.
-- Gorev basladiktan sonra E-stop disinda yeni operator komutu kabul edilmez.
-
-## Lisans ve Takim
+## 12. Lisans ve Takim
 
 MIT lisansi.
 

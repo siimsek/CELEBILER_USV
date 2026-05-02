@@ -64,15 +64,16 @@ if os.environ.get("USV_SIM") == "1":
     OBSTACLE_TELEMETRY_HZ = 40
     LIDAR_PROCESSING_HZ = 40
 
-R_WP_M = 2.5
+R_WP_M = max(0.5, min(3.0, float(os.environ.get("USV_SIM_R_WP_M", os.environ.get("R_WP_M", "2.5")))))
 T_HOLD_S = 2.0
 MISSION_INPUT_FORMAT = "flat_ordered"
 MISSION_ALLOW_STRUCTURED_LEGACY = os.environ.get("MISSION_ALLOW_STRUCTURED_LEGACY", "").strip() == "1"
 # Unified mission: split is done by split_nav_engage() — no fixed P2/P3 count needed.
-P1_SPEED_CRUISE_MPS = 1.2
-P1_SPEED_APPROACH_MPS = 0.6
-P2_WAIT_SPEED_MPS = 0.6
-P2_CRUISE_MPS = 1.5
+P1_SPEED_CRUISE_MPS = float(os.environ.get("USV_SIM_P1_CRUISE_MPS", "1.5"))
+P1_SPEED_APPROACH_MPS = float(os.environ.get("USV_SIM_P1_APPROACH_MPS", "0.8"))
+P1_AUTO_WAYPOINT_TIMEOUT_S = 180.0  # per-waypoint max wait in P1 AUTO monitor
+P2_WAIT_SPEED_MPS = float(os.environ.get("USV_SIM_P2_WAIT_MPS", "1.0"))
+P2_CRUISE_MPS = float(os.environ.get("USV_SIM_P2_CRUISE_MPS", "2.0"))
 P2_STABLE_S = 1.0
 P2_GATE_CONFIRM_S = 0.5
 P3_MAX_SPEED_MPS = 1.5
@@ -82,10 +83,9 @@ P3_RETRY_COUNT = 1
 P3_REVERSE_SPEED_MPS = 0.6
 P3_REVERSE_DISTANCE_M = 3.0
 P3_REVERSE_TIMEOUT_S = 4.0
-D_MIN_M = 1.2
+D_MIN_M = 2.0
 # P2: lidar + kamera birlesik kacinma (warn mesafesinde yumuak, D_MIN altinda sert)
-# Operatör isteği: kaçınma tetiği 1.5 m civarında başlasın.
-P2_LIDAR_WARN_M = 1.5
+P2_LIDAR_WARN_M = 2.5
 P2_LIDAR_WARN_EXIT_MARGIN_M = 0.40
 # NAV: donmus bacak geometrisi yeterliyse lateral hata ile bearing düzeltmesi (saf WP bearing spiralını azaltır)
 NAV_CROSS_TRACK_K = 0.45
@@ -94,14 +94,17 @@ NAV_CROSS_TRACK_L1_MAX_M = 15.0
 NAV_CROSS_TRACK_CORR_CAP_DEG = 22.0
 NAV_CROSS_TRACK_MIN_LEG_M = 3.75  # max(R_WP_M * 1.5, 3.0) ile _waypoint_leg_progress ile uyumlu
 # NAV iki faz (her WP bacaginda): (1) yalnız yönelt — |err| <= HEADING_DONE olmadan gitme yok; (2) hat + ileri hız
-NAV_ALIGN_HEADING_DONE_DEG = 5.0
+NAV_ALIGN_HEADING_DONE_DEG = float(os.environ.get("USV_SIM_ALIGN_HEADING_DEG", "8.0"))
 # Geriye uyumluluk (eski ad); geçişler NAV_ALIGN_HEADING_DONE_DEG kullanır
 NAV_ALIGN_ENTER_ADVANCE_DEG = 9.5
 NAV_ALIGN_PIVOT_UNTIL_DEG = 11.0
 # İleri fazda burun şaşarsa tekrar (1) dönüşe dön — 24° çok gevşekti (log: 15°+ ile hâlâ advance)
 NAV_ALIGN_REVERT_ALIGN_DEG = 12.0
-NAV_ALIGN_MAX_SPEED_MPS = 0.45
+NAV_ALIGN_MAX_SPEED_MPS = float(os.environ.get("USV_SIM_ALIGN_MAX_MPS", "0.8"))
+NAV_ALIGN_CREEP_SPEED_MPS = 0.28
 NAV_ALIGN_TIMEOUT_S = 14.0
+NAV_WP_APPROACH_SPEED_CAP_DIST_M = 1.5  # within this distance, cap speed near waypoint
+NAV_WP_APPROACH_SPEED_CAP_MPS = float(os.environ.get("USV_SIM_WP_APPROACH_CAP_MPS", "0.6"))  # was hardcoded 0.35
 # Heading damping (inner-loop style): error + yaw-rate feedback + command slew.
 NAV_HEADING_DAMPING_ENABLED = True
 NAV_HEADING_DAMPING_YAWRATE_GAIN = 0.32
@@ -149,16 +152,13 @@ INNOVATION_SWITCHES = {
     "horizon_lock": True,
     "camera_adaptation": True,
     "autonomy_health_trust_bar": True,
-    # Unified execution path: when True, both TEST and RACE modes route through the
-    # same Pi-guided decision engine (_run_nav_unified). Pixhawk acts as actuator
-    # interface only (GUIDED mode). Eliminates all behavioral divergence between
-    # TEST/RACE and ensures simulation produces identical outputs to real hardware.
-    "unified_execution_path": True,
+    # Disabled by race contract: P1 remains pure Pixhawk AUTO, while test/P2/P3
+    # use the shared Pi-guided waypoint engine.
+    "unified_execution_path": False,
 }
 
 FUSION_ENABLED = bool(INNOVATION_SWITCHES.get("sensor_fusion", True))
-# Single deterministic execution path: Pi computes all decisions in both modes.
-# Set to False only to revert to legacy split (Pixhawk AUTO in race, Pi GUIDED in test).
+# Legacy switch retained for compatibility; run_nav() enforces the race/test split.
 UNIFIED_EXECUTION_PATH = bool(INNOVATION_SWITCHES.get("unified_execution_path", True))
 FUSION_BEARING_WINDOW_DEG = 10.0
 FUSION_LIDAR_MIN_VALID_M = 0.4
@@ -318,10 +318,11 @@ LINK_TOPOLOGY = {
         "name": "Telemetry + mission upload",
         "technology": "433MHz serial modem",
         "protocol": "MAVLink",
-        "functions": ["telemetry", "mission_upload"],
+        "functions": ["mission_planner_gcs", "telemetry", "mission_upload"],
+        "sim_endpoint": "udp:14552",
     },
     "internal_links": [
-        {"path": "Pixhawk<->RaspberryPi", "technology": "MAVLink"},
+        {"path": "Pixhawk<->RaspberryPi", "technology": "MAVLink", "endpoints": ["udp:14551", "tcp:5760(sim)"]},
         {"path": "RaspberryPi<->STM32", "technology": "USB serial"},
     ],
 }

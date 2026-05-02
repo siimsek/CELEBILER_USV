@@ -11,6 +11,16 @@ export USV_PROJECT_ROOT="/root/workspace"
 # USV_MODE: test (full web) | race (no image transmission - IDA 3.7)
 USV_MODE="${USV_MODE:-test}"
 export USV_MODE
+if [ "$USV_MODE" = "race" ]; then
+    if [ "${USV_USE_RC_OVERRIDE:-}" = "1" ]; then
+        echo "❌ [HATA] Race modda USV_USE_RC_OVERRIDE=1 yasak; Pixhawk/ArduPilot PWM sahibi kalmalıdır."
+        exit 1
+    fi
+    if [ "${SIM_GZ_ALLOW_MOTOR_COMMAND_JSON:-}" = "1" ]; then
+        echo "❌ [HATA] Race modda SIM_GZ_ALLOW_MOTOR_COMMAND_JSON=1 yasak; bench motor bypass kapalı olmalıdır."
+        exit 1
+    fi
+fi
 
 mkdir -p /root/workspace/logs
 mkdir -p /root/workspace/control
@@ -31,14 +41,16 @@ if ! command -v mavproxy.py &> /dev/null; then
 fi
 
 # Pixhawk portunu otomatik bul
-PIXHAWK_PORT=""
-for port in /dev/ttyACM* /dev/ttyUSB*; do
-    [ -e "$port" ] || continue
-    # STM32 genelde 9600 baud JSON gönderir, Pixhawk 115200 MAVLink
-    # İlk bulunan ACM portu genelde Pixhawk; hepsini dene
-    timeout 2 python3 -c "
+PIXHAWK_PORT="${PIXHAWK_PORT:-auto}"
+PIXHAWK_BAUD="${PIXHAWK_BAUD:-115200}"
+if [ "$PIXHAWK_PORT" = "auto" ]; then
+    PIXHAWK_PORT=""
+    for port in /dev/ttyACM* /dev/ttyUSB*; do
+        [ -e "$port" ] || continue
+        # STM32 genelde 9600 baud JSON gönderir, Pixhawk MAVLink baud'u env ile belirlenir.
+        timeout 2 python3 -c "
 from pymavlink import mavutil
-m = mavutil.mavlink_connection('$port', baud=115200)
+m = mavutil.mavlink_connection('$port', baud=int('$PIXHAWK_BAUD'))
 if m.wait_heartbeat(timeout=1.5):
     print('OK')
     m.close()
@@ -46,13 +58,28 @@ else:
     m.close()
     exit(1)
 " 2>/dev/null && PIXHAWK_PORT="$port" && break
-done
+    done
+fi
+
+MAVPROXY_ARGS=(
+    "--master=$PIXHAWK_PORT"
+    "--baudrate=$PIXHAWK_BAUD"
+    "--out=udpout:127.0.0.1:14550"
+    "--out=udpout:127.0.0.1:14551"
+)
+if [ -n "${MISSION_PLANNER_UDP_OUT:-}" ]; then
+    MAVPROXY_ARGS+=("--out=${MISSION_PLANNER_UDP_OUT}")
+fi
 
 if [ -n "$PIXHAWK_PORT" ]; then
-    echo "📡 [MAV] Pixhawk: $PIXHAWK_PORT -> UDP :14550 (telemetry) + :14551 (autonomous)"
-    mavproxy.py --master=$PIXHAWK_PORT --baudrate=115200 \
-        --out=udpout:127.0.0.1:14550 \
-        --out=udpout:127.0.0.1:14551 \
+    echo "📡 [MAV] Pixhawk: $PIXHAWK_PORT baud=$PIXHAWK_BAUD"
+    echo "📡 [MAV] MAVProxy out: udpout:127.0.0.1:14550 (telemetry)"
+    echo "📡 [MAV] MAVProxy out: udpout:127.0.0.1:14551 (usv_main)"
+    echo "📡 [MAV] Mission Planner birincil bağlantı: 433 MHz Pixhawk telemetri modemi"
+    if [ -n "${MISSION_PLANNER_UDP_OUT:-}" ]; then
+        echo "📡 [MAV] Ek Mission Planner UDP çıkışı: ${MISSION_PLANNER_UDP_OUT}"
+    fi
+    mavproxy.py "${MAVPROXY_ARGS[@]}" \
         --daemon --non-interactive \
         > /root/workspace/logs/mavproxy.log 2>&1 &
     sleep 0.5

@@ -43,6 +43,14 @@ else
 fi
 
 if [ "$USV_MODE" = "race" ]; then
+    if [ "${USV_USE_RC_OVERRIDE:-}" = "1" ]; then
+        echo -e "${RED}[HATA]${NC} Race modda USV_USE_RC_OVERRIDE=1 yasak; Pixhawk/ArduPilot PWM sahibi kalmalıdır."
+        exit 1
+    fi
+    if [ "${SIM_GZ_ALLOW_MOTOR_COMMAND_JSON:-}" = "1" ]; then
+        echo -e "${RED}[HATA]${NC} Race modda SIM_GZ_ALLOW_MOTOR_COMMAND_JSON=1 yasak; sim bench motor bypass flag'i kapalı olmalıdır."
+        exit 1
+    fi
     echo -e "${YELLOW}⚠️  [ŞARTNAME 3.4] WiFi Kapatma: config/usv_mode.cfg dosyasina 'WIFI_DISABLE=true' yazarak aktiflestirebilirsin.${NC}"
     WIFI_DISABLE=$(grep -E "^WIFI_DISABLE=" "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d ' ' | tr '[:lower:]' '[:upper:]')
     if [ "$WIFI_DISABLE" = "TRUE" ] || [ "$WIFI_DISABLE" = "1" ]; then
@@ -53,14 +61,21 @@ if [ "$USV_MODE" = "race" ]; then
     fi
 fi
 
-LOG_DIR="$HOME/CELEBILER_USV/logs"
+LOG_DIR="$PROJECT_ROOT/logs"
 HOST_LOG_ROOT="${PROJECT_ROOT}/logs"
+DOCKER_LOG_SOURCE="$PROJECT_ROOT/docker_workspace/logs"
+
+prepare_latest_log_session() {
+    rm -rf "$LOG_DIR"
+    rm -rf "$DOCKER_LOG_SOURCE"
+    mkdir -p "$LOG_DIR/host" "$DOCKER_LOG_SOURCE"
+}
+
+prepare_latest_log_session
 mkdir -p "$HOST_LOG_ROOT/host"
 echo "[$(date -Iseconds)] system_start USV_MODE=$USV_MODE PROJECT_ROOT=$PROJECT_ROOT LOG_DIR=$LOG_DIR" >> "$HOST_LOG_ROOT/host/system_start.log"
-echo "🧹 [HOST] Eski loglar temizleniyor..."
-sudo rm -f "$LOG_DIR"/*.log
-sudo rm -f "$LOG_DIR"/docker/*.log
-mkdir -p "$LOG_DIR/docker"
+echo "🧹 [HOST] Eski loglar temizlendi; yalnız son session /logs altında tutulacak."
+mkdir -p "$DOCKER_LOG_SOURCE"
 
 # --- 0. AĞ YAPILANDIRMASI (ÖNCELİKLİ) ---
 # Modemin resetlenmesi durumunda Lidar IP'sini (192.168.11.5) kaybetmemek için en başta yapıyoruz.
@@ -125,9 +140,8 @@ echo "   🚀 Tüm Sistemler Hazır. Başlatılıyor..."
 echo "-----------------------------------------------------------"
 
 # --- 2. LOG ve DİZİN AYARLARI ---
-LOG_DIR="$HOME/CELEBILER_USV/logs"
+LOG_DIR="$PROJECT_ROOT/logs"
 mkdir -p "$LOG_DIR"
-DOCKER_LOG_SOURCE="$HOME/CELEBILER_USV/docker_workspace/logs"
 if [ -d "$DOCKER_LOG_SOURCE" ]; then
     ln -sfn "$DOCKER_LOG_SOURCE" "$LOG_DIR/docker"
 fi
@@ -154,6 +168,35 @@ fi
 
 # 4. DOCKER BAŞLATMA
 echo -e "${GREEN}[DOCKER]${NC} Konteyner ($CONTAINER_NAME) Kontrol Ediliyor..."
+if [ ! "$(docker ps -aq -f name=$CONTAINER_NAME)" ]; then
+    echo -e "${RED}[HATA]${NC} Konteyner bulunamadı! Lütfen kurulum yapın."
+    exit 1
+fi
+
+docker_network_mode=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER_NAME" 2>/dev/null || echo "")
+docker_privileged=$(docker inspect -f '{{.HostConfig.Privileged}}' "$CONTAINER_NAME" 2>/dev/null || echo "false")
+docker_devices=$(docker inspect -f '{{range .HostConfig.Devices}}{{.PathOnHost}} {{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "")
+docker_binds=$(docker inspect -f '{{range .HostConfig.Binds}}{{.}} {{end}}' "$CONTAINER_NAME" 2>/dev/null || echo "")
+
+if [ "$docker_network_mode" != "host" ]; then
+    echo -e "   ❌ [HATA] Docker network_mode=$docker_network_mode; beklenen: host"
+    echo "      -> telemetry/usv_main MAVLink UDP çıkışları için ege_ros host network ile kurulmalıdır."
+    exit 1
+fi
+
+device_access_ok=false
+if [ "$docker_privileged" = "true" ]; then
+    device_access_ok=true
+elif echo "$docker_devices $docker_binds" | grep -Eq '/dev/tty(USB|ACM)|/dev '; then
+    device_access_ok=true
+fi
+if [ "$device_access_ok" != "true" ]; then
+    echo -e "   ❌ [HATA] Docker konteynerinde /dev/ttyUSB* veya /dev/ttyACM* erişimi görünmüyor."
+    echo "      -> ege_ros konteyneri Pixhawk/STM32 seri cihazları veya privileged/device mapping ile kurulmalıdır."
+    exit 1
+fi
+echo "   ✅ Docker preflight - network_mode=host, seri cihaz erişimi mevcut"
+
 if [ ! "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
     if [ "$(docker ps -aq -f name=$CONTAINER_NAME)" ]; then
         docker start $CONTAINER_NAME > /dev/null

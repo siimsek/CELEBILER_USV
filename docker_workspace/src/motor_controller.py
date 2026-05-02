@@ -47,7 +47,13 @@ def mix_twin_thrusters(
     pwm_span: int | None = None,
     max_speed_mps: float = 1.5,
 ) -> MotorMix:
-    """Map speed + heading error to raw left/right PWM before ramp hardening."""
+    """
+    Map speed + heading error to raw left/right PWM before ramp hardening.
+
+    Canonical contract: positive heading error is a clockwise compass correction,
+    so the starboard/right thruster is driven harder than port/left. The sim
+    bridge converts that compass-positive yaw into Gazebo's opposite ROS z sign.
+    """
     neutral = int(neutral_pwm)
     span = int(pwm_span if pwm_span is not None else max(abs(PWM_MAX_US - neutral), abs(neutral - PWM_MIN_US)))
     speed = float(speed_mps)

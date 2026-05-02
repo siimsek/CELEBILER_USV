@@ -18,6 +18,7 @@ from compliance_profile import (
     COMMS_POLICY,
     CONTROL_DIR as DEFAULT_CONTROL_DIR,
     GENERAL_TELEMETRY_HZ,
+    HEARTBEAT_WARN_S,
     LIDAR_PROCESSING_HZ,
     LINK_TOPOLOGY,
     LOG_DIR as DEFAULT_LOG_DIR,
@@ -83,7 +84,7 @@ FLAG_START = f"{CONTROL_DIR}/start_mission.flag"
 FLAG_STOP = f"{CONTROL_DIR}/emergency_stop.flag"
 STATE_FILE = f"{CONTROL_DIR}/mission_state.json"
 MOTOR_COMMAND_FILE = f"{CONTROL_DIR}/motor_command.json"
-CAMERA_STREAM_PROXY_SOURCE = os.environ.get("CAMERA_STREAM_PROXY_SOURCE", "http://127.0.0.1:5000/")
+CAMERA_LATEST_JPG = f"{LOG_DIR}/camera_latest.jpg"
 LIDAR_STREAM_PROXY_SOURCE = os.environ.get("LIDAR_STREAM_PROXY_SOURCE", "http://127.0.0.1:5001/")
 LIDAR_MAP_JPG = f"{LOG_DIR}/file3_local_map_latest.jpg"
 GPS_MIN_FIX_TYPE = 3
@@ -130,6 +131,7 @@ mission_data = {
     "target": "--",     # Hedef açıklama
     "wp_info": "-- / --",  # Waypoint bilgisi
     "start_requested": False,  # Görev başlat isteği
+    "start_requested_at": 0.0,
     "stop_requested": False,   # Acil durdur isteği
 }
 last_state_cache = dict(mission_data)
@@ -272,11 +274,21 @@ def _clear_flag(path):
 
 def _start_request_pending(state=None):
     state_dict = state if isinstance(state, dict) else _read_mission_state()
+    flag_pending = bool(os.path.exists(FLAG_START))
+    if flag_pending:
+        return True
     if bool(mission_data.get("start_requested", False)):
-        return True
-    if bool(state_dict.get("start_requested", False)):
-        return True
-    return bool(os.path.exists(FLAG_START))
+        try:
+            request_age_s = time.monotonic() - float(mission_data.get("start_requested_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            request_age_s = 999.0
+        if request_age_s <= 8.0 and not bool(state_dict.get("active", False)):
+            return True
+        mission_data["start_requested"] = False
+        mission_data["start_requested_at"] = 0.0
+    if bool(state_dict.get("active", False)):
+        return False
+    return False
 
 
 def _atomic_write_json(path, payload):
@@ -462,6 +474,10 @@ HTML_PAGE = """
         .m-state .val { font-size:1rem; font-weight:700; color:var(--accent); margin-top:2px; }
         .m-wp { font-size:0.75rem; color:var(--text2); text-align:center; padding:4px 0; }
         .m-wp b { color:var(--text); }
+        .m-mp-line { font-size:0.65rem; color:var(--text2); text-align:left; margin-top:6px; line-height:1.4; padding:0 2px; }
+        .m-mp-line b { color:var(--accent); font-family:var(--mono); font-weight:600; }
+        .m-reject-reason { font-size:0.72rem; color:var(--danger); margin-top:8px; padding:6px 8px; border-radius:6px; border:1px solid rgba(255,80,80,0.35); background:rgba(80,20,20,0.25); display:none; text-align:left; }
+        .m-reject-reason.visible { display:block; }
         .m-btns { display:flex; flex-direction:column; gap:6px; margin-top:auto; }
         .btn { padding:10px; border:none; border-radius:8px; font-weight:700; font-size:0.8rem; cursor:pointer; transition:all 0.15s; text-transform:uppercase; letter-spacing:0.5px; font-family:var(--sans); }
         .btn:active { transform:scale(0.97); }
@@ -550,6 +566,10 @@ HTML_PAGE = """
 
                 <div class="m-wp" id="m_wp">Waypoint: <b>-- / --</b></div>
                 <div class="m-wp">Hedef: <b id="m_target">--</b></div>
+                <div class="m-mp-line">Mission kaynagi: <b id="m_upload_src">--</b></div>
+                <div class="m-mp-line">Pixhawk sync: <b id="m_sync_err">OK</b></div>
+                <div class="m-mp-line">MP/GCS heartbeat yasi: <b id="m_gcs_age">--</b></div>
+                <div class="m-reject-reason" id="m_reject_reason"></div>
 
                 <div class="m-btns">
                     <button class="btn btn-start" id="btn_start" onclick="cmdStart()" {% if usv_mode == 'race' %}disabled{% endif %}>▶ Görevi Başlat</button>
@@ -699,9 +719,9 @@ HTML_PAGE = """
 
                     // Mission Control
                     if(d.mission_state !== undefined) {
-                        const states = ['BEKLEME','PARKUR-1','PARKUR-2','PARKUR-3','TAMAMLANDI'];
+                        const mainStateMap = {0: 'BEKLEME', 1: 'NAV', 2: 'ENGAGE', 4: 'TAMAMLANDI', 5: 'HOLD'};
                         const stateEl = document.getElementById('m_state');
-                        stateEl.innerText = states[d.mission_state] || 'BEKLEME';
+                        stateEl.innerText = mainStateMap[d.mission_state] ?? 'BEKLEME';
 
                         // Parkur progress
                         for(let i=1;i<=3;i++) {
@@ -719,7 +739,9 @@ HTML_PAGE = """
                             d.usv_mode === 'race' ||
                             !d.ready_state ||
                             !d.camera_ready ||
-                            !d.lidar_ready;
+                            !d.lidar_ready ||
+                            d.guided_ready === false ||
+                            d.fc_start_ready === false;
                         if (!d.start_requested && !d.mission_active && !missionStartPending) {
                             document.getElementById('btn_start').innerText = '▶ Görevi Başlat';
                         }
@@ -734,6 +756,39 @@ HTML_PAGE = """
 
                     if(d.mission_target) document.getElementById('m_target').innerText = d.mission_target;
                     if(d.mission_wp_info) document.getElementById('m_wp').innerHTML = 'Waypoint: <b>' + d.mission_wp_info + '</b>';
+
+                    const upSrc = document.getElementById('m_upload_src');
+                    const syncEl = document.getElementById('m_sync_err');
+                    if (upSrc) upSrc.innerText = d.mission_upload_source || '--';
+                    if (syncEl) {
+                        const mirrorStatus = (d.pixhawk_mirror_status || '').toString();
+                        const mirrorError = (d.pixhawk_mirror_error || '').toString();
+                        const legacyError = (d.pixhawk_mission_sync_error || '').toString();
+                        const localActive = ((d.mission_upload_source || '').toString() !== 'pixhawk_mission');
+                        if (mirrorStatus) {
+                            const label = localActive ? 'local mission active, mirror ' : 'pixhawk mission ';
+                            syncEl.innerText = label + mirrorStatus + (mirrorError ? ': ' + mirrorError : '');
+                            syncEl.style.color = mirrorStatus === 'synced' ? 'var(--success)' :
+                                (mirrorStatus === 'failed' ? 'var(--danger)' : 'var(--warn)');
+                        } else {
+                            syncEl.innerText = legacyError || 'OK';
+                            syncEl.style.color = legacyError ? 'var(--danger)' : 'var(--success)';
+                        }
+                    }
+                    const gcsAgeEl = document.getElementById('m_gcs_age');
+                    if (gcsAgeEl) {
+                        const ga = d.mission_planner_gcs_age_s;
+                        const optional = d.mission_planner_status === 'optional_not_connected';
+                        gcsAgeEl.innerText = (ga === null || ga === undefined) ? (optional ? 'optional' : '\u2014') : (Number(ga).toFixed(1) + ' s');
+                        gcsAgeEl.style.color = (ga === null || ga === undefined) ? 'var(--text2)' : 'var(--success)';
+                    }
+                    const rej = document.getElementById('m_reject_reason');
+                    if (rej) {
+                        const mer = (d.mission_end_reason || 'none').toString();
+                        const show = mer.startsWith('start_rejected:');
+                        rej.textContent = show ? mer : '';
+                        rej.className = 'm-reject-reason' + (show ? ' visible' : '');
+                    }
                 })
                 .catch(() => {});
         }
@@ -846,31 +901,8 @@ HTML_PAGE = """
             const trail = (payload.trail && Array.isArray(payload.trail.points)) ? payload.trail.points : [];
             const wps = Array.isArray(payload.waypoints) ? payload.waypoints : [];
             const lidarPts = (payload.lidar && Array.isArray(payload.lidar.points)) ? payload.lidar.points : [];
-            const lidarWorldPts = [];
-            if (boat) {
-                const bx = Number(boat.x_m || 0);
-                const by = Number(boat.y_m || 0);
-                const hdgRad = Number(boat.heading_deg || 0) * Math.PI / 180.0;
-                const c = Math.cos(hdgRad);
-                const s = Math.sin(hdgRad);
-                for (const p of lidarPts) {
-                    if (!Array.isArray(p) || p.length < 2) continue;
-                    const lx = Number(p[0]);
-                    const ly = Number(p[1]);
-                    if (!Number.isFinite(lx) || !Number.isFinite(ly)) continue;
-                    const wx = bx + (lx * c) - (ly * s);
-                    const wy = by + (lx * s) + (ly * c);
-                    lidarWorldPts.push([wx, wy]);
-                }
-            } else {
-                for (const p of lidarPts) {
-                    if (!Array.isArray(p) || p.length < 2) continue;
-                    const x = Number(p[0]);
-                    const y = Number(p[1]);
-                    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-                    lidarWorldPts.push([x, y]);
-                }
-            }
+            // Points are already in world coordinates from usv_main (since 2026-05-01 fix)
+            const lidarWorldPts = lidarPts.filter(p => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]));
 
             const allPts = [];
             for (const p of trail) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
@@ -1430,6 +1462,30 @@ class SmartTelemetry:
             master.target_system, master.target_component,
             mavutil.mavlink.MAV_DATA_STREAM_RC_CHANNELS, GENERAL_TELEMETRY_HZ, 1
         )
+        try:
+            intervals = (
+                (mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 100000.0),
+                (mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, 200000.0),
+                (mavutil.mavlink.MAVLINK_MSG_ID_EKF_STATUS_REPORT, 200000.0),
+                (mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS, 500000.0),
+                (mavutil.mavlink.MAVLINK_MSG_ID_RC_CHANNELS, 200000.0),
+            )
+            for msg_id, interval_us in intervals:
+                master.mav.command_long_send(
+                    master.target_system,
+                    master.target_component,
+                    mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                    0,
+                    float(msg_id),
+                    float(interval_us),
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+        except Exception as exc:
+            print(f"[WARN] [MAV] SET_MESSAGE_INTERVAL basarisiz: {exc}")
         print("📨 [MAV] Veri Akış İsteği Gönderildi")
 
     # --- VERİ OKUMA THREADLERİ ---
@@ -2323,6 +2379,7 @@ CONTROLLER_PAGE = """
                         <span class="pill">Camera Ready: <b id="cameraReady">--</b></span>
                         <span class="pill">Lidar Ready: <b id="lidarReady">--</b></span>
                         <span class="pill">Health: <b id="healthReady">--</b></span>
+                        <span class="pill">FC Start: <b id="fcStartReady">--</b></span>
                     </div>
                 </div>
             </div>
@@ -2511,31 +2568,8 @@ CONTROLLER_PAGE = """
             const trail = (payload.trail && Array.isArray(payload.trail.points)) ? payload.trail.points : [];
             const wps = Array.isArray(payload.waypoints) ? payload.waypoints : [];
             const lidarPts = (payload.lidar && Array.isArray(payload.lidar.points)) ? payload.lidar.points : [];
-            const lidarWorldPts = [];
-            if (boat) {
-                const bx = Number(boat.x_m || 0);
-                const by = Number(boat.y_m || 0);
-                const hdgRad = Number(boat.heading_deg || 0) * Math.PI / 180.0;
-                const c = Math.cos(hdgRad);
-                const s = Math.sin(hdgRad);
-                for (const p of lidarPts) {
-                    if (!Array.isArray(p) || p.length < 2) continue;
-                    const lx = Number(p[0]);
-                    const ly = Number(p[1]);
-                    if (!Number.isFinite(lx) || !Number.isFinite(ly)) continue;
-                    const wx = bx + (lx * c) - (ly * s);
-                    const wy = by + (lx * s) + (ly * c);
-                    lidarWorldPts.push([wx, wy]);
-                }
-            } else {
-                for (const p of lidarPts) {
-                    if (!Array.isArray(p) || p.length < 2) continue;
-                    const x = Number(p[0]);
-                    const y = Number(p[1]);
-                    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-                    lidarWorldPts.push([x, y]);
-                }
-            }
+            // Points are already in world coordinates from usv_main (since 2026-05-01 fix)
+            const lidarWorldPts = lidarPts.filter(p => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]));
             const allPts = [];
             for (const p of trail) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
             for (const w of wps) allPts.push([Number(w.x_m || 0), Number(w.y_m || 0)]);
@@ -2690,6 +2724,7 @@ CONTROLLER_PAGE = """
             text('cameraReady', String(Boolean(data.camera_ready)));
             text('lidarReady', String(Boolean(data.lidar_ready)));
             text('healthReady', String(Boolean(data.ready_state)));
+            text('fcStartReady', `${Boolean(data.fc_start_ready)} ${data.fc_start_block_reason || ''}`.trim());
 
             const elapsed = Number(data.mission_active) && data.report_view ? data.report_view.mode_state.active_parkur : 'IDLE';
             text('elapsed', `parkur=${elapsed}`);
@@ -2710,7 +2745,8 @@ CONTROLLER_PAGE = """
                 startPending ||
                 !ready ||
                 !Boolean(data.camera_ready) ||
-                !Boolean(data.lidar_ready);
+                !Boolean(data.lidar_ready) ||
+                !Boolean(data.fc_start_ready);
             if (!startPending && !Boolean(data.start_requested) && !active) {
                 document.getElementById('startBtn').textContent = 'Görevi Başlat';
             }
@@ -2829,8 +2865,20 @@ def _stream_mjpeg_proxy(source_url):
     return Response(generate(), mimetype=mimetype)
 
 
-def _stream_camera_proxy():
-    return _stream_mjpeg_proxy(CAMERA_STREAM_PROXY_SOURCE)
+def _stream_camera_from_file():
+    """Serve camera stream from cam.py headless output file (no separate webserver)."""
+    def generate():
+        while True:
+            try:
+                if os.path.exists(CAMERA_LATEST_JPG):
+                    with open(CAMERA_LATEST_JPG, 'rb') as f:
+                        frame = f.read()
+                    if frame:
+                        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            except Exception:
+                pass
+            time.sleep(0.05)
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 def _stream_lidar_proxy():
@@ -2841,7 +2889,7 @@ def _stream_lidar_proxy():
 @app.route('/')
 @app.route('/controller')
 def controller():
-    return render_template_string(CONTROLLER_PAGE)
+    return redirect('/dashboard', code=302)
 
 
 @app.route('/dashboard')
@@ -2855,11 +2903,11 @@ def camera_stream():
     if USV_MODE == USV_MODE_RACE:
         return jsonify({'error': 'Camera stream disabled in race mode'}), 403
     try:
-        return _stream_camera_proxy()
+        return _stream_camera_from_file()
     except Exception as exc:
         if st is not None:
-            st._warn_throttled("camera_proxy", f"[WARN] [CAM] Proxy acilamadi: {exc}")
-        return _svg_placeholder("Kamera akisi yok", "cam.py veya bridge yayini kontrol edilmeli")
+            st._warn_throttled("camera_file", f"[WARN] [CAM] Dosya akisi acilamadi: {exc}")
+        return _svg_placeholder("Kamera akisi yok", "cam.py headless calismiyor veya frame dosyasi yok")
 
 
 @app.route('/api/lidar_stream')
@@ -3002,7 +3050,14 @@ def _build_spatial_payload(state):
             "boat": None,
             "trail": {"points": [], "max_points": int(SPATIAL_TRAIL.maxlen or 0)},
             "waypoints": [],
-            "lidar": {"points": [], "ts_monotonic": state.get("ts_monotonic"), "age_s": None, "source": "state"},
+            "lidar": {
+                "points": [],
+                "frame": "enu_world",
+                "point_count": 0,
+                "ts_monotonic": state.get("ts_monotonic"),
+                "age_s": None,
+                "source": "state",
+            },
         }
 
     lat = telemetry_data.get("Lat")
@@ -3059,16 +3114,34 @@ def _build_spatial_payload(state):
             }
         )
 
-    lidar_points_raw = state.get("lidar_points_local", [])
+    lidar_frame = str(state.get("lidar_points_frame", "") or "")
+    lidar_points_raw = state.get("lidar_points_world", [])
+    lidar_source = "state:lidar_points_world"
+    if not isinstance(lidar_points_raw, list) or not lidar_points_raw:
+        lidar_points_raw = state.get("lidar_points_local", [])
+        lidar_source = "state:lidar_points_local_legacy"
+        lidar_frame = "boat_local"
     lidar_points = []
     if isinstance(lidar_points_raw, list):
         for item in lidar_points_raw[:8192]:
             if not isinstance(item, (list, tuple)) or len(item) < 2:
                 continue
             try:
-                lidar_points.append([round(float(item[0]), 2), round(float(item[1]), 2)])
+                lx = float(item[0])
+                ly = float(item[1])
             except (TypeError, ValueError):
                 continue
+            if lidar_frame == "boat_local" and boat is not None:
+                heading_rad = math.radians(float(boat.get("heading_deg", 0.0) or 0.0))
+                east_m = float(boat["x_m"]) + (lx * math.sin(heading_rad)) - (ly * math.cos(heading_rad))
+                north_m = float(boat["y_m"]) + (lx * math.cos(heading_rad)) + (ly * math.sin(heading_rad))
+                lidar_points.append([round(east_m, 2), round(north_m, 2)])
+            else:
+                lidar_points.append([round(lx, 2), round(ly, 2)])
+    if lidar_frame == "boat_local" and boat is not None:
+        lidar_frame = "enu_world_from_legacy_local"
+    elif lidar_frame != "enu_world":
+        lidar_frame = "enu_world" if lidar_points else str(lidar_frame or "unknown")
     state_ts = float(state.get("ts_monotonic", 0.0) or 0.0)
     age_s = round(max(0.0, time.monotonic() - state_ts), 3) if state_ts > 0.0 else None
 
@@ -3088,9 +3161,11 @@ def _build_spatial_payload(state):
         "waypoints": wps,
         "lidar": {
             "points": lidar_points,
+            "frame": lidar_frame,
+            "point_count": int(len(lidar_points)),
             "ts_monotonic": state.get("ts_monotonic"),
             "age_s": age_s,
-            "source": "state",
+            "source": lidar_source,
         },
     }
 
@@ -3119,6 +3194,33 @@ def get_data():
     out['health_check'] = state.get('health_check', {})
     out['ready_state'] = state.get('ready_state', False)
     out['ready_missing'] = state.get('ready_missing', [])
+    out['guided_ready'] = bool(state.get('guided_ready', False))
+    out['guided_ready_missing'] = state.get('guided_ready_missing', [])
+    out['guided_position_source'] = state.get('guided_position_source', 'invalid')
+    out['fc_nav_mode_ready'] = bool(state.get('fc_nav_mode_ready', False))
+    out['fc_guided_block_reason'] = state.get('fc_guided_block_reason', 'none')
+    out['fc_ekf_flags'] = int(state.get('fc_ekf_flags', 0) or 0)
+    out['fc_ekf_variances'] = state.get('fc_ekf_variances', {})
+    out['fc_ekf_report_seen'] = bool(state.get('fc_ekf_report_seen', False))
+    out['guided_prereq'] = state.get('guided_prereq', {})
+    out['fc_guided_ready'] = bool(state.get('fc_guided_ready', out['guided_ready']))
+    out['fc_start_ready'] = bool(state.get('fc_start_ready', out['guided_ready']))
+    out['fc_start_block_reason'] = state.get('fc_start_block_reason', 'unknown')
+    out['fc_gps'] = state.get('fc_gps', {})
+    out['fc_ekf'] = state.get('fc_ekf', {})
+    out['last_mavlink_message_ages'] = state.get('last_mavlink_message_ages', {})
+    out['fc_gps_ekf_ready'] = bool(state.get('fc_gps_ekf_ready', False))
+    out['fc_position_valid'] = bool(state.get('fc_position_valid', False))
+    out['start_phase'] = state.get('start_phase', 'idle')
+    out['sim_actuation_fallback'] = state.get('sim_actuation_fallback', 'none')
+    out['sim_actuation_fallback_reason'] = state.get('sim_actuation_fallback_reason', 'none')
+    out['fc_gps_fix_type'] = state.get('fc_gps_fix_type', state.get('gps_fix_type', 0))
+    out['gps_sats'] = state.get('gps_sats', state.get('gps_satellites_visible', 0))
+    out['gpi_received'] = bool(state.get('gpi_received', False))
+    out['sim_nav_valid'] = bool(state.get('sim_nav_valid', False))
+    out['last_mode_command'] = state.get('last_mode_command', {})
+    out['last_command_ack'] = state.get('last_command_ack', {})
+    out['last_statustext'] = state.get('last_statustext', {})
     mode_state = state.get('mode_state', {})
     if not isinstance(mode_state, dict):
         mode_state = {}
@@ -3145,11 +3247,32 @@ def get_data():
     out['motor_command_source'] = out['CMD_Source']
     out['cmd_port_pwm'] = cmd_port
     out['cmd_stbd_pwm'] = cmd_stbd
+    out['sim_rc_override_semantics'] = state.get(
+        'sim_rc_override_semantics',
+        motor_cmd.get('sim_rc_override_semantics', '--'),
+    )
+    out['rc_override_ch1'] = int(state.get(
+        'rc_override_ch1',
+        motor_cmd.get('rc_override_ch1', 1500),
+    ) or 1500)
+    out['rc_override_ch3'] = int(state.get(
+        'rc_override_ch3',
+        motor_cmd.get('rc_override_ch3', 1500),
+    ) or 1500)
+    out['desired_left_pwm'] = int(state.get(
+        'desired_left_pwm',
+        motor_cmd.get('desired_left_pwm', cmd_port),
+    ) or cmd_port)
+    out['desired_right_pwm'] = int(state.get(
+        'desired_right_pwm',
+        motor_cmd.get('desired_right_pwm', cmd_stbd),
+    ) or cmd_stbd)
     out['heartbeat_age_s'] = state.get('heartbeat_age_s', 0.0)
     out['link_heartbeat_age_s'] = state.get(
         'link_heartbeat_age_s',
         round(st.link_heartbeat_age_s, 3) if st is not None else out['heartbeat_age_s'],
     )
+    out['mission_planner_gcs_age_s'] = state.get('mission_planner_gcs_age_s')
     out['timeout_count'] = state.get('timeout_count', 0)
     state_errors = state.get('error_counters', {})
     telemetry_errors = dict(st.error_counters) if st is not None else {}
@@ -3198,19 +3321,116 @@ def get_data():
     out['nominal_heading_deg'] = state.get('nominal_heading_deg', 0.0)
     out['gate_assist_bias_deg'] = state.get('gate_assist_bias_deg', 0.0)
     out['progress_along_leg_m'] = state.get('progress_along_leg_m', 0.0)
+    out['nav_target_distance_delta_m'] = state.get('nav_target_distance_delta_m', 0.0)
+    out['nav_target_distance_increase_count'] = int(state.get('nav_target_distance_increase_count', 0) or 0)
+    out['nav_heading_error_delta_deg'] = state.get('nav_heading_error_delta_deg', 0.0)
+    out['nav_diagnostic_reason'] = state.get('nav_diagnostic_reason', 'nominal')
     out['waypoint_passed_gate'] = bool(state.get('waypoint_passed_gate', False))
     out['waypoint_accept_reason'] = state.get('waypoint_accept_reason', '--')
     out['motor_limit_reason'] = state.get('motor_limit_reason', '--')
+    out['current_yaw_rate_dps'] = state.get('current_yaw_rate_dps', 0.0)
     out['obstacle_threat_active'] = bool(state.get('obstacle_threat_active', False))
     out['obstacle_threat_source'] = str(state.get('obstacle_threat_source', 'none') or 'none')
     out['both_reverse_count'] = int(state.get('both_reverse_count', 0) or 0)
     out['single_side_reverse_count'] = int(state.get('single_side_reverse_count', 0) or 0)
     out['reverse_while_heading_small_count'] = int(state.get('reverse_while_heading_small_count', 0) or 0)
+    out['heading_damping_hold_active'] = bool(state.get('heading_damping_hold_active', False))
+    out['heading_damping_hold_count'] = int(state.get('heading_damping_hold_count', 0) or 0)
+    out['heading_control_diagnostic'] = state.get('heading_control_diagnostic', 'nominal')
     camera_pipeline = state.get('camera_pipeline', {})
     out['camera_pipeline'] = camera_pipeline if isinstance(camera_pipeline, dict) else {}
     out['target_color'] = target_state.get('target_color', state.get('target_color', '--'))
     out['mission_input_format'] = state.get('mission_input_format', MISSION_INPUT_FORMAT)
     out['mission_split_profile'] = state.get('mission_split_profile', {})
+    mission_lifecycle = state.get('mission_lifecycle', {})
+    if not isinstance(mission_lifecycle, dict):
+        mission_lifecycle = {}
+    out['mission_lifecycle'] = mission_lifecycle
+    out['mission_upload_source'] = state.get(
+        'mission_upload_source',
+        mission_lifecycle.get('upload_source', '--'),
+    )
+    out['mission_synced'] = bool(state.get(
+        'mission_synced',
+        mission_lifecycle.get('mission_synced', False),
+    ))
+    out['pixhawk_mission_count'] = int(state.get(
+        'pixhawk_mission_count',
+        mission_lifecycle.get('pixhawk_mission_count', 0),
+    ) or 0)
+    out['pixhawk_mission_synced_at'] = state.get(
+        'pixhawk_mission_synced_at',
+        mission_lifecycle.get('pixhawk_mission_synced_at'),
+    )
+    out['mission_validated_at_timestamp'] = state.get(
+        'mission_validated_at_timestamp',
+        mission_lifecycle.get('validated_at_timestamp'),
+    )
+    out['pixhawk_mission_sync_error'] = state.get(
+        'pixhawk_mission_sync_error',
+        mission_lifecycle.get('pixhawk_mission_sync_error', ''),
+    )
+    out['pixhawk_mirror_status'] = state.get(
+        'pixhawk_mirror_status',
+        mission_lifecycle.get('pixhawk_mirror_status', 'unknown'),
+    )
+    out['pixhawk_mirror_error'] = state.get(
+        'pixhawk_mirror_error',
+        mission_lifecycle.get('pixhawk_mirror_error', ''),
+    )
+    out['post_start_mission_change_rejected'] = bool(state.get(
+        'post_start_mission_change_rejected',
+        mission_lifecycle.get('post_start_mission_change_rejected', False),
+    ))
+    try:
+        link_age = float(out.get('link_heartbeat_age_s', 999.0) or 999.0)
+    except (TypeError, ValueError):
+        link_age = 999.0
+    mission_planner_last_seen = None
+    if link_age < 999.0:
+        mission_planner_last_seen = round(time.time() - max(0.0, link_age), 3)
+    if out['pixhawk_mission_synced_at'] is not None:
+        try:
+            mission_planner_last_seen = max(float(mission_planner_last_seen or 0.0), float(out['pixhawk_mission_synced_at']))
+        except (TypeError, ValueError):
+            pass
+    try:
+        gcs_age = float(out['mission_planner_gcs_age_s'])
+    except (TypeError, ValueError):
+        gcs_age = None
+    mission_planner_required = bool(USV_MODE == USV_MODE_RACE)
+    gcs_connected = bool(gcs_age is not None and gcs_age < HEARTBEAT_WARN_S)
+    out['mission_planner_required'] = mission_planner_required
+    out['mission_planner_connected'] = bool(gcs_connected)
+    if gcs_connected:
+        mission_planner_status = 'connected'
+    elif mission_planner_required:
+        mission_planner_status = 'required_not_connected'
+    else:
+        mission_planner_status = 'optional_not_connected'
+    out['mission_planner_status'] = mission_planner_status
+    out['mission_planner_last_seen'] = mission_planner_last_seen
+    out['mission_planner_link'] = {
+        'role': 'primary_gcs',
+        'sim_connection': 'UDP 14552',
+        'real_connection': '433MHz MAVLink telemetry modem',
+        'required': out['mission_planner_required'],
+        'status': out['mission_planner_status'],
+        'connected': out['mission_planner_connected'],
+        'last_seen': out['mission_planner_last_seen'],
+        'gcs_heartbeat_age_s': out['mission_planner_gcs_age_s'],
+        'pixhawk_mission_count': out['pixhawk_mission_count'],
+        'pixhawk_mission_synced_at': out['pixhawk_mission_synced_at'],
+        'pixhawk_mission_sync_error': out['pixhawk_mission_sync_error'],
+        'pixhawk_mirror_status': out['pixhawk_mirror_status'],
+        'pixhawk_mirror_error': out['pixhawk_mirror_error'],
+        'mission_upload_source': out['mission_upload_source'],
+        'heartbeat_note': (
+            'mission_planner_connected reflects autopilot MAVLink freshness (link_heartbeat_age_s). '
+            'gcs_heartbeat_age_s is time since last HEARTBEAT from a GCS-like source (e.g. MAV_TYPE_GCS / MP comp 190); '
+            'it does not prove the Mission Planner UDP socket is up.'
+        ),
+    }
     sensor_fusion = state.get('sensor_fusion', {})
     out['sensor_fusion'] = sensor_fusion if isinstance(sensor_fusion, dict) else {}
     dynamic_speed_profile = state.get('dynamic_speed_profile', {})
@@ -3340,6 +3560,17 @@ def get_data():
             'target': out['mission_target'],
             'wp_info': out['mission_wp_info'],
             'mission_end_reason': out['mission_end_reason'],
+            'mission_upload_source': out['mission_upload_source'],
+            'mission_synced': out['mission_synced'],
+            'pixhawk_mission_count': out['pixhawk_mission_count'],
+            'pixhawk_mission_synced_at': out['pixhawk_mission_synced_at'],
+            'pixhawk_mission_sync_error': out['pixhawk_mission_sync_error'],
+            'pixhawk_mirror_status': out['pixhawk_mirror_status'],
+            'pixhawk_mirror_error': out['pixhawk_mirror_error'],
+            'start_phase': out['start_phase'],
+            'mission_planner_gcs_age_s': out['mission_planner_gcs_age_s'],
+            'mission_planner_status': out['mission_planner_status'],
+            'post_start_mission_change_rejected': out['post_start_mission_change_rejected'],
             'active_waypoint_index': out['active_waypoint_index'],
             'target_color': out['target_color'],
             'gate_count': out['gate_count'],
@@ -3353,6 +3584,8 @@ def get_data():
         'navigation_health': {
             'camera_ready': out['camera_ready'],
             'lidar_ready': out['lidar_ready'],
+            'fc_gps_ekf_ready': out['fc_gps_ekf_ready'],
+            'fc_position_valid': out['fc_position_valid'],
             'guidance_source': out['guidance_source'],
             'guidance_detail_source': out['guidance_detail_source'],
             'guidance_mode': out['guidance_mode'],
@@ -3365,6 +3598,10 @@ def get_data():
             'waypoint_passed_gate': out['waypoint_passed_gate'],
             'waypoint_accept_reason': out['waypoint_accept_reason'],
             'motor_limit_reason': out['motor_limit_reason'],
+            'sim_rc_override_semantics': out['sim_rc_override_semantics'],
+            'rc_override_ch1': out['rc_override_ch1'],
+            'rc_override_ch3': out['rc_override_ch3'],
+            'guided_position_source': out['guided_position_source'],
             'nav_position_source': out['nav_position_source'],
             'nav_heading_source': out['nav_heading_source'],
             'nav_solution_source': out['nav_solution_source'],
@@ -3404,6 +3641,7 @@ def get_data():
             'rc_link_active': bool(900 <= telemetry_data.get('RC1', 0) <= 2100 or 900 <= telemetry_data.get('RC3', 0) <= 2100),
             'telemetry_heartbeat_age_s': out['link_heartbeat_age_s'],
             'onboard_heartbeat_age_s': out['heartbeat_age_s'],
+            'mission_planner': out['mission_planner_link'],
         },
         'safety': {
             'command_lock': out['command_lock'],
@@ -3649,23 +3887,79 @@ def api_events():
 @app.route('/api/start_mission', methods=['POST'])
 def start_mission():
     """Görevi başlat (usv_main dosya IPC ile algılar)."""
+    state = _read_mission_state()
     if USV_MODE == USV_MODE_RACE:
         return jsonify({'error': 'Race modunda gorev baslatma sadece RC CH5 ile yapilir (API politikasi kapali).'}), 403
-    state = _read_mission_state()
     if state.get('active', False):
         mission_data['start_requested'] = False
+        mission_data['start_requested_at'] = 0.0
         return jsonify({'error': 'Gorev zaten aktif.'}), 409
     if _start_request_pending(state):
         return jsonify({'error': 'Start isteği zaten beklemede.'}), 409
     if not state.get('ready_state', False):
         mission_data['start_requested'] = False
+        mission_data['start_requested_at'] = 0.0
         return jsonify({'error': 'Sistem hazir degil. Kamera/lidar/telemetri hazir olmadan start kabul edilmez.'}), 409
     if not state.get('camera_ready', False) or not state.get('lidar_ready', False):
         mission_data['start_requested'] = False
+        mission_data['start_requested_at'] = 0.0
         return jsonify({'error': 'Kamera veya lidar hazir degil. Web controller readiness yesil olmadan start kabul edilmez.'}), 409
+    sim_nav = {}
+    sim_nav_ok = False
+    if os.environ.get("USV_SIM") == "1":
+        sim_nav = load_sim_nav_state(control_dir=CONTROL_DIR)
+        sim_nav_ok = bool(sim_nav.get("valid"))
+    fc_start_ready = bool(state.get('fc_start_ready', state.get('guided_ready', False)))
+    if state.get('guided_ready') is False or not fc_start_ready:
+        mission_data['start_requested'] = False
+        mission_data['start_requested_at'] = 0.0
+        missing = state.get('guided_ready_missing', [])
+        if not isinstance(missing, list):
+            missing = []
+        guided_prereq = state.get('guided_prereq', {})
+        if not isinstance(guided_prereq, dict):
+            guided_prereq = {}
+        fc_start_block_reason = str(state.get('fc_start_block_reason', guided_prereq.get('fc_start_block_reason', 'unknown')))
+        # Simülasyon modunda daha açıklayıcı mesaj
+        if os.environ.get("USV_SIM") == "1":
+            block_reason = str(state.get('fc_guided_block_reason', guided_prereq.get('fc_guided_block_reason', 'unknown')))
+            if fc_start_block_reason in ('gyro_inconsistent_recent', 'accel_inconsistent_recent'):
+                error_msg = 'SITL IMU stabilize oluyor, lütfen bekleyin.'
+            elif fc_start_block_reason in ('ekf_variance_recent', 'bad_position_recent') or block_reason in ('ekf_variance_recent', 'ekf_variance_high', 'ekf_hard_fault'):
+                error_msg = 'SITL EKF stabilize oluyor, lütfen bekleyin.'
+            else:
+                error_msg = 'SITL GPS/EKF hazırlanıyor, lütfen 10-15 sn bekleyin.'
+        else:
+            error_msg = 'ArduPilot start icin stabilize degil.'
+        return jsonify({
+            'error': error_msg,
+            'missing': missing,
+            'guided_ready_missing': missing,
+            'guided_prereq': guided_prereq,
+            'fc_start_ready': bool(fc_start_ready),
+            'fc_start_block_reason': fc_start_block_reason,
+            'last_statustext': state.get('last_statustext', {}),
+            'guided_position_source': state.get('guided_position_source', guided_prereq.get('position_source', 'invalid')),
+            'fc_gps_ekf_ready': bool(state.get('fc_gps_ekf_ready', guided_prereq.get('fc_gps_ekf_ready', False))),
+            'fc_position_valid': bool(state.get('fc_position_valid', guided_prereq.get('fc_position_valid', False))),
+            'fc_nav_mode_ready': bool(state.get('fc_nav_mode_ready', guided_prereq.get('fc_nav_mode_ready', False))),
+            'fc_guided_block_reason': state.get('fc_guided_block_reason', guided_prereq.get('fc_guided_block_reason', 'unknown')),
+            'fc_ekf_flags': int(state.get('fc_ekf_flags', guided_prereq.get('fc_ekf_flags', 0)) or 0),
+            'fc_ekf_variances': state.get('fc_ekf_variances', guided_prereq.get('fc_ekf_variances', {})),
+            'start_phase': state.get('start_phase', 'idle'),
+            'sim_nav_valid': bool(sim_nav_ok),
+            'sim_nav_reason': str(sim_nav.get('reason', 'not_checked') if isinstance(sim_nav, dict) else 'not_checked'),
+            'mission_end_reason': (
+                'start_rejected:fc_start_blocked:' + fc_start_block_reason
+                if state.get('guided_ready') is not False
+                else 'start_rejected:guided_prereq_missing:' + (','.join(missing) if missing else 'unknown')
+            ),
+        }), 409
     mission_data['start_requested'] = True
+    mission_data['start_requested_at'] = time.monotonic()
     if not _touch_flag(FLAG_START):
         mission_data['start_requested'] = False
+        mission_data['start_requested_at'] = 0.0
         return jsonify({'error': 'Start flag yazilamadi'}), 500
     print("📡 [DASHBOARD] Görev başlat isteği alındı")
     return jsonify({'ok': True})
@@ -3675,6 +3969,7 @@ def emergency_stop():
     """Acil durdur (usv_main dosya IPC ile algılar)."""
     mission_data['stop_requested'] = True
     mission_data['start_requested'] = False
+    mission_data['start_requested_at'] = 0.0
     _clear_flag(FLAG_START)
     if not _touch_flag(FLAG_STOP):
         return jsonify({'error': 'E-stop flag yazilamadi'}), 500

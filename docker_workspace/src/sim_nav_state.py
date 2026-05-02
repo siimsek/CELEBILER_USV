@@ -86,6 +86,9 @@ def _base_result(path: str) -> Dict[str, Any]:
         "lat": None,
         "lon": None,
         "heading_deg": None,
+        "observed_yaw_rate_dps": 0.0,
+        "heading_delta_deg": 0.0,
+        "yaw_cmd_norm": 0.0,
         "state_age_s": None,
         "ts_epoch": 0.0,
     }
@@ -119,6 +122,9 @@ def load_sim_nav_state(
         pos_x = float(payload.get("pos_x", 0.0) or 0.0)
         pos_y = float(payload.get("pos_y", 0.0) or 0.0)
         heading_rad = float(payload.get("heading_rad", 0.0) or 0.0)
+        observed_yaw_rate_dps = float(payload.get("observed_yaw_rate_dps", 0.0) or 0.0)
+        heading_delta_deg = float(payload.get("heading_delta_deg", 0.0) or 0.0)
+        yaw_cmd_norm = float(payload.get("yaw_cmd_norm", 0.0) or 0.0)
     except (TypeError, ValueError):
         result["reason"] = "pose_invalid"
         return result
@@ -143,6 +149,9 @@ def load_sim_nav_state(
     result["lat"] = lat
     result["lon"] = lon
     result["heading_deg"] = heading_deg
+    result["observed_yaw_rate_dps"] = observed_yaw_rate_dps
+    result["heading_delta_deg"] = heading_delta_deg
+    result["yaw_cmd_norm"] = yaw_cmd_norm
     result["position_source"] = "sim_vehicle_position"
     result["heading_source"] = "sim_vehicle_position"
     result["valid"] = bool(position_valid and heading_valid and result["fresh"])

@@ -75,10 +75,12 @@ CAM_RX_BUFFER_MAX = max(64 * 1024, int(os.environ.get("CAM_RX_BUFFER_MAX", "1048
 CAM_DETECT_SCALE = float(os.environ.get("CAM_DETECT_SCALE", "0.5" if CAM_SOURCE == "sim" else "0.4"))
 CAM_DETECT_SCALE = clamp(CAM_DETECT_SCALE, 0.25, 1.0)
 CONTROL_DIR = os.environ.get("CONTROL_DIR", DEFAULT_CONTROL_DIR)
+LOG_DIR = os.environ.get("LOG_DIR", DEFAULT_LOG_DIR)
 STATUS_FILE = f"{CONTROL_DIR}/camera_status.json"
 MISSION_STATE_FILE = f"{CONTROL_DIR}/mission_state.json"
 os.makedirs(CONTROL_DIR, exist_ok=True)
-VIDEO_DIR = os.path.join(os.environ.get("LOG_DIR", DEFAULT_LOG_DIR), "video")
+os.makedirs(LOG_DIR, exist_ok=True)
+VIDEO_DIR = os.path.join(LOG_DIR, "video")
 FILE1_MP4 = f"{VIDEO_DIR}/file1_camera_processed.mp4"
 os.makedirs(VIDEO_DIR, exist_ok=True)
 
@@ -192,12 +194,26 @@ class VideoCamera:
             "yellow_obstacle_detected": False,
             "yellow_obstacle_bearing_deg": 0.0,
             "yellow_obstacle_area_norm": 0.0,
+            "orange_boundary_detected_raw": False,
+            "orange_boundary_bearing_deg_raw": 0.0,
+            "orange_boundary_area_norm_raw": 0.0,
+            "orange_boundary_detected": False,
+            "orange_boundary_bearing_deg": 0.0,
+            "orange_boundary_area_norm": 0.0,
             "target_detected_raw": False,
             "target_bearing_error_deg_raw": 0.0,
             "target_area_norm_raw": 0.0,
             "target_detected": False,
             "target_bearing_error_deg": 0.0,
             "target_area_norm": 0.0,
+            "wrong_target_detected_raw": False,
+            "wrong_target_bearing_deg_raw": 0.0,
+            "wrong_target_area_norm_raw": 0.0,
+            "wrong_target_class_raw": "",
+            "wrong_target_detected": False,
+            "wrong_target_bearing_deg": 0.0,
+            "wrong_target_area_norm": 0.0,
+            "wrong_target_class": "",
             "camera_adaptation": {
                 "enabled": bool(CAM_ADAPT_ENABLED),
                 "mode": "normal",
@@ -566,6 +582,7 @@ class VideoCamera:
                     old.get('gate_passed_event') == self.status['gate_passed_event'] and
                     old.get('yellow_obstacle_detected') == self.status['yellow_obstacle_detected'] and
                     old.get('target_detected') == self.status['target_detected'] and
+                    old.get('wrong_target_detected') == self.status['wrong_target_detected'] and
                     abs(old.get('gate_center_bearing_deg', 0) - self.status['gate_center_bearing_deg']) < 0.1 and
                     abs(old.get('yellow_obstacle_bearing_deg', 0) - self.status['yellow_obstacle_bearing_deg']) < 0.1 and
                     abs(old.get('yellow_obstacle_area_norm', 0) - self.status['yellow_obstacle_area_norm']) < 0.01 and
@@ -574,6 +591,8 @@ class VideoCamera:
                     abs(old.get('orange_boundary_area_norm', 0) - self.status['orange_boundary_area_norm']) < 0.01 and
                     abs(old.get('target_bearing_error_deg', 0) - self.status['target_bearing_error_deg']) < 0.1 and
                     abs(old.get('target_area_norm', 0) - self.status['target_area_norm']) < 0.01 and
+                    abs(old.get('wrong_target_bearing_deg', 0) - self.status['wrong_target_bearing_deg']) < 0.1 and
+                    abs(old.get('wrong_target_area_norm', 0) - self.status['wrong_target_area_norm']) < 0.01 and
                     old_adapt.get("mode") == new_adapt.get("mode") and
                     abs(float(old_adapt.get("exposure_gain", 1.0)) - float(new_adapt.get("exposure_gain", 1.0))) < 0.02 and
                     int(old_adapt.get("hsv_s_shift", 0)) == int(new_adapt.get("hsv_s_shift", 0)) and
@@ -609,6 +628,12 @@ class VideoCamera:
             ok, jpeg = cv2.imencode(".jpg", processed, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
             self._last_processed_jpeg = jpeg.tobytes() if ok else b""
             self._last_output_jpeg_ts = time.monotonic()
+            # Write to file for dashboard direct serving (no separate cam.py webserver)
+            try:
+                with open(f"{LOG_DIR}/camera_latest.jpg", "wb") as f:
+                    f.write(self._last_processed_jpeg)
+            except Exception:
+                pass
             return processed
 
     def processing_loop(self):
@@ -887,6 +912,12 @@ class VideoCamera:
             if any(name in self.target_classes for name in d.get("member_names", (d["name"],)))
         ]
         target = max(target_pool, key=lambda d: d["area"]) if target_pool else None
+        wrong_target_pool = [
+            d for d in detections
+            if d["name"] in TARGET_CANDIDATE_CLASSES
+            and not any(name in self.target_classes for name in d.get("member_names", (d["name"],)))
+        ]
+        wrong_target = max(wrong_target_pool, key=lambda d: d["area"]) if wrong_target_pool else None
 
         target_detected_raw = bool(target)
         target_bearing_raw = 0.0
@@ -895,6 +926,15 @@ class VideoCamera:
             target_bearing_raw = ((target["cx"] - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
             target_area_norm_raw = clamp((target["w"] * target["h"]) / float(w * h), 0.0, 1.0)
             cv2.circle(frame, (int(target["cx"]), int(target["cy"])), 8, (255, 255, 255), -1)
+        wrong_target_detected_raw = bool(wrong_target)
+        wrong_target_bearing_raw = 0.0
+        wrong_target_area_norm_raw = 0.0
+        wrong_target_class_raw = ""
+        if wrong_target_detected_raw:
+            wrong_target_bearing_raw = ((wrong_target["cx"] - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
+            wrong_target_area_norm_raw = clamp((wrong_target["w"] * wrong_target["h"]) / float(w * h), 0.0, 1.0)
+            wrong_target_class_raw = str(wrong_target.get("name", ""))
+            cv2.circle(frame, (int(wrong_target["cx"]), int(wrong_target["cy"])), 8, (0, 0, 255), 2)
 
         current_status = self.status if isinstance(self.status, dict) else {}
         policy = current_status.get("perception_policy", {})
@@ -919,6 +959,10 @@ class VideoCamera:
         target_detected = target_detected_raw if target_actionable else False
         target_bearing = target_bearing_raw if target_actionable else 0.0
         target_area_norm = target_area_norm_raw if target_actionable else 0.0
+        wrong_target_detected = wrong_target_detected_raw if target_actionable else False
+        wrong_target_bearing = wrong_target_bearing_raw if target_actionable else 0.0
+        wrong_target_area_norm = wrong_target_area_norm_raw if target_actionable else 0.0
+        wrong_target_class = wrong_target_class_raw if wrong_target_detected else ""
 
         if target_actionable:
             if target_detected:
@@ -935,6 +979,15 @@ class VideoCamera:
                     "target_missing",
                     f"[CAM] [DETECT] no_target_detected frame={self._frame_count} target={self.target_class}",
                     period_s=3.0,
+                )
+            if wrong_target_detected:
+                self._warn_throttled(
+                    "wrong_target_found",
+                    (
+                        f"[CAM] [DETECT] wrong_target={wrong_target_class} "
+                        f"area_norm={wrong_target_area_norm:.4f} bearing={wrong_target_bearing:.1f}deg"
+                    ),
+                    period_s=1.0,
                 )
 
         frame_age = 999.0 if self.last_frame_ts <= 0.0 else max(0.0, now - self.last_frame_ts)
@@ -981,6 +1034,14 @@ class VideoCamera:
             "target_detected": target_detected,
             "target_bearing_error_deg": round(target_bearing, 3),
             "target_area_norm": round(target_area_norm, 4),
+            "wrong_target_detected_raw": wrong_target_detected_raw,
+            "wrong_target_bearing_deg_raw": round(wrong_target_bearing_raw, 3),
+            "wrong_target_area_norm_raw": round(wrong_target_area_norm_raw, 4),
+            "wrong_target_class_raw": wrong_target_class_raw,
+            "wrong_target_detected": wrong_target_detected,
+            "wrong_target_bearing_deg": round(wrong_target_bearing, 3),
+            "wrong_target_area_norm": round(wrong_target_area_norm, 4),
+            "wrong_target_class": wrong_target_class,
             "camera_adaptation": {
                 "enabled": bool(adapt_profile.get("enabled", False)),
                 "mode": str(adapt_profile.get("mode", "normal")),
@@ -1110,21 +1171,23 @@ install_module_function_tracing(
 )
 
 
+def _write_latest_jpeg():
+    """Write latest processed frame to file for dashboard direct serving (no separate webserver)."""
+    try:
+        jpeg = camera_stream._last_processed_jpeg
+        if jpeg:
+            with open(f"{LOG_DIR}/camera_latest.jpg", "wb") as f:
+                f.write(jpeg)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    clean_port(WEB_PORT)
     camera_stream = VideoCamera().start()
 
     try:
-        if RACE_MODE:
-            print("[CAM] [cam.py] Race modda sadece onboard isleme calisiyor")
-            run_headless_processing_loop()
-        else:
-            print(f"[WEB] [CAM] WEB ARAYUZU: http://0.0.0.0:{WEB_PORT}")
-            try:
-                app.run(host="0.0.0.0", port=WEB_PORT, debug=False, threaded=True)
-            except OSError as exc:
-                print(f"[WARN] [CAM] Web arayuzu acilamadi, headless moda geciliyor: {exc}")
-                run_headless_processing_loop()
+        print("[CAM] [cam.py] Headless processing only (no webserver)")
+        run_headless_processing_loop()
     except KeyboardInterrupt:
         pass
     finally:

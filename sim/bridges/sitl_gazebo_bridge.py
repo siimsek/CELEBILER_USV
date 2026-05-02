@@ -24,20 +24,25 @@ redirect_std_streams(log)
 
 CONTROL_DIR = os.environ.get("CONTROL_DIR", str(_ROOT / "sim" / "control"))
 POS_FILE = Path(CONTROL_DIR) / "vehicle_position.json"
+MISSION_STATE_FILE = Path(CONTROL_DIR) / "mission_state.json"
 MODEL_NAME = os.environ.get("SIM_GZ_MODEL_NAME", "usv_model")
 SPAWN_X = float(os.environ.get("SIM_GZ_SPAWN_X", "0"))
 SPAWN_Y = float(os.environ.get("SIM_GZ_SPAWN_Y", "0"))
 POSE_ARM_S = max(0.0, float(os.environ.get("SIM_GZ_POSE_ARM_S", "0")))
-MAX_LINEAR_VELOCITY_MPS = max(0.1, float(os.environ.get("SIM_GZ_MAX_LINEAR_VELOCITY_MPS", "1.4")))
+MAX_LINEAR_VELOCITY_MPS = max(0.1, float(os.environ.get("SIM_GZ_MAX_LINEAR_VELOCITY_MPS", "3.0")))
 MAX_YAW_RATE_RAD_S = max(0.1, float(os.environ.get("SIM_GZ_MAX_YAW_RATE_RAD_S", "1.0")))
+try:
+    SIM_GZ_YAW_SIGN = -1.0 if float(os.environ.get("SIM_GZ_YAW_SIGN", "-1.0")) < 0.0 else 1.0
+except (TypeError, ValueError):
+    SIM_GZ_YAW_SIGN = -1.0
 LEFT_MOTOR_REVERSED = os.environ.get("SIM_GZ_LEFT_MOTOR_REVERSED", "0").lower() in ("1", "true", "yes")
 RIGHT_MOTOR_REVERSED = os.environ.get("SIM_GZ_RIGHT_MOTOR_REVERSED", "0").lower() in ("1", "true", "yes")
+USV_MODE = os.environ.get("USV_MODE", "test").strip().lower()
+ALLOW_MOTOR_COMMAND_JSON_OVERRIDE = (
+    os.environ.get("SIM_GZ_ALLOW_MOTOR_COMMAND_JSON", "0").lower() in ("1", "true", "yes")
+    and USV_MODE != "race"
+)
 
-# Simulation test mode: optional auto-inject for bench debugging only.
-# Default is OFF to keep motion fully driven by SITL outputs.
-SIM_TEST_MODE_ENABLED = os.environ.get("SIM_TEST_MODE", "0").lower() in ("1", "true", "yes")
-TEST_MOTOR_CH1 = float(os.environ.get("SIM_TEST_MOTOR_CH1", "1600"))  # Test left motor (steering)
-TEST_MOTOR_CH3 = float(os.environ.get("SIM_TEST_MOTOR_CH3", "1600"))  # Test right motor (throttle)
 DRIVE_CMD_HZ = max(1.0, float(os.environ.get("SIM_GZ_DRIVE_CMD_HZ", "50")))
 
 SITL_JSON_OUT = ("127.0.0.1", 9003) # Send physics here (DEPRECATED: now use sender_addr from PWM RX)
@@ -73,6 +78,29 @@ def _normalized_motor_outputs(left_pwm, right_pwm):
     right_n = max(-1.0, min(1.0, right_n))
     return left_n, right_n
 
+def _wrap_180(deg):
+    return ((float(deg) + 180.0) % 360.0) - 180.0
+
+def _nav_heading_deg_from_gazebo_yaw(heading_rad):
+    return (-math.degrees(float(heading_rad)) + 360.0) % 360.0
+
+def _mission_expects_autonomous_pwm():
+    try:
+        with open(MISSION_STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if bool(state.get("active", False)):
+            return True
+        mode_state = state.get("mode_state", {})
+        if not isinstance(mode_state, dict):
+            mode_state = {}
+        vehicle_mode = str(state.get("vehicle_mode") or mode_state.get("vehicle_mode") or "").upper()
+        canonical = str(mode_state.get("canonical_mode") or "").upper()
+        if vehicle_mode in ("AUTO", "GUIDED") or canonical == "NAV_ACTIVE":
+            return True
+    except Exception:
+        return False
+    return False
+
 class JsonBridgeNode(Node):
     def __init__(self, bridge):
         super().__init__("sitl_gazebo_bridge")
@@ -101,12 +129,18 @@ class SitlGazeboBridge:
         self.pos_y = SPAWN_Y
         self.pos_z = 0.0
         self.heading_rad = 0.0
+        self.heading_nav_deg = _nav_heading_deg_from_gazebo_yaw(0.0)
+        self.heading_delta_deg = 0.0
+        self.observed_yaw_rate_dps = 0.0
+        self._last_heading_nav_deg = None
+        self._last_heading_ts = None
+        self.last_yaw_cmd_norm = 0.0
         self.motor_pwm_ch1 = 1500.0 # Left motor output (Servo 1)
         self.motor_pwm_ch2 = 1500.0 # Right motor output (Servo 3)
         self.motor_pwm_raw = []
         self.servo_response_addr = ("127.0.0.1", SITL_JSON_IN_PORT)  # CRITICAL FIX: Default addr for first packet
         self.latest_sensor_payload = None  # Cache latest sensor data for JSON response
-        self._test_mode_active = False  # Simulation test mode: auto-inject motor commands
+        self._bench_override_active = False
         self._first_pwm_received = False  # Track first PWM packet for robust initialization
         
         self.ros_node = None
@@ -119,6 +153,8 @@ class SitlGazeboBridge:
         self._last_drive_cmd_pub = 0.0
         self._msg_count_pwm = 0
         self._msg_count_odom = 0
+        self._neutral_pwm_since = None
+        self._last_neutral_pwm_diag = 0.0
 
         # Parse SIM_HOME
         try:
@@ -202,6 +238,21 @@ class SitlGazeboBridge:
         siny_cosp = 2 * (w * nz + nx * ny)
         cosy_cosp = 1 - 2 * (ny * ny + nz * nz)
         yaw = math.atan2(siny_cosp, cosy_cosp)
+        heading_nav_deg = _nav_heading_deg_from_gazebo_yaw(yaw)
+        heading_now = time.monotonic()
+        with self.lock:
+            if self._last_heading_nav_deg is None or self._last_heading_ts is None:
+                heading_delta_deg = 0.0
+                yaw_rate_dps = 0.0
+            else:
+                dt_heading = max(0.01, heading_now - float(self._last_heading_ts))
+                heading_delta_deg = _wrap_180(heading_nav_deg - float(self._last_heading_nav_deg))
+                yaw_rate_dps = heading_delta_deg / dt_heading
+            self.heading_nav_deg = float(heading_nav_deg)
+            self.heading_delta_deg = float(heading_delta_deg)
+            self.observed_yaw_rate_dps = float(yaw_rate_dps)
+            self._last_heading_nav_deg = float(heading_nav_deg)
+            self._last_heading_ts = float(heading_now)
             
         t = time.time()
         payload = {
@@ -210,7 +261,10 @@ class SitlGazeboBridge:
                 "gyro": [av.x, -av.y, -av.z],
                 "accel_body": [0.0, 0.0, -9.81]
             },
-            "position": [lat, lon, alt],
+            "latitude": lat,
+            "longitude": lon,
+            "altitude": alt,
+            "position": [x_ned, y_ned, z_ned],
             "attitude": [roll, -pitch, -yaw],
             "velocity": [vx_ned, vy_ned, vz_ned]
         }
@@ -278,44 +332,65 @@ class SitlGazeboBridge:
             c2_sitl = self.motor_pwm_ch2
             count = self._msg_count_pwm
 
-        # ── MOTOR SOURCE SELECTION ───────────────────────────────────
-        # ALWAYS prefer motor_command.json written by usv_main.py.
+        # Motor source selection:
+        # Default is ArduPilot SITL servo output. That keeps sim-to-real honest:
+        # Pi sends MAVLink setpoints, ArduPilot owns mixer/PWM, and the bridge
+        # only transfers the resulting servo outputs into Gazebo physics.
         #
-        # Why: ArduRover SITL remixes RC-override inputs through its internal
-        # skid-steering mixer before outputting servo values.  The bridge
-        # receives SITL's *servo outputs* (post-remix), NOT the RC-override
-        # values that usv_main.py intended.  This causes inverted differential
-        # thrust → the boat turns the wrong direction → heading error diverges.
-        #
-        # motor_command.json contains the exact left/right PWM that usv_main.py
-        # computed — no ArduRover remix.  We use it as the primary motor source
-        # whenever it is fresh (< 2 seconds old).  SITL servo values are only
-        # used as fallback when the JSON file is missing or stale.
+        # motor_command.json is a visible bench-test escape hatch only. It is
+        # off by default and forced off in race mode.
         c1, c2 = c1_sitl, c2_sitl
         motor_source = "sitl_servo"
         try:
             mc_path = Path(CONTROL_DIR) / "motor_command.json"
-            if mc_path.exists():
+            if ALLOW_MOTOR_COMMAND_JSON_OVERRIDE and mc_path.exists():
                 mc = json.loads(mc_path.read_text())
                 if time.time() - mc.get("ts", 0) < 2.0:
                     c1 = float(mc["left_pwm"])
                     c2 = float(mc["right_pwm"])
-                    motor_source = "motor_command_json"
-                    if not self._test_mode_active:
+                    motor_source = "motor_command_json_bench"
+                    if not self._bench_override_active:
                         log.info(
-                            f"[SIM-MOTOR] Using motor_command.json: left={c1:.0f} right={c2:.0f} "
+                            f"[SIM-MOTOR] Bench override enabled: left={c1:.0f} right={c2:.0f} "
                             f"(SITL servo was CH1={c1_sitl:.0f} CH3={c2_sitl:.0f})"
                         )
-                        self._test_mode_active = True
+                        self._bench_override_active = True
                     with self.lock:
                         self.motor_pwm_ch1 = c1
                         self.motor_pwm_ch2 = c2
                 else:
-                    self._test_mode_active = False
+                    self._bench_override_active = False
             else:
-                self._test_mode_active = False
+                self._bench_override_active = False
         except Exception:
-            self._test_mode_active = False
+            self._bench_override_active = False
+
+        now = time.monotonic()
+        neutral_sitl = abs(float(c1_sitl) - 1500.0) <= 3.0 and abs(float(c2_sitl) - 1500.0) <= 3.0
+        autonomous_pwm_expected = _mission_expects_autonomous_pwm()
+        if motor_source == "sitl_servo" and neutral_sitl and count > 200:
+            if self._neutral_pwm_since is None:
+                self._neutral_pwm_since = now
+            neutral_age_s = now - float(self._neutral_pwm_since)
+            if neutral_age_s >= 3.0 and (now - self._last_neutral_pwm_diag) >= 5.0:
+                log_fn = log.warning if autonomous_pwm_expected else log.info
+                log_fn(
+                    "[PWM-DIAG] SITL servo outputs neutral for %.1fs: CH1=%.0f CH3=%.0f. "
+                    "Gazebo will stay still; check FC GPS/EKF/mode or test sim manual_rc_override fallback.",
+                    neutral_age_s,
+                    c1_sitl,
+                    c2_sitl,
+                )
+                self._last_neutral_pwm_diag = now
+        else:
+            if self._neutral_pwm_since is not None and not neutral_sitl:
+                log.info(
+                    "[PWM-DIAG] SITL servo outputs left neutral: CH1=%.0f CH3=%.0f after %.1fs",
+                    c1_sitl,
+                    c2_sitl,
+                    now - float(self._neutral_pwm_since),
+                )
+            self._neutral_pwm_since = None
 
         self.ros_node.pub_left.publish(Float64(data=c1))
         self.ros_node.pub_right.publish(Float64(data=c2))
@@ -329,23 +404,31 @@ class SitlGazeboBridge:
         # assume wheel-ground traction and can drive the floating hull directly.
         try:
             avg_thrust = (left_n + right_n) / 2.0
-            yaw_diff = (left_n - right_n) / 2.0
+            # Canonical sim yaw contract:
+            #   CH1/left_n > CH3/right_n means positive nav heading rate.
+            #   ROS/Gazebo angular.z is positive CCW, so the default sign is -1.
+            yaw_cmd_norm = (left_n - right_n) / 2.0
+            yaw_diff = SIM_GZ_YAW_SIGN * yaw_cmd_norm
+            with self.lock:
+                self.last_yaw_cmd_norm = float(yaw_cmd_norm)
 
-            now = time.monotonic()
             if (now - self._last_drive_cmd_pub) >= (1.0 / DRIVE_CMD_HZ):
                 self._last_drive_cmd_pub = now
-                avg_velocity = avg_thrust * MAX_LINEAR_VELOCITY_MPS
-                yaw_rate = yaw_diff * MAX_YAW_RATE_RAD_S
-
                 twist = Twist()
-                twist.linear.x = float(avg_velocity)
-                twist.angular.z = float(yaw_rate)
+                # POSE_ARM: spawn'da fiziksel kaymayı önle — ama SITL JSON yanıtını asla kesme
+                # (JSON kesilirse AP GPS/EKF oluşmaz → GUIDED modu reddedilir; kanıt: mode_change_failed:GUIDED).
+                if now > self._pose_arm_deadline:
+                    avg_velocity = avg_thrust * MAX_LINEAR_VELOCITY_MPS
+                    yaw_rate = yaw_diff * MAX_YAW_RATE_RAD_S
+                    twist.linear.x = float(avg_velocity)
+                    twist.angular.z = float(yaw_rate)
                 self.ros_node.pub_vel.publish(twist)
 
-                if count % 1000 == 0:
+                if count % 1000 == 0 and now > self._pose_arm_deadline:
                     log.debug(
-                        f"[MOTOR-CMD] vx={avg_velocity:.2f}m/s wz={yaw_rate:.2f}rad/s "
-                        f"left_n={left_n:.2f} right_n={right_n:.2f} src={motor_source}"
+                        f"[MOTOR-CMD] vx={twist.linear.x:.2f}m/s wz={twist.angular.z:.2f}rad/s "
+                        f"left_n={left_n:.2f} right_n={right_n:.2f} yaw_cmd={yaw_cmd_norm:.2f} "
+                        f"src={motor_source}"
                     )
         except Exception as e:
             if count % 500 == 0:
@@ -354,7 +437,29 @@ class SitlGazeboBridge:
         # Debug: Log motor commands every 100 publishes
         if count % 100 == 0:
             mode_str = f"[{motor_source.upper()}]"
-            log.debug(f"{mode_str} [MOTOR] PWM: CH1={c1:.0f} CH3={c2:.0f} → left_n={left_n:.2f} right_n={right_n:.2f}")
+            with self.lock:
+                observed_yaw_rate_dps = self.observed_yaw_rate_dps
+                heading_delta_deg = self.heading_delta_deg
+            log.debug(
+                f"{mode_str} [MOTOR] PWM: CH1={c1:.0f} CH3={c2:.0f} → "
+                f"left_n={left_n:.2f} right_n={right_n:.2f} yaw_cmd={self.last_yaw_cmd_norm:.2f} "
+                f"yaw_rate_nav={observed_yaw_rate_dps:.2f}dps heading_delta={heading_delta_deg:.2f}deg"
+            )
+            if count % 1000 == 0:
+                log_jsonl(
+                    "sitl_gazebo_bridge",
+                    True,
+                    event="sim_motor_yaw_diagnostic",
+                    motor_source=str(motor_source),
+                    ch1_pwm=round(float(c1), 1),
+                    ch3_pwm=round(float(c2), 1),
+                    left_norm=round(float(left_n), 4),
+                    right_norm=round(float(right_n), 4),
+                    yaw_cmd_norm=round(float(self.last_yaw_cmd_norm), 4),
+                    observed_yaw_rate_dps=round(float(observed_yaw_rate_dps), 4),
+                    heading_delta_deg=round(float(heading_delta_deg), 4),
+                    yaw_sign=float(SIM_GZ_YAW_SIGN),
+                )
 
     def send_servo_response_to_ardupilot(self, force_response_on_first_packet=False):
         """Send JSON sensor response back to ArduPilot (bidirectional protocol fix)
@@ -378,7 +483,10 @@ class SitlGazeboBridge:
                     payload = {
                         "timestamp": time.time(),
                         "imu": {"gyro": [0.0, 0.0, 0.0], "accel_body": [0.0, 0.0, -9.81]},
-                        "position": [home_lat, home_lon, home_alt],
+                        "latitude": home_lat,
+                        "longitude": home_lon,
+                        "altitude": home_alt,
+                        "position": [0.0, 0.0, 0.0],
                         "attitude": [0.0, 0.0, 0.0],
                         "velocity": [0.0, 0.0, 0.0]
                     }
@@ -392,12 +500,7 @@ class SitlGazeboBridge:
                 if msg_count % 500 == 0:
                     log.warn(f"[SERVO] addr=None, cannot respond")
                 return
-                
-            if time.monotonic() <= self._pose_arm_deadline:
-                if msg_count % 500 == 0:
-                    log.debug(f"[SERVO] pose not armed yet (deadline {self._pose_arm_deadline:.1f})")
-                return
-                
+
             # CRITICAL FIX: Send sensor response back to the SAME address that sent PWM (bidirectional)
             # NOT to SITL_JSON_OUT! ArduPilot uses request-response on same address
             data = ('\n' + json.dumps(payload) + '\n').encode('utf-8')
@@ -415,6 +518,10 @@ class SitlGazeboBridge:
                 with self.lock:
                     ch1, ch2 = self.motor_pwm_ch1, self.motor_pwm_ch2
                     x, y, hdg = self.pos_x, self.pos_y, self.heading_rad
+                    heading_nav_deg = self.heading_nav_deg
+                    heading_delta_deg = self.heading_delta_deg
+                    observed_yaw_rate_dps = self.observed_yaw_rate_dps
+                    yaw_cmd_norm = self.last_yaw_cmd_norm
                 
                 left_n, right_n = _normalized_motor_outputs(ch1, ch2)
                 motor_norm = max(-1.0, min(1.0, (left_n + right_n) / 2.0))
@@ -424,9 +531,16 @@ class SitlGazeboBridge:
                     "pos_x": x,
                     "pos_y": y,
                     "heading_rad": hdg,
+                    "heading_nav_deg": heading_nav_deg,
+                    "heading_delta_deg": heading_delta_deg,
+                    "observed_yaw_rate_dps": observed_yaw_rate_dps,
                     "motor_ch1_pwm": ch1,
                     "motor_ch2_pwm": ch2,
+                    "motor_left_norm": left_n,
+                    "motor_right_norm": right_n,
                     "motor_normalized": motor_norm,
+                    "yaw_cmd_norm": yaw_cmd_norm,
+                    "yaw_sign": SIM_GZ_YAW_SIGN,
                     "source": "sitl_gazebo_bridge_json"
                 }
                 tmp_path = POS_FILE.with_suffix(f"{POS_FILE.suffix}.tmp")
@@ -442,7 +556,7 @@ class SitlGazeboBridge:
     def stats_loop(self):
         while self.running:
             time.sleep(5.0)
-            mode_str = "[TEST]" if self._test_mode_active else "[ARMED]"
+            mode_str = "[BENCH]" if self._bench_override_active else "[ARMED]"
             log.info(f"{mode_str} Stats - Odom Rx: {self._msg_count_odom/5.0:.1f} Hz | PWM Rx: {self._msg_count_pwm/5.0:.1f} Hz | Posi: {self.pos_x:.2f},{self.pos_y:.2f} | PWM: {self.motor_pwm_ch1:.0f},{self.motor_pwm_ch2:.0f}")
             self._msg_count_odom = 0
             self._msg_count_pwm = 0

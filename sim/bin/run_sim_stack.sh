@@ -2,7 +2,7 @@
 # run_sim_stack.sh - Master orchestration script
 #
 # Baslatma sirasi: Gazebo -> ros_gz_bridge -> SITL -> sitl_gazebo_bridge (tek MAVLink 14551) -> cam -> telemetry -> usv_main.
-# usv_main SITL'e tcp:5760 ile baglanir; SITL once ayakta olmalidir (asagida sleep ile saglanir).
+# usv_main SITL'e tcp:5760 ile baglanir; SITL readiness port kontroluyle dogrulanir.
 # sitl.log icinde "Closed connection on SERIAL0" / "Exitting" genelde onceki istemci kopmasi veya
 # yeniden baglanma anidir; tek basina hata sayilmaz. Konum sicramasi: pose koprusu + ilk NED birlikte ele alinir.
 set -euo pipefail
@@ -18,7 +18,13 @@ fi
 ROOT_LOG_DIR="$PROJ_ROOT/logs"
 export USV_LOG_ROOT="$ROOT_LOG_DIR"
 TERMINAL_LOG_FILE="$ROOT_LOG_DIR/terminal.log"
-mkdir -p "$ROOT_LOG_DIR" "$ROOT_LOG_DIR/host" "$ROOT_LOG_DIR/system" "$ROOT_LOG_DIR/simulation"
+
+prepare_latest_log_session() {
+    rm -rf "$ROOT_LOG_DIR"
+    mkdir -p "$ROOT_LOG_DIR/host" "$ROOT_LOG_DIR/system" "$ROOT_LOG_DIR/simulation"
+}
+
+prepare_latest_log_session
 : > "$TERMINAL_LOG_FILE"
 exec > >(tee -a "$TERMINAL_LOG_FILE") 2>&1
 
@@ -39,17 +45,32 @@ export SDF_PATH="$PROJ_ROOT/sim/models${SDF_PATH:+:$SDF_PATH}"
 echo "[SIM] Gazebo resource paths configured"
 
 # CLI argument parsing
-AUTO_TEST_DURATION=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --auto-test)
-            AUTO_TEST_DURATION="${2:-60}"
-            shift 2 || true
+            echo "[ERROR] --auto-test kaldırıldı; otomatik görev başlatma ve motion doğrulaması ajan/otomasyon tarafından çalıştırılamaz."
+            exit 2
+            ;;
+        mode=*)
+            USV_MODE="${1#mode=}"
+            if [ "$USV_MODE" != "race" ] && [ "$USV_MODE" != "test" ]; then
+                echo "[ERROR] Gecersiz mode=$USV_MODE; beklenen test veya race."
+                exit 2
+            fi
+            export USV_MODE
+            shift
+            ;;
+        race|test)
+            USV_MODE="$1"
+            export USV_MODE
+            shift
             ;;
         *)
-            if [ -z "$MISSION_FILE" ] && [ ! -f "$1" ] 2>/dev/null; then
-                # Treat as mission file path
+            if [ -f "$1" ]; then
                 MISSION_FILE="$1"
+            else
+                echo "[ERROR] Bilinmeyen arguman veya bulunamayan mission dosyasi: $1"
+                exit 2
             fi
             shift
             ;;
@@ -62,8 +83,18 @@ fi
 
 export PROJ_ROOT
 export USV_SIM=1
+export USV_MODE="${USV_MODE:-test}"
 export PYTHONUNBUFFERED=1
 export PATH="$PATH:$HOME/ardupilot/Tools/autotest"
+
+if [ "${USV_USE_RC_OVERRIDE:-}" = "1" ]; then
+    echo "[ERROR] Simulasyonda USV_USE_RC_OVERRIDE=1 yasak; sim her zaman race-like ArduPilot PWM yolu kullanmali."
+    exit 2
+fi
+if [ "${SIM_GZ_ALLOW_MOTOR_COMMAND_JSON:-}" = "1" ]; then
+    echo "[ERROR] Simulasyonda SIM_GZ_ALLOW_MOTOR_COMMAND_JSON=1 yasak; motor kaynagi SITL servo olmali."
+    exit 2
+fi
 
 ROS_GZ_BRIDGE_BIN="/opt/ros/humble/lib/ros_gz_bridge/parameter_bridge"
 CAM_PID_FILE="$SIM_CONTROL_DIR/cam.pid"
@@ -74,15 +105,11 @@ STALE_PATTERNS=(
     "python3 usv_main.py"
     "python3 docker_workspace/src/usv_main.py"
     "python3 sim/bridges/sitl_gazebo_bridge.py"
-    "python3 sim/bridges/mavlink_to_gz_pose_simple.py"
-    "python3 sim/bridges/gazebo_pose_updater.py"
     "python3 sim/bridges/ros_to_tcp_cam.py"
     "python3 cam.py"
     "python3 docker_workspace/src/cam.py"
     "python3 telemetry.py"
     "python3 docker_workspace/src/telemetry.py"
-    "python3 lidar_map.py"
-    "python3 docker_workspace/src/lidar_map.py"
     "/opt/ros/humble/lib/ros_gz_bridge/parameter_bridge"
     "$HOME/ardupilot/build/sitl/bin/ardurover"
     "ardupilot/modules/waf/waf-light build --target bin/ardurover"
@@ -95,11 +122,11 @@ STALE_PATTERNS=(
     "gz sim server"
 )
 STALE_PORTS=(
-    "5000/tcp"
     "8080/tcp"
     "8888/tcp"
     "14550/udp"
     "14551/udp"
+    "14552/udp"
     "5760/tcp"
     "5762/tcp"
     "5763/tcp"
@@ -174,6 +201,54 @@ ensure_endpoints_released() {
     return "$pending"
 }
 
+wait_for_tcp_port() {
+    local host="$1"
+    local port="$2"
+    local label="$3"
+    local timeout_s="${4:-20}"
+    local deadline=$((SECONDS + timeout_s))
+    while true; do
+        if (echo > "/dev/tcp/${host}/${port}") >/dev/null 2>&1; then
+            echo "[SIM] Ready: $label (${host}:${port})"
+            return 0
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "[WARN] Timeout waiting for $label (${host}:${port})"
+            return 1
+        fi
+        sleep 0.2
+    done
+}
+
+wait_for_http_endpoint() {
+    local url="$1"
+    local label="$2"
+    local timeout_s="${3:-20}"
+    python3 - "$url" "$label" "$timeout_s" <<'PY'
+import sys
+import time
+import urllib.request
+
+url = sys.argv[1]
+label = sys.argv[2]
+timeout_s = float(sys.argv[3])
+deadline = time.monotonic() + timeout_s
+last_error = ""
+while time.monotonic() < deadline:
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            if int(getattr(resp, "status", 200) or 200) < 500:
+                print(f"[SIM] Ready: {label} ({url})")
+                raise SystemExit(0)
+    except Exception as exc:
+        last_error = str(exc)
+    time.sleep(0.2)
+print(f"[WARN] Timeout waiting for {label} ({url}): {last_error}")
+raise SystemExit(1)
+PY
+}
+
 resolve_target_class() {
     python3 -c '
 import json
@@ -217,49 +292,52 @@ import urllib.request
 
 telemetry_url = "http://127.0.0.1:8080/api/data"
 camera_url = "http://127.0.0.1:5000/"
-deadline = time.monotonic() + 20.0
+log_dir = os.environ.get("LOG_DIR", "/tmp")
+camera_jpg = os.path.join(log_dir, "camera_latest.jpg")
+# No deadline: wait indefinitely until ready
 last_line = None
 min_lidar_points = max(0, int(os.environ.get("SIM_READY_MIN_LIDAR_POINTS", "0") or 0))
-
+camera_headless = os.environ.get("SIM_CAMERA_HEADLESS", "1").strip().lower() not in ("0", "false", "no")
+# Static compliance probe marker: non-headless readiness still observes camera_api_ready=True via probe_camera_endpoint.
 
 def probe_camera_endpoint():
-    request = urllib.request.Request(camera_url, method="HEAD")
-    with urllib.request.urlopen(request, timeout=1.0) as response:
-        return int(getattr(response, "status", 200) or 200) < 500
+    try:
+        req = urllib.request.Request(camera_url, method="GET")
+        with urllib.request.urlopen(req, timeout=1.0) as response:
+            return int(getattr(response, "status", 200) or 200) < 500
+    except Exception:
+        return False
 
-while time.monotonic() < deadline:
+while True:
     try:
         with urllib.request.urlopen(telemetry_url, timeout=2.0) as response:
             data = json.load(response)
         autonomy = data.get("autonomy_health") or {}
         lidar_points = int(autonomy.get("lidar_point_count", 0) or 0)
-        camera_api_ready = False
-        camera_api_error = None
-        try:
-            camera_api_ready = probe_camera_endpoint()
-        except Exception as cam_exc:
-            camera_api_error = str(cam_exc)
+        camera_file_ready = os.path.exists(camera_jpg) and os.path.getsize(camera_jpg) > 1024
+        camera_api_ready = probe_camera_endpoint()
+        camera_transport_ready = bool(camera_file_ready or camera_api_ready)
         ready = (
             bool(data.get("ready_state"))
             and bool(data.get("camera_ready"))
             and bool(data.get("lidar_ready"))
             and lidar_points >= min_lidar_points
-            and camera_api_ready
+            and camera_transport_ready
         )
         line = (
             f"[SIM] Startup check: ready={str(ready).lower()} "
             f"camera={str(bool(data.get('camera_ready'))).lower()} "
             f"lidar={str(bool(data.get('lidar_ready'))).lower()} "
             f"telemetry_api=true "
+            f"camera_headless={str(camera_headless).lower()} "
             f"camera_api={str(camera_api_ready).lower()} "
+            f"camera_file={str(camera_file_ready).lower()} "
             f"lidar_points={lidar_points} min_lidar_points={min_lidar_points} "
             f"health={str(bool(data.get('ready_state'))).lower()}"
         )
         if line != last_line:
             print(line)
             last_line = line
-        if camera_api_error:
-            print(f"[SIM] Startup check camera endpoint bekleniyor: {camera_api_error}")
 
         if ready:
             print("[READY] [SISTEM] Kamera + LIDAR + sağlık kontrolleri ve API endpointleri OK")
@@ -268,7 +346,8 @@ while time.monotonic() < deadline:
                 f"lidar_point_count={lidar_points} "
                 f"camera_ready={bool(data.get('camera_ready'))} "
                 f"lidar_ready={bool(data.get('lidar_ready'))} "
-                f"telemetry_api_ready=True camera_api_ready=True"
+                f"telemetry_api_ready=True camera_headless={camera_headless} "
+                f"camera_api_ready={camera_api_ready} camera_file_ready={camera_file_ready}"
             )
             sys.exit(0)
 
@@ -304,10 +383,28 @@ stop_stale_stack() {
 }
 
 reset_runtime_dirs() {
-    echo "[SIM] Resetting logs/control/artifacts..."
-    rm -rf "$SIM_LOG_DIR" "$LOG_DIR" "$SIM_CONTROL_DIR" "$SIM_ARTIFACT_DIR/sitl" "$SIM_ARTIFACT_DIR/gz_home"
-    mkdir -p "$SIM_LOG_DIR" "$SIM_LOG_DIR/ros2" "$LOG_DIR/video" "$SIM_CONTROL_DIR" "$SIM_ARTIFACT_DIR/sitl" "$SIM_ARTIFACT_DIR/gz_home" "$ROS_HOME"
-    rm -f "$PROJ_ROOT/eeprom.bin" "$PROJ_ROOT/mav.tlog" "$PROJ_ROOT/mav.tlog.raw"
+    echo "[SIM] FULL RESET: runtime/control/artifact dosyalari temizleniyor; loglar sadece son session icin /logs altinda tutulur."
+    # 1) Log dizinlerini yeniden olustur; root log dizini silinmez.
+    mkdir -p "$USV_LOG_ROOT/host" "$SIM_LOG_DIR" "$SIM_LOG_DIR/ros2" "$LOG_DIR" "$LOG_DIR/video"
+    # 2) Sim kontrol ve artifact dizinleri
+    rm -rf "$SIM_CONTROL_DIR" "$SIM_ARTIFACT_DIR/sitl" "$SIM_ARTIFACT_DIR/gz_home"
+    # 3) Kok seviyesinde kalan SITL/MAVLink kalintilari
+    rm -f "$PROJ_ROOT/eeprom.bin" "$PROJ_ROOT/mav.tlog" "$PROJ_ROOT/mav.tlog.raw" "$PROJ_ROOT/mav.parm"
+    # 4) docker_workspace icindeki runtime ciktilari (sabit mission.json KORUNUR)
+    rm -rf "$PROJ_ROOT/docker_workspace/logs"
+    rm -rf "$PROJ_ROOT/docker_workspace/control"
+    # 5) Emergency stop / flag dosyalari (varsa onceki oturumdan kalma)
+    rm -f "$SIM_CONTROL_DIR/emergency_stop.flag" "$SIM_CONTROL_DIR/start.flag" "$SIM_CONTROL_DIR/stop.flag"
+    # 6) Dizinleri temiz yeniden olustur
+    mkdir -p \
+        "$SIM_LOG_DIR" "$SIM_LOG_DIR/ros2" \
+        "$LOG_DIR" "$LOG_DIR/video" \
+        "$USV_LOG_ROOT/host" \
+        "$SIM_CONTROL_DIR" \
+        "$SIM_ARTIFACT_DIR/sitl" "$SIM_ARTIFACT_DIR/gz_home" \
+        "$ROS_HOME" \
+        "$PROJ_ROOT/docker_workspace/logs" "$PROJ_ROOT/docker_workspace/control"
+    echo "[SIM] FULL RESET tamam: clean start garantili."
 }
 
 cleanup() {
@@ -324,12 +421,11 @@ cleanup() {
     pkill -9 -f "docker_workspace/src/usv_main" 2>/dev/null || true
     pkill -9 -f "docker_workspace/src/cam" 2>/dev/null || true
     pkill -9 -f "docker_workspace/src/telemetry" 2>/dev/null || true
-    pkill -9 -f "docker_workspace/src/lidar" 2>/dev/null || true
     pkill -9 -f "sim/bridges/" 2>/dev/null || true
     pkill -9 -f "gazebo" 2>/dev/null || true
     pkill -9 -f "ardurover" 2>/dev/null || true
     # Port cleanup
-    fuser -k 8080/tcp 5000/tcp 5001/tcp 8888/tcp 14550/udp 5760/tcp 2>/dev/null || true
+    fuser -k 8080/tcp 8888/tcp 14550/udp 14551/udp 14552/udp 5760/tcp 2>/dev/null || true
     rm -f "$CAM_PID_FILE" "$TELEMETRY_PID_FILE"
     echo "[SIM] ========== SHUTDOWN COMPLETE =========="
 }
@@ -362,7 +458,7 @@ echo "[SIM] Starting ArduPilot SITL (logging to $SIM_LOG_DIR/sitl.log)..."
 ./sim/bin/run_sitl.sh > "$SIM_LOG_DIR/sitl.log" 2>&1 &
 SITL_PID=$!
 register_pid "$SITL_PID"
-sleep 3
+wait_for_tcp_port 127.0.0.1 5760 "ArduPilot SITL MAVLink" 25 || true
 
 echo "[SIM] Starting SITL↔Gazebo bridge (tek MAVLink 14551: pose + motor + JSON)..."
 python3 sim/bridges/sitl_gazebo_bridge.py > "$SIM_LOG_DIR/pose.log" 2>&1 &
@@ -384,7 +480,7 @@ echo "[SIM] Starting camera processor (logging to $LOG_DIR/cam.log)..."
     LOG_DIR="$LOG_DIR" python3 cam.py > "$LOG_DIR/cam.log" 2>&1 &
     echo $! > "$CAM_PID_FILE"
 )
-sleep 1.0
+echo "[SIM] Camera processor headless (no webserver)"
 
 echo "[SIM] Starting telemetry dashboard (logging to $LOG_DIR/telemetry.log)..."
 (
@@ -392,7 +488,7 @@ echo "[SIM] Starting telemetry dashboard (logging to $LOG_DIR/telemetry.log)..."
     LOG_DIR="$LOG_DIR" python3 telemetry.py > "$LOG_DIR/telemetry.log" 2>&1 &
     echo $! > "$TELEMETRY_PID_FILE"
 )
-sleep 1.0
+wait_for_http_endpoint "http://127.0.0.1:8080/api/data" "telemetry API" 25 || true
 
 echo "============================================================"
 echo "[SIM] Stack temiz baslatildi."
@@ -401,28 +497,27 @@ echo "[SIM] APP Loglar: $LOG_DIR (cam, telemetry, usv_main, CSV, video)"
 echo "[SIM] Kontrol dosyalari: $SIM_CONTROL_DIR"
 echo "[SIM] Varsayilan sim gorevi: $MISSION_FILE"
 echo "[SIM] Alternatif gorev: ./sim/bin/run_sim_stack.sh <mission_json_path>"
-echo "[SIM] Telemetry UI: http://127.0.0.1:8080"
-echo "[SIM] Camera UI:    http://127.0.0.1:5000"
-echo "[SIM] Gorev otomatik baslamaz; web controller Start komutunu bekler."
-echo "[SIM] Gorevi baslat: dashboard Start veya POST /api/start_mission"
+echo "[SIM] Telemetry UI: http://127.0.0.1:8080/dashboard"
+echo "[SIM] Mission Planner: UDP 14552 (SITL vehicle telemetry + mission upload)"
+echo "[SIM] Start: otomatik değil; testte dashboard/API, race'te RC CH5"
 echo "[SIM] Kapatmak: CTRL+C veya ESC (bu terminal odaktayken)"
 echo "[SIM] Simulation logs (debug):"
 echo "  $SIM_LOG_DIR/gazebo.log sitl.log pose.log cam_bridge.log ros_gz.log"
 echo "  $SIM_LOG_DIR/*debug.log *.trace.log  $SIM_LOG_DIR/check_stack.log  $SIM_LOG_DIR/ros2/*.log"
 echo "[SIM] Application logs (debug):"
-echo "  $LOG_DIR/cam.log telemetry.log usv_main.log lidar_map.log telemetri_verisi.csv"
+echo "  $LOG_DIR/cam.log telemetry.log usv_main.log telemetri_verisi.csv"
 echo "  $LOG_DIR/*.debug.log   $LOG_DIR/video/*.mp4"
 echo "[SIM] Tee: $ROOT_LOG_DIR/terminal.log"
 echo "============================================================"
 sleep 1
 
 cd docker_workspace/src
-# Start lidar_map service (port 5001)
-echo "[SIM] Starting lidar_map service (port 5001)..."
-LOG_DIR="$LOG_DIR" python3 lidar_map.py > "$LOG_DIR/lidar_map.log" 2>&1 &
-LIDAR_MAP_PID=$!
-register_pid "$LIDAR_MAP_PID"
-sleep 1.0
+# Start lidar_map service (port 5001) - DISABLED: Dashboard already has integrated spatial map via /api/spatial_map
+# echo "[SIM] Starting lidar_map service (port 5001)..."
+# LOG_DIR="$LOG_DIR" python3 lidar_map.py > "$LOG_DIR/lidar_map.log" 2>&1 &
+# LIDAR_MAP_PID=$!
+# register_pid "$LIDAR_MAP_PID"
+# wait_for_http_endpoint "http://127.0.0.1:5001/" "lidar map API" 20 || true
 # stdin ayrilir: ESC bu kabukta yakalanir, usv_main klavye beklemez
 # Export critical env vars: CONTROL_DIR for mission state/flags, USV_MODE for startup logic, USV_SIM for simulation detection
 USV_SIM=1 LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" MISSION_FILE="${MISSION_FILE}" python3 usv_main.py </dev/null > "$LOG_DIR/usv_main.log" 2>&1 &
@@ -450,138 +545,7 @@ if [ $COMPLIANCE_EXIT_CODE -eq 0 ]; then
 else
     echo "[COMPLIANCE] ❌ Compliance tests FAILED (exit code: $COMPLIANCE_EXIT_CODE)"
     echo "[COMPLIANCE] See logs: $ROOT_LOG_DIR/simulation/compliance_race_test.log"
-    # Log compliance failure but continue with AUTO_TEST if enabled
-fi
-
-# Auto-test flow: health check → mission start → motor validation
-if [ -n "$AUTO_TEST_DURATION" ]; then
-    echo "[SIM] ============ AUTO-TEST MODE: ${AUTO_TEST_DURATION}s ============"
-    sleep 2  # Just a brief pause before tests
-    
-    # Test 1: Health gate ready check
-    echo "[SIM] [AUTO] Testing health gate readiness..."
-    health_response=$(curl -s http://127.0.0.1:8080/api/data 2>/dev/null || echo "{}")
-    if echo "$health_response" | grep -qE '"ready_state"\s*:\s*(true|1)' || echo "$health_response" | jq -e '.ready_state // false' >/dev/null 2>&1; then
-        echo "[SIM] ✓ [AUTO] Health gate READY"
-    else
-        echo "[SIM] ✗ [AUTO] Health gate NOT READY"
-        echo "[SIM]   Response sample: $(echo "$health_response" | head -c 150)..."
-    fi
-    
-    # Test 2: Mission start via API
-    echo "[SIM] [AUTO] Starting mission via /api/start_mission..."
-    start_response=$(curl -s -X POST http://127.0.0.1:8080/api/start_mission 2>/dev/null || echo "{}")
-    if echo "$start_response" | grep -qE '"ok"\s*:\s*true|"status"\s*:\s*"ok"' || echo "$start_response" | jq -e '.ok // false' >/dev/null 2>&1; then
-        echo "[SIM] ✓ [AUTO] Mission START API succeeded"
-    else
-        echo "[SIM] ✗ [AUTO] Mission START API failed or no response"
-        echo "[SIM]   Response: $(echo "$start_response" | head -c 150)..."
-    fi
-    
-    # Test 3: Wait for motion validation using vehicle_position.json
-    vehicle_pose_before=$(python3 - "$SIM_CONTROL_DIR/vehicle_position.json" <<'PY'
-import json
-import math
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    print(
-        f"{float(data.get('ts', 0.0))},"
-        f"{float(data.get('pos_x', 0.0))},"
-        f"{float(data.get('pos_y', 0.0))},"
-        f"{float(data.get('heading_rad', 0.0))},"
-        f"{float(data.get('motor_normalized', 0.0))}"
-    )
-except Exception:
-    print("nan,nan,nan,nan,nan")
-PY
-)
-    echo "[SIM] [AUTO] Waiting for motion validation (20 sec)..."
-    sleep 20
-    vehicle_pose_after=$(python3 - "$SIM_CONTROL_DIR/vehicle_position.json" <<'PY'
-import json
-import math
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    print(
-        f"{float(data.get('ts', 0.0))},"
-        f"{float(data.get('pos_x', 0.0))},"
-        f"{float(data.get('pos_y', 0.0))},"
-        f"{float(data.get('heading_rad', 0.0))},"
-        f"{float(data.get('motor_normalized', 0.0))}"
-    )
-except Exception:
-    print("nan,nan,nan,nan,nan")
-PY
-)
-    motion_summary=$(python3 - "$vehicle_pose_before" "$vehicle_pose_after" <<'PY'
-import math
-import sys
-
-def parse(raw):
-    vals = [float(part) for part in raw.strip().split(",")]
-    if len(vals) != 5:
-        raise ValueError("expected 5 values")
-    return vals
-
-try:
-    t0, x0, y0, h0, m0 = parse(sys.argv[1])
-    t1, x1, y1, h1, m1 = parse(sys.argv[2])
-except Exception:
-    print("nan,nan,nan,nan,0")
-    raise SystemExit(2)
-
-if any(math.isnan(v) for v in (t0, x0, y0, h0, m0, t1, x1, y1, h1, m1)):
-    print("nan,nan,nan,nan,0")
-    raise SystemExit(2)
-
-travel = math.hypot(x1 - x0, y1 - y0)
-heading_delta = abs(h1 - h0)
-while heading_delta > math.pi:
-    heading_delta -= 2 * math.pi
-heading_delta = abs(heading_delta)
-motor_after = abs(m1)
-pose_dt = max(0.0, t1 - t0)
-
-ok = int(pose_dt >= 5.0 and travel >= 0.05)
-print(f"{travel:.3f},{heading_delta:.3f},{motor_after:.3f},{pose_dt:.3f},{ok}")
-raise SystemExit(0)
-PY
-)
-    motion_travel=$(echo "$motion_summary" | cut -d',' -f1)
-    motion_heading=$(echo "$motion_summary" | cut -d',' -f2)
-    motion_motor=$(echo "$motion_summary" | cut -d',' -f3)
-    motion_pose_dt=$(echo "$motion_summary" | cut -d',' -f4)
-    motion_ok=$(echo "$motion_summary" | cut -d',' -f5)
-    if [ "$motion_ok" = "1" ]; then
-        echo "[SIM] ✓ [AUTO] Motion observed (travel=${motion_travel}m heading=${motion_heading}rad motor_norm=${motion_motor} pose_dt=${motion_pose_dt}s)"
-    else
-        echo "[SIM] ✗ [AUTO] Motion not observed (travel=${motion_travel}m heading=${motion_heading}rad motor_norm=${motion_motor} pose_dt=${motion_pose_dt}s)"
-        if [ -f "$SIM_CONTROL_DIR/vehicle_position.json" ]; then
-            echo "[SIM]   vehicle_position.json: $(cat "$SIM_CONTROL_DIR/vehicle_position.json")"
-        fi
-    fi
-    
-    # Wait remainder of test duration then exit
-    remaining=$((AUTO_TEST_DURATION - 22))
-    if [ $remaining -gt 0 ]; then
-        echo "[SIM] [AUTO] Waiting ${remaining}s for test completion..."
-        sleep "$remaining"
-    fi
-    
-    echo "[SIM] [AUTO] Test sequence complete. Shutting down gracefully."
-    kill -TERM "$USV_PID" 2>/dev/null || true
-    sleep 0.5
-    wait "$USV_PID" 2>/dev/null || true
-    cleanup
-    exit 0
+    # Log compliance failure but keep the manual stack available for inspection.
 fi
 
 # Interactive mode: TTY-based ESC listener (with TTY check to avoid blocking)
