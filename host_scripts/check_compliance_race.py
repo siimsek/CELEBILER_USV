@@ -125,7 +125,7 @@ def test_p1_race_pure_auto():
         'assert nav_mode == "AUTO", "Race mode NAV must be pure Pixhawk AUTO"',
         'auto_result = self._run_nav_auto_mission()',
         'if not self._wait_p2_ready():',
-        'if not self._navigate_p2_waypoint(wp[0], wp[1], leg_start=prev_wp):',
+        'if not self._navigate_p2_waypoint(wp[0], wp[1], leg_start=None):',
     ]
     for snippet in required_run_nav_snippets:
         if snippet not in run_nav_src:

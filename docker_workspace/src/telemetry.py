@@ -42,7 +42,15 @@ from mission_config import (
     split_nav_engage,
     validate_coordinate_mission,
 )
-from sim_nav_state import load_sim_nav_state, mavlink_heading_cdeg_valid
+from sim_nav_state import load_sim_nav_state, mavlink_heading_cdeg_valid, parse_sim_home, heading_rad_to_nav_deg
+from spatial_frame import (
+    compute_spatial_bounds,
+    latlon_to_spatial_enu_m,
+    lidar_local_to_world_enu_compass,
+    load_course_static_features,
+    resolve_boat_spatial_enu,
+    resolve_spatial_origin_candidates,
+)
 
 print = make_console_printer("TELEM")
 
@@ -154,6 +162,7 @@ SPATIAL_TRAIL = deque(maxlen=2000)
 SPATIAL_LAST_TRAIL_TS = 0.0
 SPATIAL_TRAIL_MIN_STEP_M = 0.20
 SPATIAL_ORIGIN = {"lat": None, "lon": None}
+SPATIAL_LAST_START_TIME = None
 _sim_ld = os.environ.get("SIM_LOG_DIR", "").strip()
 _sim_base = _sim_ld if _sim_ld else LOG_DIR
 LOG_FILE_ALLOWLIST = {
@@ -411,6 +420,25 @@ def _telemetry_http_after(response):
     except Exception:
         pass
     return response
+
+# Shared Unified Spatial Map canvas renderer (single source)
+_UNIFIED_SPATIAL_MAP_DRAW_JS_PATH = os.path.join(os.path.dirname(__file__), "unified_spatial_map_draw.js")
+try:
+    with open(_UNIFIED_SPATIAL_MAP_DRAW_JS_PATH, "r", encoding="utf-8") as _spatial_draw_handle:
+        UNIFIED_SPATIAL_MAP_DRAW_JS = _spatial_draw_handle.read()
+except OSError as exc:
+    _telem_dbg.warning("unified_spatial_map_draw.js load failed: %s", exc)
+    UNIFIED_SPATIAL_MAP_DRAW_JS = (
+        "function drawUnifiedSpatialMap(canvas, payload) {"
+        " if (!canvas || !payload) return;"
+        " const ctx = canvas.getContext('2d');"
+        " if (!ctx) return;"
+        " ctx.fillStyle = '#050812';"
+        " ctx.fillRect(0, 0, canvas.width, canvas.height);"
+        " ctx.fillStyle = '#fca5a5';"
+        " ctx.fillText('spatial map js missing', 12, 20);"
+        "}"
+    )
 
 # --- DASHBOARD ARAYÜZÜ (HTML/CSS/JS) ---
 HTML_PAGE = """
@@ -882,158 +910,8 @@ HTML_PAGE = """
             }
         }
 
-        function drawUnifiedSpatialMap(canvas, payload) {
-            if (!canvas || !payload) return;
-            const rect = canvas.getBoundingClientRect();
-            const width = Math.max(320, Math.floor(rect.width || 0));
-            const height = Math.max(240, Math.floor(rect.height || 0));
-            if (canvas.width !== width || canvas.height !== height) {
-                canvas.width = width;
-                canvas.height = height;
-            }
-            const ctx = canvas.getContext('2d');
-            if (!ctx) return;
+        {{ unified_spatial_map_draw_js | safe }}
 
-            ctx.fillStyle = '#050812';
-            ctx.fillRect(0, 0, width, height);
-
-            const boat = payload.boat || null;
-            const trail = (payload.trail && Array.isArray(payload.trail.points)) ? payload.trail.points : [];
-            const wps = Array.isArray(payload.waypoints) ? payload.waypoints : [];
-            const lidarPts = (payload.lidar && Array.isArray(payload.lidar.points)) ? payload.lidar.points : [];
-            // Points are already in world coordinates from usv_main (since 2026-05-01 fix)
-            const lidarWorldPts = lidarPts.filter(p => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]));
-
-            const allPts = [];
-            for (const p of trail) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
-            for (const w of wps) allPts.push([Number(w.x_m || 0), Number(w.y_m || 0)]);
-            for (const p of lidarWorldPts) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
-            if (boat) allPts.push([Number(boat.x_m || 0), Number(boat.y_m || 0)]);
-
-            let cx = boat ? Number(boat.x_m || 0) : 0;
-            let cy = boat ? Number(boat.y_m || 0) : 0;
-            if (!boat && allPts.length) {
-                let sx = 0, sy = 0;
-                for (const p of allPts) { sx += p[0]; sy += p[1]; }
-                cx = sx / allPts.length;
-                cy = sy / allPts.length;
-            }
-
-            let span = 20.0;
-            for (const p of allPts) {
-                const dx = p[0] - cx;
-                const dy = p[1] - cy;
-                span = Math.max(span, Math.hypot(dx, dy) * 1.3);
-            }
-            const scale = Math.min(width, height) / (2.0 * span);
-            const toPx = (x, y) => {
-                const px = (width * 0.5) + ((x - cx) * scale);
-                const py = (height * 0.5) - ((y - cy) * scale);
-                return [px, py];
-            };
-
-            // Grid
-            const gridStepM = span <= 30 ? 2.0 : 5.0;
-            ctx.strokeStyle = 'rgba(110,130,170,0.22)';
-            ctx.lineWidth = 1;
-            const leftM = cx - span;
-            const rightM = cx + span;
-            const bottomM = cy - span;
-            const topM = cy + span;
-            let gx = Math.floor(leftM / gridStepM) * gridStepM;
-            while (gx <= rightM) {
-                const p0 = toPx(gx, bottomM);
-                const p1 = toPx(gx, topM);
-                ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
-                gx += gridStepM;
-            }
-            let gy = Math.floor(bottomM / gridStepM) * gridStepM;
-            while (gy <= topM) {
-                const p0 = toPx(leftM, gy);
-                const p1 = toPx(rightM, gy);
-                ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
-                gy += gridStepM;
-            }
-
-            // LiDAR points
-            const lidarAge = payload.lidar && payload.lidar.age_s != null ? Number(payload.lidar.age_s) : null;
-            const lidarAlpha = (lidarAge != null && lidarAge > 0.35) ? 0.25 : 0.65;
-            ctx.fillStyle = `rgba(56,189,248,${lidarAlpha})`;
-            for (const p of lidarWorldPts) {
-                if (!Array.isArray(p) || p.length < 2) continue;
-                const q = toPx(Number(p[0]), Number(p[1]));
-                ctx.fillRect(q[0] - 1, q[1] - 1, 2, 2);
-            }
-
-            // Trail
-            if (trail.length >= 2) {
-                ctx.strokeStyle = 'rgba(34,197,94,0.95)';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                const p0 = toPx(Number(trail[0][0]), Number(trail[0][1]));
-                ctx.moveTo(p0[0], p0[1]);
-                for (let i = 1; i < trail.length; i++) {
-                    const pt = trail[i];
-                    if (!Array.isArray(pt) || pt.length < 2) continue;
-                    const q = toPx(Number(pt[0]), Number(pt[1]));
-                    ctx.lineTo(q[0], q[1]);
-                }
-                ctx.stroke();
-            }
-
-            // Waypoints + route
-            if (wps.length >= 2) {
-                ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-                ctx.lineWidth = 1.5;
-                ctx.beginPath();
-                const p0 = toPx(Number(wps[0].x_m || 0), Number(wps[0].y_m || 0));
-                ctx.moveTo(p0[0], p0[1]);
-                for (let i = 1; i < wps.length; i++) {
-                    const q = toPx(Number(wps[i].x_m || 0), Number(wps[i].y_m || 0));
-                    ctx.lineTo(q[0], q[1]);
-                }
-                ctx.stroke();
-            }
-            for (const w of wps) {
-                const q = toPx(Number(w.x_m || 0), Number(w.y_m || 0));
-                let color = '#94a3b8';
-                if (w.status === 'active') color = '#f59e0b';
-                else if (w.status === 'past') color = '#22c55e';
-                else if (w.status === 'future') color = '#e2e8f0';
-                ctx.fillStyle = color;
-                ctx.beginPath();
-                ctx.arc(q[0], q[1], 4, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.fillStyle = '#cbd5e1';
-                ctx.font = '11px monospace';
-                ctx.fillText(String((w.idx ?? 0) + 1), q[0] + 6, q[1] - 6);
-            }
-
-            // Boat pose
-            if (boat) {
-                const bx = Number(boat.x_m || 0);
-                const by = Number(boat.y_m || 0);
-                const hdg = Number(boat.heading_deg || 0) * Math.PI / 180.0;
-                const q = toPx(bx, by);
-                const boatR = 9;
-                ctx.save();
-                ctx.translate(q[0], q[1]);
-                ctx.rotate(-hdg + Math.PI / 2.0);
-                ctx.fillStyle = '#fb7185';
-                ctx.beginPath();
-                ctx.moveTo(0, -boatR);
-                ctx.lineTo(boatR * 0.65, boatR * 0.8);
-                ctx.lineTo(-boatR * 0.65, boatR * 0.8);
-                ctx.closePath();
-                ctx.fill();
-                ctx.restore();
-            }
-
-            // Frame label
-            ctx.fillStyle = 'rgba(203,213,225,0.8)';
-            ctx.font = '12px monospace';
-            ctx.fillText('ENU local', 10, 16);
-        }
 
         function refreshVisualFeeds() {
             {% if usv_mode == 'test' %}
@@ -2549,136 +2427,8 @@ CONTROLLER_PAGE = """
             }
         }
 
-        function drawUnifiedSpatialMap(canvas, payload) {
-            if (!canvas || !payload) return;
-            const rect = canvas.getBoundingClientRect();
-            const width = Math.max(320, Math.floor(rect.width || 0));
-            const height = Math.max(240, Math.floor(rect.height || 0));
-            if (canvas.width !== width || canvas.height !== height) {
-                canvas.width = width;
-                canvas.height = height;
-            }
-            const ctx = canvas.getContext('2d');
-            if (!ctx) return;
+        {{ unified_spatial_map_draw_js | safe }}
 
-            ctx.fillStyle = '#050812';
-            ctx.fillRect(0, 0, width, height);
-
-            const boat = payload.boat || null;
-            const trail = (payload.trail && Array.isArray(payload.trail.points)) ? payload.trail.points : [];
-            const wps = Array.isArray(payload.waypoints) ? payload.waypoints : [];
-            const lidarPts = (payload.lidar && Array.isArray(payload.lidar.points)) ? payload.lidar.points : [];
-            // Points are already in world coordinates from usv_main (since 2026-05-01 fix)
-            const lidarWorldPts = lidarPts.filter(p => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]));
-            const allPts = [];
-            for (const p of trail) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
-            for (const w of wps) allPts.push([Number(w.x_m || 0), Number(w.y_m || 0)]);
-            for (const p of lidarWorldPts) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
-            if (boat) allPts.push([Number(boat.x_m || 0), Number(boat.y_m || 0)]);
-
-            let cx = boat ? Number(boat.x_m || 0) : 0;
-            let cy = boat ? Number(boat.y_m || 0) : 0;
-            if (!boat && allPts.length) {
-                let sx = 0, sy = 0;
-                for (const p of allPts) { sx += p[0]; sy += p[1]; }
-                cx = sx / allPts.length;
-                cy = sy / allPts.length;
-            }
-            let span = 20.0;
-            for (const p of allPts) {
-                span = Math.max(span, Math.hypot(p[0] - cx, p[1] - cy) * 1.3);
-            }
-            const scale = Math.min(width, height) / (2.0 * span);
-            const toPx = (x, y) => [(width * 0.5) + ((x - cx) * scale), (height * 0.5) - ((y - cy) * scale)];
-
-            const gridStepM = span <= 30 ? 2.0 : 5.0;
-            ctx.strokeStyle = 'rgba(110,130,170,0.22)';
-            ctx.lineWidth = 1;
-            const leftM = cx - span, rightM = cx + span, bottomM = cy - span, topM = cy + span;
-            let gx = Math.floor(leftM / gridStepM) * gridStepM;
-            while (gx <= rightM) {
-                const p0 = toPx(gx, bottomM), p1 = toPx(gx, topM);
-                ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
-                gx += gridStepM;
-            }
-            let gy = Math.floor(bottomM / gridStepM) * gridStepM;
-            while (gy <= topM) {
-                const p0 = toPx(leftM, gy), p1 = toPx(rightM, gy);
-                ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
-                gy += gridStepM;
-            }
-
-            const lidarAge = payload.lidar && payload.lidar.age_s != null ? Number(payload.lidar.age_s) : null;
-            const lidarAlpha = (lidarAge != null && lidarAge > 0.35) ? 0.25 : 0.65;
-            ctx.fillStyle = `rgba(56,189,248,${lidarAlpha})`;
-            for (const p of lidarWorldPts) {
-                if (!Array.isArray(p) || p.length < 2) continue;
-                const q = toPx(Number(p[0]), Number(p[1]));
-                ctx.fillRect(q[0] - 1, q[1] - 1, 2, 2);
-            }
-
-            if (trail.length >= 2) {
-                ctx.strokeStyle = 'rgba(34,197,94,0.95)';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                const p0 = toPx(Number(trail[0][0]), Number(trail[0][1]));
-                ctx.moveTo(p0[0], p0[1]);
-                for (let i = 1; i < trail.length; i++) {
-                    const pt = trail[i];
-                    if (!Array.isArray(pt) || pt.length < 2) continue;
-                    const q = toPx(Number(pt[0]), Number(pt[1]));
-                    ctx.lineTo(q[0], q[1]);
-                }
-                ctx.stroke();
-            }
-
-            if (wps.length >= 2) {
-                ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-                ctx.lineWidth = 1.5;
-                ctx.beginPath();
-                const p0 = toPx(Number(wps[0].x_m || 0), Number(wps[0].y_m || 0));
-                ctx.moveTo(p0[0], p0[1]);
-                for (let i = 1; i < wps.length; i++) {
-                    const q = toPx(Number(wps[i].x_m || 0), Number(wps[i].y_m || 0));
-                    ctx.lineTo(q[0], q[1]);
-                }
-                ctx.stroke();
-            }
-            for (const w of wps) {
-                const q = toPx(Number(w.x_m || 0), Number(w.y_m || 0));
-                let color = '#94a3b8';
-                if (w.status === 'active') color = '#f59e0b';
-                else if (w.status === 'past') color = '#22c55e';
-                else if (w.status === 'future') color = '#e2e8f0';
-                ctx.fillStyle = color;
-                ctx.beginPath();
-                ctx.arc(q[0], q[1], 4, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.fillStyle = '#cbd5e1';
-                ctx.font = '11px monospace';
-                ctx.fillText(String((w.idx ?? 0) + 1), q[0] + 6, q[1] - 6);
-            }
-
-            if (boat) {
-                const q = toPx(Number(boat.x_m || 0), Number(boat.y_m || 0));
-                const hdg = Number(boat.heading_deg || 0) * Math.PI / 180.0;
-                ctx.save();
-                ctx.translate(q[0], q[1]);
-                ctx.rotate(-hdg + Math.PI / 2.0);
-                ctx.fillStyle = '#fb7185';
-                ctx.beginPath();
-                ctx.moveTo(0, -9);
-                ctx.lineTo(6, 7);
-                ctx.lineTo(-6, 7);
-                ctx.closePath();
-                ctx.fill();
-                ctx.restore();
-            }
-
-            ctx.fillStyle = 'rgba(203,213,225,0.8)';
-            ctx.font = '12px monospace';
-            ctx.fillText('ENU local', 10, 16);
-        }
 
         function refreshVisualFeeds() {
             const cameraIds = ['controllerCameraFeed', 'cam_img'];
@@ -2894,7 +2644,7 @@ def controller():
 
 @app.route('/dashboard')
 def dashboard():
-    return render_template_string(HTML_PAGE, usv_mode=USV_MODE)
+    return render_template_string(HTML_PAGE, usv_mode=USV_MODE, unified_spatial_map_draw_js=UNIFIED_SPATIAL_MAP_DRAW_JS)
 
 
 @app.route('/api/camera_stream')
@@ -2980,43 +2730,18 @@ def _read_motor_command():
     return last_motor_command_cache
 
 
+
 def _resolve_spatial_origin(state):
-    if SPATIAL_ORIGIN["lat"] is not None and SPATIAL_ORIGIN["lon"] is not None:
-        return float(SPATIAL_ORIGIN["lat"]), float(SPATIAL_ORIGIN["lon"])
-
-    candidates = [
-        (telemetry_data.get("Lat"), telemetry_data.get("Lon")),
-        (state.get("Lat"), state.get("Lon")),
-    ]
-    mission_file = os.environ.get("MISSION_FILE", MISSION_FILE_DEFAULT)
-    try:
-        if os.path.exists(mission_file):
-            with open(mission_file, "r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-            if isinstance(payload, list) and payload and isinstance(payload[0], (list, tuple)) and len(payload[0]) >= 2:
-                candidates.append((payload[0][0], payload[0][1]))
-    except Exception:
-        pass
-
-    for lat_raw, lon_raw in candidates:
-        try:
-            lat = float(lat_raw)
-            lon = float(lon_raw)
-        except (TypeError, ValueError):
-            continue
-        if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and (abs(lat) > 1e-6 or abs(lon) > 1e-6):
-            SPATIAL_ORIGIN["lat"] = lat
-            SPATIAL_ORIGIN["lon"] = lon
-            return lat, lon
-    return None, None
-
-
-def _latlon_to_enu_m(lat, lon, origin_lat, origin_lon):
-    lat_scale = 111320.0
-    lon_scale = 111320.0 * math.cos(math.radians(float(origin_lat)))
-    east_m = (float(lon) - float(origin_lon)) * lon_scale
-    north_m = (float(lat) - float(origin_lat)) * lat_scale
-    return float(east_m), float(north_m)
+    lat, lon = resolve_spatial_origin_candidates(
+        cached_origin=SPATIAL_ORIGIN,
+        state=state if isinstance(state, dict) else {},
+        telemetry_lat=telemetry_data.get("Lat"),
+        telemetry_lon=telemetry_data.get("Lon"),
+    )
+    if lat is not None and lon is not None:
+        SPATIAL_ORIGIN["lat"] = float(lat)
+        SPATIAL_ORIGIN["lon"] = float(lon)
+    return lat, lon
 
 
 def _load_mission_waypoints():
@@ -3043,6 +2768,19 @@ def _load_mission_waypoints():
 
 
 def _build_spatial_payload(state):
+    global SPATIAL_LAST_START_TIME, SPATIAL_LAST_TRAIL_TS
+    start_time = state.get("start_time")
+    active = bool(state.get("active", False))
+    if not active:
+        if SPATIAL_TRAIL:
+            SPATIAL_TRAIL.clear()
+        SPATIAL_LAST_START_TIME = None
+        SPATIAL_LAST_TRAIL_TS = 0.0
+    elif start_time != SPATIAL_LAST_START_TIME:
+        SPATIAL_TRAIL.clear()
+        SPATIAL_LAST_START_TIME = start_time
+        SPATIAL_LAST_TRAIL_TS = 0.0
+
     origin_lat, origin_lon = _resolve_spatial_origin(state)
     if origin_lat is None or origin_lon is None:
         return {
@@ -3050,6 +2788,8 @@ def _build_spatial_payload(state):
             "boat": None,
             "trail": {"points": [], "max_points": int(SPATIAL_TRAIL.maxlen or 0)},
             "waypoints": [],
+            "course": {"static_features": []},
+            "bounds": compute_spatial_bounds([]),
             "lidar": {
                 "points": [],
                 "frame": "enu_world",
@@ -3057,27 +2797,25 @@ def _build_spatial_payload(state):
                 "ts_monotonic": state.get("ts_monotonic"),
                 "age_s": None,
                 "source": "state",
+                "stale": True,
             },
         }
 
-    lat = telemetry_data.get("Lat")
-    lon = telemetry_data.get("Lon")
-    boat = None
-    try:
-        if lat is not None and lon is not None:
-            x_m, y_m = _latlon_to_enu_m(float(lat), float(lon), origin_lat, origin_lon)
-            boat = {
-                "x_m": round(x_m, 3),
-                "y_m": round(y_m, 3),
-                "heading_deg": round(float(telemetry_data.get("Heading", 0.0) or 0.0), 3),
-                "ts_monotonic": state.get("ts_monotonic"),
-            }
-    except Exception:
+    boat = resolve_boat_spatial_enu(
+        origin_lat=origin_lat,
+        origin_lon=origin_lon,
+        telemetry_lat=telemetry_data.get("Lat"),
+        telemetry_lon=telemetry_data.get("Lon"),
+        telemetry_heading_deg=telemetry_data.get("Heading", 0.0),
+    )
+    if isinstance(boat, dict):
+        boat = dict(boat)
+        boat["ts_monotonic"] = state.get("ts_monotonic")
+    else:
         boat = None
 
     now_mono = time.monotonic()
     if boat is not None:
-        global SPATIAL_LAST_TRAIL_TS
         should_add = False
         if not SPATIAL_TRAIL:
             should_add = True
@@ -3099,7 +2837,7 @@ def _build_spatial_payload(state):
             lon_wp = float(wp[1])
         except (TypeError, ValueError, IndexError):
             continue
-        wx, wy = _latlon_to_enu_m(lat_wp, lon_wp, origin_lat, origin_lon)
+        wx, wy = latlon_to_spatial_enu_m(lat_wp, lon_wp, origin_lat, origin_lon)
         status = "future"
         if active_idx >= 0 and idx < active_idx:
             status = "past"
@@ -3132,9 +2870,13 @@ def _build_spatial_payload(state):
             except (TypeError, ValueError):
                 continue
             if lidar_frame == "boat_local" and boat is not None:
-                heading_rad = math.radians(float(boat.get("heading_deg", 0.0) or 0.0))
-                east_m = float(boat["x_m"]) + (lx * math.sin(heading_rad)) - (ly * math.cos(heading_rad))
-                north_m = float(boat["y_m"]) + (lx * math.cos(heading_rad)) + (ly * math.sin(heading_rad))
+                east_m, north_m = lidar_local_to_world_enu_compass(
+                    lx,
+                    ly,
+                    float(boat["x_m"]),
+                    float(boat["y_m"]),
+                    float(boat.get("heading_deg", 0.0) or 0.0),
+                )
                 lidar_points.append([round(east_m, 2), round(north_m, 2)])
             else:
                 lidar_points.append([round(lx, 2), round(ly, 2)])
@@ -3144,6 +2886,23 @@ def _build_spatial_payload(state):
         lidar_frame = "enu_world" if lidar_points else str(lidar_frame or "unknown")
     state_ts = float(state.get("ts_monotonic", 0.0) or 0.0)
     age_s = round(max(0.0, time.monotonic() - state_ts), 3) if state_ts > 0.0 else None
+    lidar_stale = bool(
+        age_s is None
+        or age_s > 2.0
+        or not bool(state.get("lidar_quality_ready", False))
+        or not str(state.get("lidar_frame_status", "") or "").startswith("ok")
+    )
+    course_features = load_course_static_features()
+    point_groups = [
+        [(float(w["x_m"]), float(w["y_m"])) for w in wps],
+        [(float(p[0]), float(p[1])) for p in lidar_points if isinstance(p, (list, tuple)) and len(p) >= 2],
+        [(float(f["x_m"]), float(f["y_m"])) for f in course_features],
+    ]
+    if isinstance(boat, dict):
+        point_groups.append([(float(boat["x_m"]), float(boat["y_m"]))])
+    if SPATIAL_TRAIL:
+        point_groups.append([(float(x), float(y)) for x, y in SPATIAL_TRAIL])
+    bounds = compute_spatial_bounds(point_groups)
 
     return {
         "frame": {
@@ -3152,6 +2911,7 @@ def _build_spatial_payload(state):
             "origin_lon": round(float(origin_lon), 7),
             "x_axis": "east",
             "y_axis": "north",
+            "source": "sim_vehicle_position" if os.environ.get("USV_SIM") == "1" else "telemetry_latlon",
         },
         "boat": boat,
         "trail": {
@@ -3159,6 +2919,11 @@ def _build_spatial_payload(state):
             "max_points": int(SPATIAL_TRAIL.maxlen or 0),
         },
         "waypoints": wps,
+        "course": {
+            "static_features": course_features,
+            "source": "sim/configs/spatial_course_layout.json" if os.environ.get("USV_SIM") == "1" else "",
+        },
+        "bounds": bounds,
         "lidar": {
             "points": lidar_points,
             "frame": lidar_frame,
@@ -3166,6 +2931,9 @@ def _build_spatial_payload(state):
             "ts_monotonic": state.get("ts_monotonic"),
             "age_s": age_s,
             "source": lidar_source,
+            "stale": bool(lidar_stale),
+            "quality_ready": bool(state.get("lidar_quality_ready", False)),
+            "frame_status": str(state.get("lidar_frame_status", "") or ""),
         },
     }
 
@@ -3284,6 +3052,9 @@ def get_data():
         out['error_counters'][f"telemetry_{k}"] = v
     out['manual_lock_reason'] = out.get('Manual_Lock_Reason', state.get('manual_lock_reason', '--'))
     out['camera_ready'] = state.get('camera_ready', False)
+    out['camera_status_age_s'] = state.get('camera_status_age_s')
+    out['camera_status_mtime_age_s'] = state.get('camera_status_mtime_age_s')
+    out['camera_status_stale'] = bool(state.get('camera_status_stale', False))
     out['lidar_ready'] = state.get('lidar_ready', False)
     out['nav_position_source'] = state.get('nav_position_source', '--')
     out['nav_heading_source'] = state.get('nav_heading_source', '--')
@@ -3298,6 +3069,10 @@ def get_data():
     out['nav_leg_start_lon'] = state.get('nav_leg_start_lon')
     out['closest_waypoint_distance_m'] = state.get('closest_waypoint_distance_m')
     out['nav_arrival_phase'] = state.get('nav_arrival_phase', '--')
+    out['nav_align_mode'] = state.get('nav_align_mode', '--')
+    out['nav_align_phase'] = state.get('nav_align_phase', '--')
+    out['guided_vx_north_mps'] = state.get('guided_vx_north_mps', 0.0)
+    out['guided_vy_east_mps'] = state.get('guided_vy_east_mps', 0.0)
     out['avoidance_active'] = bool(state.get('avoidance_active', False))
     out['avoidance_source'] = state.get('avoidance_source', '--')
     out['escape_side'] = state.get('escape_side', '--')

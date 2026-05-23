@@ -101,6 +101,8 @@ Parkur1'de görev noktaları takip edilir. Yarış modunda bu bölüm Pixhawk AU
 
 Parkur2'de kamera ve lidar kullanılır. Kamera kapı/duba algısı için, lidar ise yakın çevre ve engel farkındalığı için kullanılır. Raspberry Pi üst seviye hedef üretir, Pixhawk araç kontrolünü uygular.
 
+Waypoint geçişlerinde ana navigasyon referansı her zaman bir sonraki waypoint bearing'idir. Araç yeni waypoint bacağına geçtiğinde önce hedef yöne dönme davranışı doğrulanır; çok uzak, tek karelik veya kararsız kamera/lidar algıları bu yönelimi bastıramaz. Yakın ve doğrulanmış engel varsa kaçınma komutu ana heading üzerine sınırlı bir düzeltme olarak uygulanır.
+
 ### Parkur3
 
 Parkur3'te kamera ile hedef rengi ve hedef konumu takip edilir. Hedefe yaklaşma ve angajman durumu araç üzerindeki yazılımlar tarafından değerlendirilir. Yanlış hedef algısı güvenlik amacıyla görev durumuna yansıtılır.
@@ -128,6 +130,8 @@ Sistemde kontrol sahipliği şu şekilde ayrılır:
 
 Manuel RC ve E-stop her zaman otonomiden önceliklidir. Fiziksel güç kesme zinciri yazılımsal durdurmanın yerine geçmez; motor gücü gerektiğinde fiziksel olarak kesilir.
 
+Heading kontrol zinciri loglarla izlenebilir tutulur: Raspberry Pi `SET_POSITION_TARGET_GLOBAL_INT` ile hedef hız/yön gönderir, ArduPilot bu hedefi servo/PWM çıkışına çevirir, simülasyonda `sitl_gazebo_bridge.py` bu servo çıkışını Gazebo hareketine taşır. Bu zincirde `heading_error`, `target_bearing`, `SERVO_OUTPUT_RAW`, sol/sağ motor eşleşmesi ve gözlenen yaw rate aynı zaman penceresinde karşılaştırılır. WP1 -> WP2 geçişi gibi ters dönüş riski olan durumlarda başarı kriteri, en kısa heading hatası işareti ile gözlenen yaw rate işaretinin tutarlı olmasıdır.
+
 ---
 
 ## 8. Veri Kayıtları
@@ -141,6 +145,7 @@ Görev sırasında aşağıdaki veriler kaydedilir:
 | Lidar/harita çıktısı | Yerel engel/harita görselleştirmesi |
 | Servis logları | `cam`, `telemetry`, `lidar_map`, `usv_main` ve simülasyon servis logları |
 | Mission state | Aktif görev, waypoint, parkur, sağlık ve güvenlik durumu |
+| Kontrol korelasyon kaydı | GUIDED setpoint, ArduPilot servo çıkışı, motor eşleşmesi, yaw rate ve wrong-turn tanısı |
 
 Kayıtlar yerel dosya sisteminde tutulur. Yarış modunda bu kayıt sistemi görüntü aktarımı amacıyla kullanılmaz.
 

@@ -37,6 +37,8 @@ except (TypeError, ValueError):
     SIM_GZ_YAW_SIGN = -1.0
 LEFT_MOTOR_REVERSED = os.environ.get("SIM_GZ_LEFT_MOTOR_REVERSED", "0").lower() in ("1", "true", "yes")
 RIGHT_MOTOR_REVERSED = os.environ.get("SIM_GZ_RIGHT_MOTOR_REVERSED", "0").lower() in ("1", "true", "yes")
+SIM_GZ_SERVO1_MOTOR = os.environ.get("SIM_GZ_SERVO1_MOTOR", "left").strip().lower()
+SIM_GZ_SERVO3_MOTOR = os.environ.get("SIM_GZ_SERVO3_MOTOR", "right").strip().lower()
 USV_MODE = os.environ.get("USV_MODE", "test").strip().lower()
 ALLOW_MOTOR_COMMAND_JSON_OVERRIDE = (
     os.environ.get("SIM_GZ_ALLOW_MOTOR_COMMAND_JSON", "0").lower() in ("1", "true", "yes")
@@ -77,6 +79,12 @@ def _normalized_motor_outputs(left_pwm, right_pwm):
     left_n = max(-1.0, min(1.0, left_n))
     right_n = max(-1.0, min(1.0, right_n))
     return left_n, right_n
+
+def _servo_outputs_to_left_right(ch1_pwm, ch3_pwm):
+    """Map ArduPilot SERVO1/SERVO3 outputs into physical left/right thrusters."""
+    if SIM_GZ_SERVO1_MOTOR == "right" and SIM_GZ_SERVO3_MOTOR == "left":
+        return float(ch3_pwm), float(ch1_pwm)
+    return float(ch1_pwm), float(ch3_pwm)
 
 def _wrap_180(deg):
     return ((float(deg) + 180.0) % 360.0) - 180.0
@@ -155,6 +163,26 @@ class SitlGazeboBridge:
         self._msg_count_odom = 0
         self._neutral_pwm_since = None
         self._last_neutral_pwm_diag = 0.0
+        log.info(
+            "[SIM-MOTOR] Servo mapping: SERVO1/CH1=%s SERVO3/CH3=%s yaw_sign=%.1f left_rev=%s right_rev=%s "
+            "(override with SIM_GZ_SERVO1_MOTOR/SIM_GZ_SERVO3_MOTOR/SIM_GZ_YAW_SIGN)",
+            SIM_GZ_SERVO1_MOTOR,
+            SIM_GZ_SERVO3_MOTOR,
+            SIM_GZ_YAW_SIGN,
+            LEFT_MOTOR_REVERSED,
+            RIGHT_MOTOR_REVERSED,
+        )
+        log_jsonl(
+            "sitl_gazebo_bridge",
+            True,
+            event="sim_motor_contract",
+            servo1_motor=str(SIM_GZ_SERVO1_MOTOR),
+            servo3_motor=str(SIM_GZ_SERVO3_MOTOR),
+            yaw_sign=float(SIM_GZ_YAW_SIGN),
+            left_motor_reversed=bool(LEFT_MOTOR_REVERSED),
+            right_motor_reversed=bool(RIGHT_MOTOR_REVERSED),
+            yaw_contract="left_norm_minus_right_norm_positive_increases_nav_heading",
+        )
 
         # Parse SIM_HOME
         try:
@@ -339,7 +367,7 @@ class SitlGazeboBridge:
         #
         # motor_command.json is a visible bench-test escape hatch only. It is
         # off by default and forced off in race mode.
-        c1, c2 = c1_sitl, c2_sitl
+        c1, c2 = _servo_outputs_to_left_right(c1_sitl, c2_sitl)
         motor_source = "sitl_servo"
         try:
             mc_path = Path(CONTROL_DIR) / "motor_command.json"
@@ -451,8 +479,12 @@ class SitlGazeboBridge:
                     True,
                     event="sim_motor_yaw_diagnostic",
                     motor_source=str(motor_source),
-                    ch1_pwm=round(float(c1), 1),
-                    ch3_pwm=round(float(c2), 1),
+                    ch1_pwm=round(float(c1_sitl), 1),
+                    ch3_pwm=round(float(c2_sitl), 1),
+                    left_pwm=round(float(c1), 1),
+                    right_pwm=round(float(c2), 1),
+                    servo1_motor=str(SIM_GZ_SERVO1_MOTOR),
+                    servo3_motor=str(SIM_GZ_SERVO3_MOTOR),
                     left_norm=round(float(left_n), 4),
                     right_norm=round(float(right_n), 4),
                     yaw_cmd_norm=round(float(self.last_yaw_cmd_norm), 4),
@@ -523,7 +555,8 @@ class SitlGazeboBridge:
                     observed_yaw_rate_dps = self.observed_yaw_rate_dps
                     yaw_cmd_norm = self.last_yaw_cmd_norm
                 
-                left_n, right_n = _normalized_motor_outputs(ch1, ch2)
+                left_pwm, right_pwm = _servo_outputs_to_left_right(ch1, ch2)
+                left_n, right_n = _normalized_motor_outputs(left_pwm, right_pwm)
                 motor_norm = max(-1.0, min(1.0, (left_n + right_n) / 2.0))
                 POS_FILE.parent.mkdir(parents=True, exist_ok=True)
                 payload = {
@@ -536,6 +569,8 @@ class SitlGazeboBridge:
                     "observed_yaw_rate_dps": observed_yaw_rate_dps,
                     "motor_ch1_pwm": ch1,
                     "motor_ch2_pwm": ch2,
+                    "motor_left_pwm": left_pwm,
+                    "motor_right_pwm": right_pwm,
                     "motor_left_norm": left_n,
                     "motor_right_norm": right_n,
                     "motor_normalized": motor_norm,

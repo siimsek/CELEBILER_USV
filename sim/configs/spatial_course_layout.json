@@ -1,0 +1,397 @@
+{
+  "source": "sim/worlds/water_world.sdf",
+  "frame": "enu_local",
+  "feature_count": 65,
+  "features": [
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_01",
+      "x_m": -4.0,
+      "y_m": 0.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_02",
+      "x_m": -3.29,
+      "y_m": 1.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_03",
+      "x_m": -2.57,
+      "y_m": 2.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_04",
+      "x_m": -1.86,
+      "y_m": 3.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_05",
+      "x_m": -2.21,
+      "y_m": 4.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_06",
+      "x_m": -3.64,
+      "y_m": 5.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_07",
+      "x_m": -5.07,
+      "y_m": 6.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_08",
+      "x_m": -6.5,
+      "y_m": 7.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_09",
+      "x_m": -5.07,
+      "y_m": 8.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_10",
+      "x_m": -3.64,
+      "y_m": 9.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_11",
+      "x_m": -2.21,
+      "y_m": 10.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_12",
+      "x_m": -1.86,
+      "y_m": 11.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_13",
+      "x_m": -2.57,
+      "y_m": 12.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_14",
+      "x_m": -3.29,
+      "y_m": 13.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_15",
+      "x_m": -4.0,
+      "y_m": 14.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_16",
+      "x_m": 4.0,
+      "y_m": 0.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_17",
+      "x_m": 4.71,
+      "y_m": 1.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_18",
+      "x_m": 5.43,
+      "y_m": 2.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_19",
+      "x_m": 6.14,
+      "y_m": 3.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_20",
+      "x_m": 5.79,
+      "y_m": 4.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_21",
+      "x_m": 4.36,
+      "y_m": 5.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_22",
+      "x_m": 2.93,
+      "y_m": 6.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_23",
+      "x_m": 1.5,
+      "y_m": 7.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_24",
+      "x_m": 2.93,
+      "y_m": 8.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_25",
+      "x_m": 4.36,
+      "y_m": 9.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_26",
+      "x_m": 5.79,
+      "y_m": 10.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_27",
+      "x_m": 6.14,
+      "y_m": 11.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_28",
+      "x_m": 5.43,
+      "y_m": 12.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_29",
+      "x_m": 4.71,
+      "y_m": 13.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_30",
+      "x_m": 4.0,
+      "y_m": 14.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_67",
+      "x_m": -5.0,
+      "y_m": 14.8
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_68",
+      "x_m": 5.0,
+      "y_m": 14.8
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_69",
+      "x_m": -5.0,
+      "y_m": 16.6
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_70",
+      "x_m": 5.0,
+      "y_m": 16.6
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_71",
+      "x_m": -5.0,
+      "y_m": 18.4
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_72",
+      "x_m": 5.0,
+      "y_m": 18.4
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_73",
+      "x_m": -5.0,
+      "y_m": 20.2
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_74",
+      "x_m": 5.0,
+      "y_m": 20.2
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_75",
+      "x_m": -5.0,
+      "y_m": 22.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_76",
+      "x_m": 5.0,
+      "y_m": 22.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_77",
+      "x_m": -5.0,
+      "y_m": 24.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_78",
+      "x_m": 5.0,
+      "y_m": 24.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_79",
+      "x_m": -5.2,
+      "y_m": 27.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_80",
+      "x_m": 5.2,
+      "y_m": 27.0
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_01",
+      "x_m": 3.2,
+      "y_m": 15.5
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_02",
+      "x_m": -2.5,
+      "y_m": 15.8
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_03",
+      "x_m": -4.0,
+      "y_m": 16.4
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_04",
+      "x_m": -0.0,
+      "y_m": 16.9
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_05",
+      "x_m": 4.5,
+      "y_m": 17.3
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_06",
+      "x_m": -3.5,
+      "y_m": 18.0
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_07",
+      "x_m": 2.5,
+      "y_m": 18.6
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_08",
+      "x_m": -4.5,
+      "y_m": 19.2
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_09",
+      "x_m": 1.0,
+      "y_m": 19.9
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_10",
+      "x_m": 4.0,
+      "y_m": 20.5
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_11",
+      "x_m": -2.0,
+      "y_m": 21.2
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_12",
+      "x_m": 3.5,
+      "y_m": 22.0
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_13",
+      "x_m": -4.0,
+      "y_m": 23.0
+    },
+    {
+      "type": "obstacle_yellow",
+      "name": "obstacle_buoy_yellow_14",
+      "x_m": 0.8,
+      "y_m": 24.0
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_81",
+      "x_m": -5.0,
+      "y_m": 28.5
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_82",
+      "x_m": 5.0,
+      "y_m": 28.5
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_83",
+      "x_m": -5.5,
+      "y_m": 31.2
+    },
+    {
+      "type": "boundary_orange",
+      "name": "boundary_buoy_orange_84",
+      "x_m": 5.5,
+      "y_m": 31.2
+    },
+    {
+      "type": "target_buoy",
+      "name": "target_buoy_red",
+      "x_m": -3.0,
+      "y_m": 29.8
+    },
+    {
+      "type": "target_buoy",
+      "name": "target_buoy_green",
+      "x_m": -0.0,
+      "y_m": 29.8
+    },
+    {
+      "type": "target_buoy",
+      "name": "target_buoy_black",
+      "x_m": 3.0,
+      "y_m": 29.8
+    }
+  ]
+}

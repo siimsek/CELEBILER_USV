@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import math
 
 from motor_controller import mix_twin_thrusters
-from navigation import heading_first_waypoint_request
+from navigation import clamp_heading_error, heading_first_waypoint_request
 
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
@@ -104,8 +104,8 @@ def compute_nav_decision(
     Waypoint coordinates are always the nominal target. Vision/gate inputs are
     retained for compatibility but do not steer the boat in NAV.
     """
-    # ±85: WP bearing + cross-track (Stanley) birlikte 80'i asabiliyor; ±80 kesinti lateral düzeltmeyi doyurganlıkta yiyordu
-    waypoint_heading = clamp(float(gps_heading_error_deg), -85.0, 85.0)
+    # Keep large waypoint-turn sign alive; final actuator shaping will cap speed/yaw.
+    waypoint_heading = clamp_heading_error(float(gps_heading_error_deg))
     nominal_heading = waypoint_heading
     mode = "nav_waypoint_track"
     reason = "gps_waypoint"
@@ -126,7 +126,7 @@ def compute_nav_decision(
         approach_speed_mps=min(float(base_speed_mps), float(failsafe_slow_mps)),
         slow_down_radius_m=8.0,
     )
-    heading_error = clamp(float(waypoint_request.heading_error_deg), -85.0, 85.0)
+    heading_error = clamp_heading_error(float(waypoint_request.heading_error_deg))
     speed = max(0.0, float(waypoint_request.speed_mps))
     if waypoint_request.phase == "TURN_TO_WAYPOINT":
         mode = "nav_turn_to_waypoint"

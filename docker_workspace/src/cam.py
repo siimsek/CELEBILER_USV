@@ -234,6 +234,7 @@ class VideoCamera:
         self._target_state_mtime = 0.0
         self._frame_lock = threading.Lock()
         self._process_lock = threading.Lock()
+        self._writer_lock = threading.Lock()
         self._frame_seq = 0
         self._last_processed_frame_ts = 0.0
         self._last_processed_seq = 0
@@ -352,31 +353,47 @@ class VideoCamera:
                         # Yeni video dosyası oluştur (timestamp ile)
                         ts = time.strftime("%Y%m%d_%H%M%S")
                         new_file = f"{VIDEO_DIR}/mission_{ts}.mp4"
-                        if self.writer:
-                            self.writer.release()
+                        with self._writer_lock:
+                            if self.writer:
+                                self.writer.release()
+                                self.writer = None
                         try:
                             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                            self.writer = cv2.VideoWriter(new_file, fourcc, 10.0, (1280, 720))
-                            if self.writer.isOpened():
+                            new_writer = cv2.VideoWriter(new_file, fourcc, 10.0, (1280, 720))
+                            if new_writer.isOpened():
+                                with self._writer_lock:
+                                    self.writer = new_writer
+                                    self._last_writer_seq = 0
+                                    self._last_writer_frame_ts = 0.0
                                 print(f"[REC] [CAM] Recording başladı: {new_file}")
                                 self.status["recording"] = True
                                 self.status["recording_file"] = new_file
                             else:
+                                try:
+                                    new_writer.release()
+                                except Exception:
+                                    pass
                                 self._recording_active = False
                                 self.status["recording"] = False
+                                self.status["recording_file"] = None
+                                self._bump_error("recording_open_error", "[WARN] [CAM] Recording writer acilamadi")
                         except Exception as e:
                             print(f"[WARN] [CAM] Recording başlama hatası: {e}")
                             self._recording_active = False
                             self.status["recording"] = False
+                            self.status["recording_file"] = None
+                            self._bump_error("recording_open_error")
                     
                     # Mission durduysa recording durdur
                     elif not mission_active and self._recording_active:
                         self._recording_active = False
-                        if self.writer:
-                            self.writer.release()
-                            self.writer = None
+                        with self._writer_lock:
+                            if self.writer:
+                                self.writer.release()
+                                self.writer = None
                             print("[REC] [CAM] Recording durduruldu")
                         self.status["recording"] = False
+                        self.status["recording_file"] = None
                         
                     self._last_mission_state = mission_state
         except Exception as e:
@@ -464,9 +481,9 @@ class VideoCamera:
         )
         return profile
 
-    def start(self):
+    def start(self, processing_loop=True):
         threading.Thread(target=self.update, daemon=True).start()
-        if not RACE_MODE:
+        if processing_loop and not RACE_MODE:
             threading.Thread(target=self.processing_loop, daemon=True).start()
         return self
 
@@ -648,15 +665,21 @@ class VideoCamera:
                     self._write_status()
                 else:
                     processed = self._process_latest_frame()
+                    self.status["ts_monotonic"] = round(time.monotonic(), 3)
+                    self.status["frame_age_s"] = (
+                        999.0 if self.last_frame_ts <= 0.0 else round(max(0.0, time.monotonic() - self.last_frame_ts), 3)
+                    )
+                    self._write_status()
                     if (
                         processed is not None
                         and self._recording_active
-                        and self.writer
                         and self._last_processed_seq > self._last_writer_seq
                     ):
-                        self.writer.write(processed)
-                        self._last_writer_frame_ts = self._last_processed_frame_ts
-                        self._last_writer_seq = self._last_processed_seq
+                        with self._writer_lock:
+                            if self.writer:
+                                self.writer.write(processed)
+                                self._last_writer_frame_ts = self._last_processed_frame_ts
+                                self._last_writer_seq = self._last_processed_seq
             except Exception as exc:
                 self._warn_throttled("process_loop", f"[WARN] [CAM] Isleme dongusu hatasi: {exc}")
             now = time.monotonic()
@@ -1096,8 +1119,10 @@ class VideoCamera:
 
     def close(self):
         self.stopped = True
-        if self.writer:
-            self.writer.release()
+        with self._writer_lock:
+            if self.writer:
+                self.writer.release()
+                self.writer = None
 
 
 app = Flask(__name__)
@@ -1126,15 +1151,23 @@ def run_headless_processing_loop():
 
         if camera_stream._frame_seq > 0:
             processed = camera_stream._process_latest_frame()
+            camera_stream.status["ts_monotonic"] = round(time.monotonic(), 3)
+            camera_stream.status["frame_age_s"] = (
+                999.0
+                if camera_stream.last_frame_ts <= 0.0
+                else round(max(0.0, time.monotonic() - camera_stream.last_frame_ts), 3)
+            )
+            camera_stream._write_status()
             if (
                 processed is not None
                 and camera_stream._recording_active
-                and camera_stream.writer
                 and camera_stream._last_processed_seq > camera_stream._last_writer_seq
             ):
-                camera_stream.writer.write(processed)
-                camera_stream._last_writer_frame_ts = camera_stream._last_processed_frame_ts
-                camera_stream._last_writer_seq = camera_stream._last_processed_seq
+                with camera_stream._writer_lock:
+                    if camera_stream.writer:
+                        camera_stream.writer.write(processed)
+                        camera_stream._last_writer_frame_ts = camera_stream._last_processed_frame_ts
+                        camera_stream._last_writer_seq = camera_stream._last_processed_seq
         else:
             camera_stream.status["ts_monotonic"] = round(time.monotonic(), 3)
             camera_stream.status["frame_age_s"] = 999.0
@@ -1183,7 +1216,7 @@ def _write_latest_jpeg():
 
 
 if __name__ == "__main__":
-    camera_stream = VideoCamera().start()
+    camera_stream = VideoCamera().start(processing_loop=False)
 
     try:
         print("[CAM] [cam.py] Headless processing only (no webserver)")

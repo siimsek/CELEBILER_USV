@@ -10,7 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
-from compliance_profile import NAV_ALIGN_HEADING_DONE_DEG, NAV_ALIGN_CREEP_SPEED_MPS, R_WP_M
+from compliance_profile import (
+    NAV_ALIGN_HEADING_DONE_DEG,
+    NAV_ALIGN_CREEP_SPEED_MPS,
+    NAV_HEADING_MAX_ERROR_DEG,
+    R_WP_M,
+)
 
 
 EARTH_RADIUS_M = 6_371_000.0
@@ -22,6 +27,19 @@ def clamp(value: float, min_value: float, max_value: float) -> float:
 
 def wrap_180(deg: float) -> float:
     return ((float(deg) + 180.0) % 360.0) - 180.0
+
+
+def clamp_heading_error(deg: float, max_abs_deg: float = NAV_HEADING_MAX_ERROR_DEG) -> float:
+    """Wrap heading error and preserve large waypoint-turn sign until the final command cap."""
+    limit = max(1.0, min(179.0, abs(float(max_abs_deg))))
+    return clamp(wrap_180(deg), -limit, limit)
+
+
+def compass_heading_to_ne_velocity(speed_mps: float, heading_deg: float) -> tuple[float, float]:
+    """Convert compass heading (0=N, 90=E) into MAVLink global N/E velocity components."""
+    speed = max(0.0, float(speed_mps))
+    heading_rad = math.radians(float(heading_deg) % 360.0)
+    return float(speed * math.cos(heading_rad)), float(speed * math.sin(heading_rad))
 
 
 def distance_bearing_m(
@@ -70,7 +88,7 @@ def heading_first_waypoint_request(
     creep_speed_mps: float = NAV_ALIGN_CREEP_SPEED_MPS,
 ) -> WaypointRequest:
     distance = max(0.0, float(distance_m))
-    heading_error = wrap_180(heading_error_deg)
+    heading_error = clamp_heading_error(heading_error_deg)
     heading_abs = abs(heading_error)
 
     if distance <= float(acceptance_radius_m):

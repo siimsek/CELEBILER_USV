@@ -92,9 +92,15 @@ NAV_CROSS_TRACK_K = 0.45
 NAV_CROSS_TRACK_L1_MIN_M = 2.8
 NAV_CROSS_TRACK_L1_MAX_M = 15.0
 NAV_CROSS_TRACK_CORR_CAP_DEG = 22.0
+NAV_CROSS_TRACK_ALIGN_MIN_M = 1.0
+NAV_CROSS_TRACK_ALIGN_CAP_DEG = 12.0
 NAV_CROSS_TRACK_MIN_LEG_M = 3.75  # max(R_WP_M * 1.5, 3.0) ile _waypoint_leg_progress ile uyumlu
 # NAV iki faz (her WP bacaginda): (1) yalnız yönelt — |err| <= HEADING_DONE olmadan gitme yok; (2) hat + ileri hız
 NAV_ALIGN_HEADING_DONE_DEG = float(os.environ.get("USV_SIM_ALIGN_HEADING_DEG", "8.0"))
+NAV_ALIGN_ACQUIRE_DEG = float(os.environ.get("NAV_ALIGN_ACQUIRE_DEG", str(NAV_ALIGN_HEADING_DONE_DEG)))
+NAV_ALIGN_REACQUIRE_DEG = float(os.environ.get("NAV_ALIGN_REACQUIRE_DEG", "14.0"))
+NAV_ALIGN_TURN_IMMUNITY_S = float(os.environ.get("NAV_ALIGN_TURN_IMMUNITY_S", "5.0"))
+NAV_HEADING_MAX_ERROR_DEG = float(os.environ.get("NAV_HEADING_MAX_ERROR_DEG", "140.0"))
 # Geriye uyumluluk (eski ad); geçişler NAV_ALIGN_HEADING_DONE_DEG kullanır
 NAV_ALIGN_ENTER_ADVANCE_DEG = 9.5
 NAV_ALIGN_PIVOT_UNTIL_DEG = 11.0

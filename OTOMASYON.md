@@ -221,10 +221,12 @@ Karar onceligi:
 
 1. E-stop, RC override ve fiziksel emniyet zinciri
 2. Health gate ve sensor freshness
-3. Lidar carpisma onleme
-4. Kamera kapi/sinir/engel/hedef algisi
-5. Waypoint veya angajman hedefi
+3. Waypoint veya angajman hedefi ana navigasyon referansi
+4. Yakin, taze ve dogrulanmis lidar/camera tehdidi varsa bounded avoidance duzeltmesi
+5. Kamera kapi/sinir/engel/hedef algisi yalniz gorev referansini destekleyen sinirli bias
 6. Hiz profili ve yumusaklama
+
+Waypoint bacagi yeni degistiginde veya buyuk heading reacquire gerekiyorsa arac once hedef bearing'e yonelir. Bu pencerede map residue, tek frame kamera sinir/hedef algisi veya uzak engel waypoint yonelimini bastiramaz. Avoidance yalniz yakin ve dogrulanmis tehditte devreye girer; devreye girdiginde bile heading komutu sinirli duzeltme olarak kalir ve ters yone kilitlenme davranisi kabul edilmez.
 
 Kamera cikti sozlesmesi (`camera_status.json`):
 
@@ -364,6 +366,7 @@ Kabul kriterleri:
 - [x] Uyum betikleri basarili sonuc verir.
 - [x] Race modda PWM sahipligi Pixhawk/ArduPilot katmanindadir; Pi RC override ana otonomi yolu degildir.
 - [ ] Gercek tekne olculeriyle sim hareket/heading/PWM kalibrasyonu manuel su testiyle dogrulanir.
+- [ ] WP1 -> WP2 gibi waypoint gecislerinde `target_bearing`, `heading_error`, `SET_POSITION_TARGET_GLOBAL_INT`, `SERVO_OUTPUT_RAW`, `yaw_cmd_norm` ve `observed_yaw_rate_dps` ayni zaman penceresinde tutarli isaret verir.
 
 ## 11. Acik Uyum Riskleri
 
@@ -373,3 +376,4 @@ Kabul kriterleri:
 - [x] Hedef temas sensoru mevcut degilse P3 temas dogrulamasi kamera alani, yakinlik ve ani yavaslama gibi dolayli metriklere dayanir; bu karar loglarda acikca izlenebilir olmalidir.
 - [ ] Temas sensoru olmadigi icin P3 yazilim "tamam" karari fiziksel temas yerine dolayli kanitlara dayanir; saha testinde hedefe gercek temas kamerayla ve telemetriyle manuel dogrulanmalidir.
 - [ ] Gercek tekne kütlesi, trim, itici araligi, motor tersligi ve ArduPilot servo fonksiyonlari simle birebir kalibre edilmezse heading/PWM davranisi yaris sirasinda sapabilir.
+- [ ] `SERVO1_FUNCTION=74` / `SERVO3_FUNCTION=73`, `SIM_GZ_SERVO1_MOTOR`, `SIM_GZ_SERVO3_MOTOR` ve `SIM_GZ_YAW_SIGN` su ustu ve sim manuel hareket testiyle ayni yonde dogrulanmadan ters donus riski tamamen kapanmis sayilmaz.
