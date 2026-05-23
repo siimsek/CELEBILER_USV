@@ -101,15 +101,25 @@ def compute_nav_decision(
     """
     Unified navigation decision for all waypoints.
 
-    Waypoint coordinates are always the nominal target. Vision/gate inputs are
-    retained for compatibility but do not steer the boat in NAV.
+    Waypoint coordinates are the primary objective. Gate vision applies a bounded
+    assist around the waypoint heading. Lidar avoidance blends in only when a
+    front threat is within the warn band; emergency stop distance keeps full avoid.
     """
     # Keep large waypoint-turn sign alive; final actuator shaping will cap speed/yaw.
     waypoint_heading = clamp_heading_error(float(gps_heading_error_deg))
     nominal_heading = waypoint_heading
+    gate_assist_bias = 0.0
     mode = "nav_waypoint_track"
     reason = "gps_waypoint"
     limit_reason = "nominal"
+
+    gate_ready = bool(gate_detected and gate_stable_s >= gate_stable_threshold_s)
+    if gate_ready:
+        gate_delta = clamp(float(gate_bearing_deg) - waypoint_heading, -35.0, 35.0)
+        gate_assist_bias = clamp(gate_delta * 0.4, -12.0, 12.0)
+        nominal_heading = clamp_heading_error(waypoint_heading + gate_assist_bias)
+        mode = "nav_waypoint_track_gate_assist"
+        reason = "waypoint_first_gate_assist"
 
     obstacle_level = 0.0
     if front_distance_m < warn_distance_m:
@@ -138,25 +148,30 @@ def compute_nav_decision(
         limit_reason = "waypoint_reached"
 
     if front_distance_m < stop_distance_m:
-        # Emergency: 100% avoidance
         heading_error = clamp(float(avoidance_bias_deg), -95.0, 95.0)
         speed = min(speed, float(failsafe_slow_mps))
         mode = "nav_avoid"
         reason = "lidar_emergency"
         limit_reason = "failsafe_slow"
     elif front_distance_m < warn_distance_m:
-        # Warning: çok yakında görev bearing'i neredeyse kapat — dubanın etrafından dönüş
-        if obstacle_level >= 0.88:
-            heading_error = clamp(float(avoidance_bias_deg), -95.0, 95.0)
+        heading_error = _blend_with_avoidance(nominal_heading, avoidance_bias_deg, obstacle_level)
+        speed = min(
+            speed,
+            max(float(failsafe_slow_mps), float(base_speed_mps) * (1.0 - (0.35 * obstacle_level))),
+        )
+        if gate_ready:
+            mode = "nav_waypoint_track_gate_assist"
+            reason = "waypoint_first_warn_blend"
         else:
-            heading_error = _blend_with_avoidance(nominal_heading, avoidance_bias_deg, obstacle_level)
-        speed = min(speed, max(float(failsafe_slow_mps), float(base_speed_mps) * 0.85))
-        mode = "nav_avoid"
-        reason = "lidar_warning"
-        limit_reason = "warn_speed_cap"
+            mode = "nav_waypoint_track"
+            reason = "waypoint_first_warn_blend"
+        limit_reason = "warn_blend"
     else:
-        # No obstacle, no gate: pure waypoint bearing
-        heading_error = float(waypoint_heading)
+        # No obstacle: bounded gate assist if available, otherwise pure waypoint bearing
+        heading_error = float(nominal_heading)
+        if gate_ready:
+            speed = min(speed, max(float(failsafe_slow_mps), min(float(base_speed_mps), 0.9)))
+            limit_reason = "gate_assist_cap"
 
     if center_distance_m < stop_distance_m and speed > float(failsafe_slow_mps):
         speed = float(failsafe_slow_mps)
@@ -170,7 +185,7 @@ def compute_nav_decision(
         avoidance_bias_deg=float(avoidance_bias_deg),
         cross_track_error_m=_cross_track_from_heading(distance_m, heading_error),
         nominal_heading_deg=float(nominal_heading),
-        gate_assist_bias_deg=0.0,
+        gate_assist_bias_deg=float(gate_assist_bias),
         limit_reason=limit_reason,
     )
 

@@ -18,6 +18,8 @@ CHECKS = (
     ROOT / "host_scripts" / "check_compliance_static.py",
     ROOT / "host_scripts" / "check_compliance_behavior.py",
     ROOT / "host_scripts" / "check_compliance_race.py",
+    ROOT / "host_scripts" / "check_mission_profile_unit.py",
+    ROOT / "host_scripts" / "check_race_readiness_score.py",
 )
 
 

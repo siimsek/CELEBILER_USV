@@ -14,6 +14,7 @@ from compliance_profile import (
     NAV_ALIGN_HEADING_DONE_DEG,
     NAV_ALIGN_CREEP_SPEED_MPS,
     NAV_HEADING_MAX_ERROR_DEG,
+    NAV_STRICT_HEADING_FIRST,
     R_WP_M,
 )
 
@@ -101,8 +102,18 @@ def heading_first_waypoint_request(
         )
 
     if heading_abs > float(heading_threshold_deg):
-        # Creep forward slowly while turning instead of full stop (prevents sim/real hang)
-        creep = max(0.0, min(float(creep_speed_mps), float(approach_speed_mps) * 0.5))
+        if bool(NAV_STRICT_HEADING_FIRST):
+            creep = max(0.0, min(float(creep_speed_mps), float(approach_speed_mps) * 0.5))
+            if creep <= 0.0:
+                return WaypointRequest(
+                    speed_mps=0.0,
+                    heading_error_deg=heading_error,
+                    phase="TURN_TO_WAYPOINT",
+                    reached=False,
+                    reason="heading_first_yaw_only",
+                )
+        else:
+            creep = max(0.0, min(float(creep_speed_mps), float(approach_speed_mps) * 0.5))
         return WaypointRequest(
             speed_mps=float(creep),
             heading_error_deg=heading_error,

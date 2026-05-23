@@ -11,6 +11,8 @@ API/akis davranislarini koddan dogrular:
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import os
 from pathlib import Path
 
@@ -57,6 +59,9 @@ def main() -> int:
         "p2_guidance_order_logged": has(usv, 'self._set_guidance_source("p2_avoid")') and has(usv, 'self._set_guidance_source("p2_gate")') and has(usv, 'self._set_guidance_source("p2_waypoint_fallback")'),
         "p3_wrong_target_avoidance_logged": has(usv, "P3_WRONG_TARGET_AVOID") and has(usv, "wrong_target_contact_risk") and has(cam, "wrong_target_detected"),
         "p3_contact_confirmation_exported": has(usv, "p3_contact_confirmation_source") and has(usv, '"p3_contact_confirmation_source":'),
+        "p3_target_lock_verified_before_engage": has(usv, "def _validate_p3_target_lock") and has(usv, "p3_target_color_lock_rejected") and has(usv, "target_color_changed_after_start"),
+        "p3_contact_requires_multi_cue_quorum": has(usv, "def _p3_contact_evidence") and has(usv, "primary_source_count") and has(usv, "P3_CONTACT_LATCH") and has(usv, "len(primary_sources) >= 2"),
+        "p3_wrong_target_blocks_contact_latch": has(usv, 'if not evidence["wrong_target_contact_risk"]') and has(usv, "wrong_target_area_norm") and has(usv, "wrong_target_bearing_deg"),
         "startup_wait_is_probe_based": has(sim_stack, "probe_camera_endpoint") and not has(sim_stack, "sleep 12"),
         "shared_sim_nav_source_used": has(usv, "load_sim_nav_state(control_dir=CONTROL_DIR)") and has(telemetry, "load_sim_nav_state(control_dir=CONTROL_DIR)"),
         "sim_forced_sensor_ready_removed": not has(usv, "self.camera_ready = True") and not has(usv, "self.lidar_ready = True"),
@@ -69,6 +74,13 @@ def main() -> int:
         "startup_external_gate_removed": removed_decision_token not in sim_stack.lower(),
         "telemetry_exposes_mp_gcs_heartbeat_age": has(telemetry, "out['mission_planner_gcs_age_s']"),
     }
+
+    unit_script = ROOT / "host_scripts" / "check_mission_profile_unit.py"
+    unit_ok = False
+    if unit_script.is_file():
+        unit_result = subprocess.run([sys.executable, str(unit_script)], cwd=str(ROOT), check=False)
+        unit_ok = unit_result.returncode == 0
+    checks["mission_profile_unit_tests_pass"] = unit_ok
 
     passed = sum(1 for ok in checks.values() if ok)
     total = len(checks)

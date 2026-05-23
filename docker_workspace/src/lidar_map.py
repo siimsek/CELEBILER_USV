@@ -22,6 +22,13 @@ redirect_std_streams(_lidar_dbg)
 
 # --- YARIŞMA MODU GUARD (IDA 3.7 - görüntü aktarımı yasak) ---
 if USV_MODE == USV_MODE_RACE:
+    log_jsonl(
+        "lidar_map",
+        True,
+        event="race_disabled",
+        reason="map_stream_forbidden",
+        usv_mode=str(USV_MODE),
+    )
     print("🏁 [lidar_map.py] YARIŞMA MODU - Harita yayını başlatılmıyor.")
     sys.exit(0)
 
@@ -86,6 +93,9 @@ class LidarMapper(Node):
         self.world_points = []  # List of (x_m, y_m) tuples
         self.last_msg_time = time.time() - 6.5
         self.max_points = 10000  # Maximum points to keep (memory limit)
+        self._last_map_jsonl_ts = 0.0
+        self._last_heartbeat_ts = 0.0
+        self._scan_timeout_logged = False
         
         _lidar_dbg.info(f"[LIDAR] Subscription created with BEST_EFFORT QoS (match ros_gz_bridge)")
         print(f"🗺️ Lidar Harita Sunucusu Başladı (Port {WEB_PORT})")
@@ -128,6 +138,18 @@ class LidarMapper(Node):
             # Limit memory usage
             if len(self.world_points) > self.max_points:
                 self.world_points = self.world_points[-self.max_points:]
+
+        now_mono = time.monotonic()
+        if now_mono - self._last_map_jsonl_ts >= 2.0:
+            self._last_map_jsonl_ts = now_mono
+            log_jsonl(
+                "lidar_map",
+                False,
+                event="map_update",
+                point_count=int(len(self.world_points)),
+                scan_points=int(len(ranges)),
+                simulation_mode=bool(SIMULATION_MODE),
+            )
 
         # --- DYNAMIC SPAN CALCULATION (Dashboard ile aynı) ---
         # Calculate span based on all accumulated points
@@ -244,12 +266,42 @@ def ros_thread():
         # Custom Spin Loop for Timeout Detection
         while rclpy.ok():
             rclpy.spin_once(node, timeout_sec=0.1)
-            
+
+            now_mono = time.monotonic()
+            if now_mono - node._last_heartbeat_ts >= 10.0:
+                node._last_heartbeat_ts = now_mono
+                log_jsonl(
+                    "lidar_map",
+                    False,
+                    event="lidar_heartbeat",
+                    point_count=int(len(node.world_points)),
+                    simulation_mode=bool(SIMULATION_MODE),
+                    scan_age_s=round(max(0.0, time.time() - node.last_msg_time), 3),
+                )
+
             # Veri zaman aşımı kontrolü (3 saniye veri gelmezse simülasyon)
             if time.time() - node.last_msg_time > 3.0:
                 SIMULATION_MODE = True
+                if not node._scan_timeout_logged:
+                    node._scan_timeout_logged = True
+                    log_jsonl(
+                        "lidar_map",
+                        False,
+                        event="scan_timeout",
+                        timeout_s=3.0,
+                        reason="no_scan_data",
+                    )
                 print("⚠️ [LIDAR] Veri akışı yok -> Simülasyon Modu")
                 _lidar_dbg.warning("scan timeout -> simulation mode")
+            else:
+                if node._scan_timeout_logged:
+                    node._scan_timeout_logged = False
+                    log_jsonl(
+                        "lidar_map",
+                        False,
+                        event="scan_recovered",
+                        point_count=int(len(node.world_points)),
+                    )
             
             if SIMULATION_MODE:
                 # Debug: Topic List
@@ -301,6 +353,13 @@ def map_feed():
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 if __name__ == "__main__":
+    log_jsonl(
+        "lidar_map",
+        True,
+        event="service_start",
+        web_port=int(WEB_PORT),
+        usv_mode=str(USV_MODE),
+    )
 
     clean_port(WEB_PORT)
     t = threading.Thread(target=ros_thread)

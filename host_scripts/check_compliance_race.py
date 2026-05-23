@@ -302,8 +302,43 @@ def test_compliance_enforcement():
     print("  ✅ Enforcement: split_nav_engage enforced, no fixed split counts, min constraints preserved")
 
 
+
+def test_race_profile_and_p3_mode():
+    """Race start requires mission_profile, target_color lock, and P3 vision/color mode."""
+    usv_src = (DOCKER_SRC / "usv_main.py").read_text(encoding="utf-8")
+    mission_cfg_src = (DOCKER_SRC / "mission_config.py").read_text(encoding="utf-8")
+
+    required = [
+        "mission_profile_not_race_ready",
+        "target_color_not_locked",
+        "invalid_p3_engagement_mode",
+        "vision_color_track",
+        "mission_upload_source != \"pixhawk_mission\"",
+    ]
+    for snippet in required:
+        if snippet not in usv_src and snippet not in mission_cfg_src:
+            raise AssertionError(f"missing race profile gate: {snippet}")
+
+    if "p3_engagement_mode" not in usv_src:
+        raise AssertionError("p3_engagement_mode not tracked in mission state/start gate")
+
+    print("  ✅ Race profile: mission_profile, target_color, P3 vision/color mode enforced")
+
+
+def test_p1_progress_source():
+    """P1 completion must not default to hardcoded waypoint count=1 in race mode."""
+    usv_src = (DOCKER_SRC / "usv_main.py").read_text(encoding="utf-8")
+    if "race_p1_completion_source" not in usv_src:
+        raise AssertionError("race_p1_completion_source missing")
+    if "if USV_MODE == USV_MODE_RACE and not p1_auto_env" not in usv_src:
+        raise AssertionError("race P1 must not assume USV_RACE_P1_AUTO_WAYPOINTS default")
+    if "p2_evidence" not in usv_src:
+        raise AssertionError("P1 completion must support p2_evidence source")
+    print("  ✅ P1 progress: pixhawk progress / p2_evidence, no silent count=1 default")
+
+
 def main():
-    """Run all 8 compliance tests."""
+    """Run all race compliance tests."""
     
     print("\n" + "="*70)
     print("  CELEBILER USV - RACE-LEVEL COMPLIANCE TEST SUITE")
@@ -318,6 +353,8 @@ def main():
         ("6. Guidance Clarity", test_guidance_source_clarity),
         ("7. Adapter Compatibility", test_adapter_backward_compatibility),
         ("8. Enforcement", test_compliance_enforcement),
+        ("9. Race Profile Gates", test_race_profile_and_p3_mode),
+        ("10. P1 Progress Source", test_p1_progress_source),
     ]
     
     failed = []

@@ -109,6 +109,13 @@ Bu nedenle yarista "Pixhawk mi yapacak, Pi mi override edecek?" sorusunun cevabi
 
 `config/pixhawk_ida.param` mevcut teknede manuel surusle calisan Pixhawk baseline dosyasidir. Bu dosya otomasyon tarafinda referans alinir, ancak yaris oncesi guvenlik ve AUTO/GUIDED davranisi ayrica sertifiye edilmeden "race-ready" sayilmaz.
 
+Yaris sertifikasyon belgeleri:
+
+- `documents/race_cert_pixhawk_arming_failsafe.md` — arming/failsafe karari (Yol A param profili veya Yol B fiziksel E-stop)
+- `documents/servo_mapping_water_test_plan.md` — SERVO1/3 su ustu + sim yaw sign sign-off
+- `python3 host_scripts/compare_pixhawk_param_baseline.py` — baseline vs ArduRover reference diff + risk tablosu
+- `documents/manual_operator_verification_checklist.md` — operatör sim/saha doğrulama checklist
+
 Mevcut donanim eslesmesi:
 
 - [x] Arac frame baseline'i `FRAME_CLASS=2`, `FRAME_TYPE=0` olarak kabul edilir.

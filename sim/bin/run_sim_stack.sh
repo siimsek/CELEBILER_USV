@@ -99,6 +99,7 @@ fi
 ROS_GZ_BRIDGE_BIN="/opt/ros/humble/lib/ros_gz_bridge/parameter_bridge"
 CAM_PID_FILE="$SIM_CONTROL_DIR/cam.pid"
 TELEMETRY_PID_FILE="$SIM_CONTROL_DIR/telemetry.pid"
+LIDAR_MAP_PID_FILE="$SIM_CONTROL_DIR/lidar_map.pid"
 SELF_PID=$$
 PIDS=()
 STALE_PATTERNS=(
@@ -110,6 +111,8 @@ STALE_PATTERNS=(
     "python3 docker_workspace/src/cam.py"
     "python3 telemetry.py"
     "python3 docker_workspace/src/telemetry.py"
+    "python3 lidar_map.py"
+    "python3 docker_workspace/src/lidar_map.py"
     "/opt/ros/humble/lib/ros_gz_bridge/parameter_bridge"
     "$HOME/ardupilot/build/sitl/bin/ardurover"
     "ardupilot/modules/waf/waf-light build --target bin/ardurover"
@@ -249,6 +252,91 @@ raise SystemExit(1)
 PY
 }
 
+wait_for_process_alive() {
+    local pid="$1"
+    local label="$2"
+    local timeout_s="${3:-10}"
+    local deadline=$((SECONDS + timeout_s))
+    while true; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "[SIM] Ready: $label process pid=$pid"
+            return 0
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "[WARN] Timeout waiting for $label process pid=$pid"
+            return 1
+        fi
+        sleep 0.2
+    done
+}
+
+wait_for_log_pattern() {
+    local file="$1"
+    local pattern="$2"
+    local label="$3"
+    local timeout_s="${4:-15}"
+    local deadline=$((SECONDS + timeout_s))
+    while true; do
+        if [ -f "$file" ] && grep -Eq "$pattern" "$file" 2>/dev/null; then
+            echo "[SIM] Ready: $label ($file)"
+            return 0
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "[WARN] Timeout waiting for $label log pattern '$pattern' in $file"
+            return 1
+        fi
+        sleep 0.2
+    done
+}
+
+wait_for_ros_topic() {
+    local topic="$1"
+    local label="$2"
+    local timeout_s="${3:-20}"
+    local deadline=$((SECONDS + timeout_s))
+    if ! command -v ros2 >/dev/null 2>&1; then
+        echo "[WARN] ros2 CLI unavailable; cannot probe $label topic $topic"
+        return 1
+    fi
+    while true; do
+        if ros2 topic list 2>/dev/null | grep -qx "$topic"; then
+            echo "[SIM] Ready: $label topic $topic"
+            return 0
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "[WARN] Timeout waiting for $label topic $topic"
+            return 1
+        fi
+        sleep 0.5
+    done
+}
+
+wait_for_file_fresh() {
+    local file="$1"
+    local label="$2"
+    local timeout_s="${3:-15}"
+    local max_age_s="${4:-2.5}"
+    python3 - "$file" "$label" "$timeout_s" "$max_age_s" <<'PY'
+import os
+import sys
+import time
+
+path, label, timeout_s, max_age_s = sys.argv[1], sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
+deadline = time.monotonic() + timeout_s
+while time.monotonic() < deadline:
+    try:
+        age = time.time() - os.path.getmtime(path)
+        if os.path.getsize(path) > 0 and age <= max_age_s:
+            print(f"[SIM] Ready: {label} ({path}, age={age:.2f}s)")
+            raise SystemExit(0)
+    except OSError:
+        pass
+    time.sleep(0.2)
+print(f"[WARN] Timeout waiting for fresh {label}: {path}")
+raise SystemExit(1)
+PY
+}
+
 resolve_target_class() {
     python3 -c '
 import json
@@ -378,7 +466,7 @@ stop_stale_stack() {
     sleep 0.1
     kill_stale_ports
     ensure_endpoints_released || true
-    rm -f "$CAM_PID_FILE" "$TELEMETRY_PID_FILE"
+    rm -f "$CAM_PID_FILE" "$TELEMETRY_PID_FILE" "$LIDAR_MAP_PID_FILE"
     echo "[SIM] Stale stack cleanup complete."
 }
 
@@ -414,6 +502,7 @@ cleanup() {
     # Kill registered PIDs with aggressive -9
     kill_if_running "$(cat "$CAM_PID_FILE" 2>/dev/null || true)" KILL
     kill_if_running "$(cat "$TELEMETRY_PID_FILE" 2>/dev/null || true)" KILL
+    kill_if_running "$(cat "$LIDAR_MAP_PID_FILE" 2>/dev/null || true)" KILL
     for pid in "${PIDS[@]}"; do
         kill -9 "$pid" 2>/dev/null || true
     done
@@ -421,12 +510,13 @@ cleanup() {
     pkill -9 -f "docker_workspace/src/usv_main" 2>/dev/null || true
     pkill -9 -f "docker_workspace/src/cam" 2>/dev/null || true
     pkill -9 -f "docker_workspace/src/telemetry" 2>/dev/null || true
+    pkill -9 -f "docker_workspace/src/lidar_map" 2>/dev/null || true
     pkill -9 -f "sim/bridges/" 2>/dev/null || true
     pkill -9 -f "gazebo" 2>/dev/null || true
     pkill -9 -f "ardurover" 2>/dev/null || true
     # Port cleanup
     fuser -k 8080/tcp 8888/tcp 14550/udp 14551/udp 14552/udp 5760/tcp 2>/dev/null || true
-    rm -f "$CAM_PID_FILE" "$TELEMETRY_PID_FILE"
+    rm -f "$CAM_PID_FILE" "$TELEMETRY_PID_FILE" "$LIDAR_MAP_PID_FILE"
     echo "[SIM] ========== SHUTDOWN COMPLETE =========="
 }
 trap cleanup SIGINT SIGTERM EXIT
@@ -440,7 +530,8 @@ echo "[SIM] Starting Gazebo (logging to $SIM_LOG_DIR/gazebo.log)..."
 ./sim/bin/run_gz_world.sh > "$SIM_LOG_DIR/gazebo.log" 2>&1 &
 GZ_PID=$!
 register_pid "$GZ_PID"
-sleep 3
+wait_for_process_alive "$GZ_PID" "Gazebo" 10 || true
+wait_for_log_pattern "$SIM_LOG_DIR/gazebo.log" "Gazebo|Ignition|server|world" "Gazebo log" 15 || true
 
 echo "[SIM] Starting ROS<->Gazebo bridges (pose service + scan + camera + odom + cmd_vel)..."
 "$ROS_GZ_BRIDGE_BIN" \
@@ -452,7 +543,8 @@ echo "[SIM] Starting ROS<->Gazebo bridges (pose service + scan + camera + odom +
     > "$SIM_LOG_DIR/ros_gz.log" 2>&1 &
 ROS_GZ_PID=$!
 register_pid "$ROS_GZ_PID"
-sleep 3
+wait_for_process_alive "$ROS_GZ_PID" "ROS-GZ bridge" 10 || true
+wait_for_ros_topic "/scan" "ROS-GZ scan bridge" 20 || true
 
 echo "[SIM] Starting ArduPilot SITL (logging to $SIM_LOG_DIR/sitl.log)..."
 ./sim/bin/run_sitl.sh > "$SIM_LOG_DIR/sitl.log" 2>&1 &
@@ -464,20 +556,22 @@ echo "[SIM] Starting SITL↔Gazebo bridge (tek MAVLink 14551: pose + motor + JSO
 python3 sim/bridges/sitl_gazebo_bridge.py > "$SIM_LOG_DIR/pose.log" 2>&1 &
 POSE_BRIDGE_PID=$!
 register_pid "$POSE_BRIDGE_PID"
-sleep 2
+wait_for_process_alive "$POSE_BRIDGE_PID" "SITL-Gazebo bridge" 10 || true
+wait_for_file_fresh "$SIM_CONTROL_DIR/vehicle_position.json" "SITL-Gazebo pose JSON" 20 3.0 || true
 
 echo "[SIM] Starting Camera TCP bridge (logging to $SIM_LOG_DIR/cam_bridge.log)..."
 python3 sim/bridges/ros_to_tcp_cam.py > "$SIM_LOG_DIR/cam_bridge.log" 2>&1 &
 export LOG_DIR  # Ensure application logs route to system directory
 CAM_BRIDGE_PID=$!
 register_pid "$CAM_BRIDGE_PID"
-sleep 2
+wait_for_process_alive "$CAM_BRIDGE_PID" "Camera TCP bridge" 10 || true
+wait_for_tcp_port 127.0.0.1 8888 "Camera TCP bridge" 20 || true
 
 echo "[SIM] Camera target class: $TARGET_CLASS"
 echo "[SIM] Starting camera processor (logging to $LOG_DIR/cam.log)..."
 (
     cd docker_workspace/src
-    LOG_DIR="$LOG_DIR" python3 cam.py > "$LOG_DIR/cam.log" 2>&1 &
+    USV_SIM=1 LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" python3 cam.py > "$LOG_DIR/cam.log" 2>&1 &
     echo $! > "$CAM_PID_FILE"
 )
 echo "[SIM] Camera processor headless (no webserver)"
@@ -485,7 +579,7 @@ echo "[SIM] Camera processor headless (no webserver)"
 echo "[SIM] Starting telemetry dashboard (logging to $LOG_DIR/telemetry.log)..."
 (
     cd docker_workspace/src
-    LOG_DIR="$LOG_DIR" python3 telemetry.py > "$LOG_DIR/telemetry.log" 2>&1 &
+    USV_SIM=1 LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" SIM_LOG_DIR="$SIM_LOG_DIR" python3 telemetry.py > "$LOG_DIR/telemetry.log" 2>&1 &
     echo $! > "$TELEMETRY_PID_FILE"
 )
 wait_for_http_endpoint "http://127.0.0.1:8080/api/data" "telemetry API" 25 || true
@@ -505,26 +599,30 @@ echo "[SIM] Simulation logs (debug):"
 echo "  $SIM_LOG_DIR/gazebo.log sitl.log pose.log cam_bridge.log ros_gz.log"
 echo "  $SIM_LOG_DIR/*debug.log *.trace.log  $SIM_LOG_DIR/check_stack.log  $SIM_LOG_DIR/ros2/*.log"
 echo "[SIM] Application logs (debug):"
-echo "  $LOG_DIR/cam.log telemetry.log usv_main.log telemetri_verisi.csv"
+echo "  $LOG_DIR/cam.log telemetry.log lidar_map.log usv_main.log telemetri_verisi.csv"
 echo "  $LOG_DIR/*.debug.log   $LOG_DIR/video/*.mp4"
 echo "[SIM] Tee: $ROOT_LOG_DIR/terminal.log"
 echo "============================================================"
-sleep 1
 
 cd docker_workspace/src
-# Start lidar_map service (port 5001) - DISABLED: Dashboard already has integrated spatial map via /api/spatial_map
-# echo "[SIM] Starting lidar_map service (port 5001)..."
-# LOG_DIR="$LOG_DIR" python3 lidar_map.py > "$LOG_DIR/lidar_map.log" 2>&1 &
-# LIDAR_MAP_PID=$!
-# register_pid "$LIDAR_MAP_PID"
-# wait_for_http_endpoint "http://127.0.0.1:5001/" "lidar map API" 20 || true
+echo "[SIM] Starting lidar_map service (logging to $LOG_DIR/lidar_map.log)..."
+(
+    cd "$PROJ_ROOT/docker_workspace/src"
+    LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" python3 lidar_map.py > "$LOG_DIR/lidar_map.log" 2>&1 &
+    echo $! > "$LIDAR_MAP_PID_FILE"
+)
+if [ "${USV_MODE:-test}" = "race" ]; then
+    wait_for_log_pattern "$LOG_DIR/lidar_map.log" "YARIŞMA MODU|YARISMA MODU|Race" "lidar_map race-disabled guard" 10 || true
+else
+    wait_for_http_endpoint "http://127.0.0.1:5001/" "lidar map API" 20 || true
+fi
 # stdin ayrilir: ESC bu kabukta yakalanir, usv_main klavye beklemez
 # Export critical env vars: CONTROL_DIR for mission state/flags, USV_MODE for startup logic, USV_SIM for simulation detection
 USV_SIM=1 LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" MISSION_FILE="${MISSION_FILE}" python3 usv_main.py </dev/null > "$LOG_DIR/usv_main.log" 2>&1 &
 USV_PID=$!
 register_pid "$USV_PID"
+wait_for_process_alive "$USV_PID" "usv_main.py" 10 || true
 
-sleep 0.5
 echo "[SIM] Checking status of components..."
 "$PROJ_ROOT/sim/bin/check_stack.sh" | tee "$SIM_LOG_DIR/check_stack.log"
 

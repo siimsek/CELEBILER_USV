@@ -23,11 +23,17 @@ from compliance_profile import (
     CAM_ADAPT_LUMA_BRIGHT_THRESHOLD,
     CAM_ADAPT_LUMA_DARK_THRESHOLD,
     CAM_ADAPT_DARK_BETA,
+    CAM_WRONG_TARGET_BEARING_MAX_DEG,
+    CAM_WRONG_TARGET_MIN_AREA_NORM,
+    CAM_WRONG_TARGET_STRONG_AREA_NORM,
+    camera_wrong_target_contract,
     CONTROL_DIR as DEFAULT_CONTROL_DIR,
     LOG_DIR as DEFAULT_LOG_DIR,
+    resolve_camera_bearing_half_deg,
     USV_MODE,
     USV_MODE_RACE,
 )
+from json_atomic import atomic_write_json
 from mission_config import TARGET_STATE_FILE, load_target_state
 from runtime_debug_log import (
     install_module_function_tracing,
@@ -52,11 +58,13 @@ if RACE_MODE:
     print("[RACE] [cam.py] Race modda sadece onboard isleme")
 
 CAM_SOURCE = os.environ.get("CAM_SOURCE", "hw")
-BEARING_HALF_DEG = 45.0 if CAM_SOURCE == "sim" else 35.0
+BEARING_HALF_DEG = resolve_camera_bearing_half_deg(CAM_SOURCE)
+WRONG_TARGET_CONTRACT = camera_wrong_target_contract()
 
 _cam_file_log.info(
-    "cam.py CAM_SOURCE=%s USV_MODE=%s LOG_DIR=%s",
+    "cam.py CAM_SOURCE=%s BEARING_HALF_DEG=%.1f USV_MODE=%s LOG_DIR=%s",
     CAM_SOURCE,
+    BEARING_HALF_DEG,
     USV_MODE,
     os.environ.get("LOG_DIR"),
 )
@@ -86,12 +94,12 @@ os.makedirs(VIDEO_DIR, exist_ok=True)
 
 COLOR_RANGES = {
     "TURUNCU_SINIR": {
-        "lower": np.array([5, 65, 90]),
-        "upper": np.array([22, 255, 255]),
+        "lower": np.array([6, 65, 90]),
+        "upper": np.array([21, 255, 255]),
         "color": (0, 140, 255),
     },
     "SARI_ENGEL": {
-        "lower": np.array([22, 100, 100]),
+        "lower": np.array([23, 100, 100]),
         "upper": np.array([35, 255, 255]),
         "color": (0, 255, 255),
     },
@@ -102,8 +110,8 @@ COLOR_RANGES = {
     },
     "KIRMIZI_SANCAK": {
         "lower": np.array([0, 150, 100]),
-        "upper": np.array([5, 255, 255]),
-        "lower2": np.array([172, 150, 100]),
+        "upper": np.array([4, 255, 255]),
+        "lower2": np.array([173, 150, 100]),
         "upper2": np.array([180, 255, 255]),
         "color": (0, 0, 255),
     },
@@ -214,6 +222,9 @@ class VideoCamera:
             "wrong_target_bearing_deg": 0.0,
             "wrong_target_area_norm": 0.0,
             "wrong_target_class": "",
+            "wrong_target_confidence": 0.0,
+            "bearing_half_deg": float(BEARING_HALF_DEG),
+            "wrong_target_policy": dict(WRONG_TARGET_CONTRACT),
             "camera_adaptation": {
                 "enabled": bool(CAM_ADAPT_ENABLED),
                 "mode": "normal",
@@ -617,14 +628,14 @@ class VideoCamera:
                     logical_state_changed = False
 
             if logical_state_changed or (now - self._last_status_write_time >= 1.0):
-                os.makedirs(os.path.dirname(STATUS_FILE) or ".", exist_ok=True)
-                tmp_path = f"{STATUS_FILE}.tmp"
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(self.status, f)
-                os.replace(tmp_path, STATUS_FILE)
-                
-                self._last_status_write_time = now
-                self._last_written_status = dict(self.status)
+                if atomic_write_json(STATUS_FILE, self.status):
+                    self._last_status_write_time = now
+                    self._last_written_status = dict(self.status)
+                else:
+                    self._bump_error(
+                        "status_write_error",
+                        "[WARN] [CAM] Status atomic yazma basarisiz; onceki dosya korunuyor",
+                    )
                 
         except Exception as exc:
             self._bump_error("status_write_error", f"[WARN] [CAM] Status yazma hatasi: {exc}")
@@ -949,14 +960,28 @@ class VideoCamera:
             target_bearing_raw = ((target["cx"] - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
             target_area_norm_raw = clamp((target["w"] * target["h"]) / float(w * h), 0.0, 1.0)
             cv2.circle(frame, (int(target["cx"]), int(target["cy"])), 8, (255, 255, 255), -1)
-        wrong_target_detected_raw = bool(wrong_target)
+        wrong_target_detected_raw = False
         wrong_target_bearing_raw = 0.0
         wrong_target_area_norm_raw = 0.0
         wrong_target_class_raw = ""
-        if wrong_target_detected_raw:
+        wrong_target_confidence = 0.0
+        if wrong_target:
             wrong_target_bearing_raw = ((wrong_target["cx"] - (w / 2.0)) / (w / 2.0)) * BEARING_HALF_DEG
             wrong_target_area_norm_raw = clamp((wrong_target["w"] * wrong_target["h"]) / float(w * h), 0.0, 1.0)
             wrong_target_class_raw = str(wrong_target.get("name", ""))
+            if wrong_target_area_norm_raw >= float(CAM_WRONG_TARGET_STRONG_AREA_NORM):
+                wrong_target_confidence = 1.0
+                wrong_target_detected_raw = True
+            elif (
+                wrong_target_area_norm_raw >= float(CAM_WRONG_TARGET_MIN_AREA_NORM)
+                and abs(wrong_target_bearing_raw) <= float(CAM_WRONG_TARGET_BEARING_MAX_DEG)
+            ):
+                wrong_target_confidence = clamp(
+                    wrong_target_area_norm_raw / max(float(CAM_WRONG_TARGET_STRONG_AREA_NORM), 1e-6),
+                    0.0,
+                    1.0,
+                )
+                wrong_target_detected_raw = True
             cv2.circle(frame, (int(wrong_target["cx"]), int(wrong_target["cy"])), 8, (0, 0, 255), 2)
 
         current_status = self.status if isinstance(self.status, dict) else {}
@@ -1065,6 +1090,9 @@ class VideoCamera:
             "wrong_target_bearing_deg": round(wrong_target_bearing, 3),
             "wrong_target_area_norm": round(wrong_target_area_norm, 4),
             "wrong_target_class": wrong_target_class,
+            "wrong_target_confidence": round(float(wrong_target_confidence), 4),
+            "bearing_half_deg": round(float(BEARING_HALF_DEG), 3),
+            "wrong_target_policy": dict(WRONG_TARGET_CONTRACT),
             "camera_adaptation": {
                 "enabled": bool(adapt_profile.get("enabled", False)),
                 "mode": str(adapt_profile.get("mode", "normal")),

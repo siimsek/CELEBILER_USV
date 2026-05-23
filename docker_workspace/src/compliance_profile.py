@@ -77,6 +77,8 @@ P2_CRUISE_MPS = float(os.environ.get("USV_SIM_P2_CRUISE_MPS", "2.0"))
 P2_STABLE_S = 1.0
 P2_GATE_CONFIRM_S = 0.5
 P3_MAX_SPEED_MPS = 1.5
+P3_TARGET_BEARING_GAIN = float(os.environ.get("P3_TARGET_BEARING_GAIN", "0.85"))
+P3_TARGET_HEADING_CLAMP_DEG = float(os.environ.get("P3_TARGET_HEADING_CLAMP_DEG", "45.0"))
 P3_TIMEOUT_S = 180
 P3_RETRY_S = 60
 P3_RETRY_COUNT = 1
@@ -99,15 +101,69 @@ NAV_CROSS_TRACK_MIN_LEG_M = 3.75  # max(R_WP_M * 1.5, 3.0) ile _waypoint_leg_pro
 NAV_ALIGN_HEADING_DONE_DEG = float(os.environ.get("USV_SIM_ALIGN_HEADING_DEG", "8.0"))
 NAV_ALIGN_ACQUIRE_DEG = float(os.environ.get("NAV_ALIGN_ACQUIRE_DEG", str(NAV_ALIGN_HEADING_DONE_DEG)))
 NAV_ALIGN_REACQUIRE_DEG = float(os.environ.get("NAV_ALIGN_REACQUIRE_DEG", "14.0"))
-NAV_ALIGN_TURN_IMMUNITY_S = float(os.environ.get("NAV_ALIGN_TURN_IMMUNITY_S", "5.0"))
+NAV_ALIGN_TIMEOUT_LARGE_ERR_DEG = float(os.environ.get("NAV_ALIGN_TIMEOUT_LARGE_ERR_DEG", "20.0"))
+
+
+def resolve_nav_strict_heading_first() -> bool:
+    default = "1"
+    raw = os.environ.get("NAV_STRICT_HEADING_FIRST", default).strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def resolve_nav_align_stable_s() -> float:
+    default = "0.5" if os.environ.get("USV_SIM") == "1" else "1.0"
+    return max(0.0, float(os.environ.get("NAV_ALIGN_STABLE_S", default)))
+
+
+def resolve_nav_align_enter_advance_deg() -> float:
+    default = "8.0" if os.environ.get("USV_SIM") == "1" else "6.0"
+    return max(1.0, float(os.environ.get("NAV_ALIGN_ENTER_ADVANCE_DEG", default)))
+
+
+def resolve_nav_align_pivot_until_deg() -> float:
+    enter = resolve_nav_align_enter_advance_deg()
+    default = str(float(enter) + 2.0)
+    return max(float(enter), float(os.environ.get("NAV_ALIGN_PIVOT_UNTIL_DEG", default)))
+
+
+def resolve_nav_align_turn_immunity_s() -> float:
+    default = "2.0" if os.environ.get("USV_SIM") == "1" else "5.0"
+    return max(0.0, float(os.environ.get("NAV_ALIGN_TURN_IMMUNITY_S", default)))
+
+
+def resolve_nav_align_revert_align_deg() -> float:
+    default = "18.0" if os.environ.get("USV_SIM") == "1" else "12.0"
+    return max(8.0, float(os.environ.get("NAV_ALIGN_REVERT_ALIGN_DEG", default)))
+
+
+NAV_ALIGN_TURN_IMMUNITY_S = resolve_nav_align_turn_immunity_s()
 NAV_HEADING_MAX_ERROR_DEG = float(os.environ.get("NAV_HEADING_MAX_ERROR_DEG", "140.0"))
-# Geriye uyumluluk (eski ad); geçişler NAV_ALIGN_HEADING_DONE_DEG kullanır
-NAV_ALIGN_ENTER_ADVANCE_DEG = 9.5
-NAV_ALIGN_PIVOT_UNTIL_DEG = 11.0
+NAV_STRICT_HEADING_FIRST = resolve_nav_strict_heading_first()
+NAV_ALIGN_STABLE_S = resolve_nav_align_stable_s()
+NAV_ALIGN_ENTER_ADVANCE_DEG = resolve_nav_align_enter_advance_deg()
+NAV_ALIGN_PIVOT_UNTIL_DEG = resolve_nav_align_pivot_until_deg()
+NAV_WP_ARRIVAL_EXIT_MARGIN_M = float(os.environ.get("NAV_WP_ARRIVAL_EXIT_MARGIN_M", "0.15"))
 # İleri fazda burun şaşarsa tekrar (1) dönüşe dön — 24° çok gevşekti (log: 15°+ ile hâlâ advance)
-NAV_ALIGN_REVERT_ALIGN_DEG = 12.0
+NAV_ALIGN_REVERT_ALIGN_DEG = resolve_nav_align_revert_align_deg()
 NAV_ALIGN_MAX_SPEED_MPS = float(os.environ.get("USV_SIM_ALIGN_MAX_MPS", "0.8"))
-NAV_ALIGN_CREEP_SPEED_MPS = 0.28
+
+
+def resolve_nav_turn_creep_speed_mps() -> float:
+    """Strict heading-first defaults to pivot-only; bench creep requires USV_NAV_TURN_CREEP_MPS."""
+    if resolve_nav_strict_heading_first() and os.environ.get("USV_NAV_TURN_CREEP_MPS") is None:
+        return 0.0
+    default = "0.18" if os.environ.get("USV_SIM") == "1" else "0.0"
+    return max(0.0, float(os.environ.get("USV_NAV_TURN_CREEP_MPS", default)))
+
+
+def resolve_nav_min_progress_speed_mps() -> float:
+    """Sim default disables forced min-progress during misaligned turns."""
+    default = "0.0" if os.environ.get("USV_SIM") == "1" else "0.50"
+    return max(0.0, float(os.environ.get("USV_NAV_MIN_PROGRESS_MPS", default)))
+
+
+NAV_ALIGN_CREEP_SPEED_MPS = resolve_nav_turn_creep_speed_mps()
+NAV_MIN_PROGRESS_SPEED_MPS = resolve_nav_min_progress_speed_mps()
 NAV_ALIGN_TIMEOUT_S = 14.0
 NAV_WP_APPROACH_SPEED_CAP_DIST_M = 1.5  # within this distance, cap speed near waypoint
 NAV_WP_APPROACH_SPEED_CAP_MPS = float(os.environ.get("USV_SIM_WP_APPROACH_CAP_MPS", "0.6"))  # was hardcoded 0.35
@@ -221,6 +277,105 @@ CAM_ADAPT_HSV_DARK_V_RELAX = 38
 CAM_ADAPT_HSV_BRIGHT_S_SHIFT = 34
 CAM_ADAPT_HSV_BRIGHT_V_SHIFT = 20
 CAM_ADAPT_LOG_PERIOD_S = 2.0
+
+# --- Camera calibration / perception contract (Phase 7) ---
+# Horizontal bearing scale: half-FOV used to map pixel offset -> bearing error.
+CAMERA_BEARING_HALF_DEG_REAL = float(
+    os.environ.get("CAMERA_BEARING_HALF_DEG", os.environ.get("CAM_BEARING_HALF_DEG_REAL", "35.0"))
+)
+CAMERA_BEARING_HALF_DEG_SIM = float(
+    os.environ.get("CAMERA_BEARING_HALF_DEG_SIM", os.environ.get("CAM_BEARING_HALF_DEG", "45.0"))
+)
+
+
+def resolve_camera_bearing_half_deg(cam_source: str | None = None) -> float:
+    """Return camera bearing half-FOV (deg). Override with CAMERA_BEARING_HALF_DEG[_SIM]."""
+    source = (cam_source if cam_source is not None else os.environ.get("CAM_SOURCE", "hw")).strip().lower()
+    if source == "sim":
+        return float(CAMERA_BEARING_HALF_DEG_SIM)
+    return float(CAMERA_BEARING_HALF_DEG_REAL)
+
+
+# Wrong-target policy: locked target_color wins; other TARGET_CANDIDATE classes need
+# minimum area (and optionally bearing) before they become actionable wrong-target cues.
+CAM_WRONG_TARGET_PRIORITY = "locked_target_color_first"
+CAM_WRONG_TARGET_MIN_AREA_NORM = float(os.environ.get("CAM_WRONG_TARGET_MIN_AREA_NORM", "0.025"))
+CAM_WRONG_TARGET_BEARING_MAX_DEG = float(os.environ.get("CAM_WRONG_TARGET_BEARING_MAX_DEG", "18.0"))
+CAM_WRONG_TARGET_STRONG_AREA_NORM = float(os.environ.get("CAM_WRONG_TARGET_STRONG_AREA_NORM", "0.08"))
+
+# HSV hue boundaries are intentionally non-overlapping (red/orange/yellow margins at H=5/22).
+CAM_HSV_BOUNDARY_POLICY = {
+    "red_h_max": 4,
+    "orange_h_min": 6,
+    "orange_h_max": 21,
+    "yellow_h_min": 23,
+    "yellow_h_max": 35,
+}
+
+# --- Lidar sector calibration (Phase 7) ---
+# Scan sectors classify raw LaserScan bearings (deg, forward=0, left=+).
+LIDAR_BEARING_SIGN = -1.0 if float(os.environ.get("LIDAR_BEARING_SIGN", "1.0")) < 0.0 else 1.0
+LIDAR_SCAN_SECTOR_CENTER_MAX_DEG = float(os.environ.get("LIDAR_SCAN_SECTOR_CENTER_MAX_DEG", "22.0"))
+LIDAR_SCAN_SECTOR_LEFT_MIN_DEG = float(os.environ.get("LIDAR_SCAN_SECTOR_LEFT_MIN_DEG", "22.0"))
+LIDAR_SCAN_SECTOR_LEFT_MAX_DEG = float(os.environ.get("LIDAR_SCAN_SECTOR_LEFT_MAX_DEG", "90.0"))
+LIDAR_SCAN_SECTOR_RIGHT_MIN_DEG = float(os.environ.get("LIDAR_SCAN_SECTOR_RIGHT_MIN_DEG", "-90.0"))
+LIDAR_SCAN_SECTOR_RIGHT_MAX_DEG = float(os.environ.get("LIDAR_SCAN_SECTOR_RIGHT_MAX_DEG", "-22.0"))
+
+# Occupancy-map risk sectors (wider front cone than raw scan center band).
+LIDAR_MAP_SECTOR_FRONT_MIN_DEG = float(os.environ.get("LIDAR_MAP_SECTOR_FRONT_MIN_DEG", "-35.0"))
+LIDAR_MAP_SECTOR_FRONT_MAX_DEG = float(os.environ.get("LIDAR_MAP_SECTOR_FRONT_MAX_DEG", "35.0"))
+LIDAR_MAP_SECTOR_LEFT_MIN_DEG = float(os.environ.get("LIDAR_MAP_SECTOR_LEFT_MIN_DEG", "20.0"))
+LIDAR_MAP_SECTOR_LEFT_MAX_DEG = float(os.environ.get("LIDAR_MAP_SECTOR_LEFT_MAX_DEG", "70.0"))
+LIDAR_MAP_SECTOR_RIGHT_MIN_DEG = float(os.environ.get("LIDAR_MAP_SECTOR_RIGHT_MIN_DEG", "-70.0"))
+LIDAR_MAP_SECTOR_RIGHT_MAX_DEG = float(os.environ.get("LIDAR_MAP_SECTOR_RIGHT_MAX_DEG", "-20.0"))
+
+# Pixhawk OBSTACLE_DISTANCE coarse bins (body-FRD angle convention preserved).
+LIDAR_OA_SECTOR_CENTER_HALF_DEG = float(os.environ.get("LIDAR_OA_SECTOR_CENTER_HALF_DEG", "22.5"))
+LIDAR_OA_SECTOR_SIDE_MIN_DEG = float(os.environ.get("LIDAR_OA_SECTOR_SIDE_MIN_DEG", "22.5"))
+LIDAR_OA_SECTOR_SIDE_MAX_DEG = float(os.environ.get("LIDAR_OA_SECTOR_SIDE_MAX_DEG", "60.0"))
+
+# lidar_status.json is intentionally unused: readiness + sector mins live in mission_state.json.
+LIDAR_STATUS_JSON_ENABLED = False
+
+
+def normalize_lidar_bearing_deg(bearing_deg: float) -> float:
+    """Apply mount sign correction (+1 default, -1 if LIDAR_BEARING_SIGN<0)."""
+    return float(bearing_deg) * float(LIDAR_BEARING_SIGN)
+
+
+def classify_lidar_scan_sector(bearing_deg: float) -> str | None:
+    """Classify a scan bearing into center/left/right or None if out of FOV."""
+    deg = normalize_lidar_bearing_deg(float(bearing_deg))
+    if deg > LIDAR_SCAN_SECTOR_LEFT_MIN_DEG and deg <= LIDAR_SCAN_SECTOR_LEFT_MAX_DEG:
+        return "left"
+    if deg >= LIDAR_SCAN_SECTOR_RIGHT_MIN_DEG and deg < LIDAR_SCAN_SECTOR_RIGHT_MAX_DEG:
+        return "right"
+    if -LIDAR_SCAN_SECTOR_CENTER_MAX_DEG <= deg <= LIDAR_SCAN_SECTOR_CENTER_MAX_DEG:
+        return "center"
+    return None
+
+
+def classify_lidar_map_sector(bearing_deg: float) -> str | None:
+    """Classify map-local bearing into front/left/right occupancy sectors."""
+    deg = normalize_lidar_bearing_deg(float(bearing_deg))
+    if LIDAR_MAP_SECTOR_FRONT_MIN_DEG <= deg <= LIDAR_MAP_SECTOR_FRONT_MAX_DEG:
+        return "front"
+    if LIDAR_MAP_SECTOR_LEFT_MIN_DEG <= deg <= LIDAR_MAP_SECTOR_LEFT_MAX_DEG:
+        return "left"
+    if LIDAR_MAP_SECTOR_RIGHT_MIN_DEG <= deg <= LIDAR_MAP_SECTOR_RIGHT_MAX_DEG:
+        return "right"
+    return None
+
+
+def camera_wrong_target_contract() -> Dict[str, object]:
+    """Documented wrong-target priority + confidence thresholds for cam/usv_main."""
+    return {
+        "priority": CAM_WRONG_TARGET_PRIORITY,
+        "min_area_norm": CAM_WRONG_TARGET_MIN_AREA_NORM,
+        "strong_area_norm": CAM_WRONG_TARGET_STRONG_AREA_NORM,
+        "bearing_max_deg": CAM_WRONG_TARGET_BEARING_MAX_DEG,
+        "hsv_boundary_policy": dict(CAM_HSV_BOUNDARY_POLICY),
+    }
 TRUST_BAR_ENABLED = bool(INNOVATION_SWITCHES.get("autonomy_health_trust_bar", True))
 TRUST_WEIGHT_GPS = 0.30
 TRUST_WEIGHT_CAMERA = 0.20

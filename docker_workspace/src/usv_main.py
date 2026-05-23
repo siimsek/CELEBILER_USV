@@ -23,6 +23,11 @@ sys.stderr = open(sys.stderr.fileno(), 'w', buffering=1)
 from console_utils import make_console_printer
 from compliance_profile import (
     CAMERA_FRAME_TIMEOUT_S,
+    CAM_WRONG_TARGET_BEARING_MAX_DEG,
+    CAM_WRONG_TARGET_MIN_AREA_NORM,
+    CAM_WRONG_TARGET_STRONG_AREA_NORM,
+    classify_lidar_map_sector,
+    classify_lidar_scan_sector,
     COMMS_POLICY,
     CONTROL_HZ,
     CONTROL_DIR,
@@ -66,8 +71,13 @@ from compliance_profile import (
     HORIZON_LOCK_PITCH_GAIN,
     HORIZON_LOCK_ROLL_GAIN,
     HORIZON_LOCK_SCOPE,
+    LIDAR_OA_SECTOR_CENTER_HALF_DEG,
+    LIDAR_OA_SECTOR_SIDE_MAX_DEG,
+    LIDAR_OA_SECTOR_SIDE_MIN_DEG,
     LIDAR_READY_TIMEOUT_S,
+    LIDAR_STATUS_JSON_ENABLED,
     LINK_TOPOLOGY,
+    normalize_lidar_bearing_deg,
     LOG_DIR,
     MISSION_FILE_DEFAULT,
     MISSION_INPUT_FORMAT,
@@ -92,8 +102,14 @@ from compliance_profile import (
     NAV_CROSS_TRACK_L1_MIN_M,
     NAV_CROSS_TRACK_MIN_LEG_M,
     NAV_ALIGN_ACQUIRE_DEG,
+    NAV_ALIGN_ENTER_ADVANCE_DEG,
     NAV_ALIGN_HEADING_DONE_DEG,
+    NAV_ALIGN_PIVOT_UNTIL_DEG,
+    NAV_ALIGN_STABLE_S,
+    NAV_STRICT_HEADING_FIRST,
+    NAV_WP_ARRIVAL_EXIT_MARGIN_M,
     NAV_ALIGN_REACQUIRE_DEG,
+    NAV_ALIGN_TIMEOUT_LARGE_ERR_DEG,
     NAV_ALIGN_TURN_IMMUNITY_S,
     NAV_HEADING_MAX_ERROR_DEG,
     NAV_HEADING_CMD_SLEW_DEG_PER_S,
@@ -104,6 +120,7 @@ from compliance_profile import (
     NAV_ALIGN_TIGHT_OBSTACLE_M,
     NAV_ALIGN_MAX_SPEED_MPS,
     NAV_ALIGN_CREEP_SPEED_MPS,
+    NAV_MIN_PROGRESS_SPEED_MPS,
     NAV_ALIGN_REVERT_ALIGN_DEG,
     NAV_ALIGN_TIMEOUT_S,
     NAV_ALIGN_SUSPEND_NEAR_M,
@@ -122,6 +139,8 @@ from compliance_profile import (
     P2_STABLE_S,
     P2_WAIT_SPEED_MPS,
     P3_MAX_SPEED_MPS,
+    P3_TARGET_BEARING_GAIN,
+    P3_TARGET_HEADING_CLAMP_DEG,
     P3_RETRY_COUNT,
     P3_RETRY_S,
     P3_REVERSE_DISTANCE_M,
@@ -183,12 +202,18 @@ print = make_console_printer("USV")
 
 from mission_adapter import adapt_mission_to_structured
 from mission_config import (
+    MISSION_PROFILE_ALLOWED_P3_ENGAGEMENT_MODES,
+    MISSION_PROFILE_DEFAULT_P2_MIN_GATE_COUNT,
+    MISSION_PROFILE_DEFAULT_P3_ENGAGEMENT_MODE,
+    MISSION_PROFILE_DEFAULT_TRANSITION_POLICY,
     TARGET_STATE_FILE,
     default_sim_mission,
     get_mission_split_profile,
     load_target_state,
+    parse_mission_profile_payload,
     split_nav_engage,
     validate_coordinate_mission,
+    validate_target_color as validate_mission_target_color,
 )
 from motor_controller import MotorController as CoreMotorController
 from navigation import clamp_heading_error, compass_heading_to_ne_velocity
@@ -200,6 +225,7 @@ from nav_guidance import (
     schedule_waypoint_speed,
 )
 from obstacle_avoidance import decide_three_sector_avoidance
+from json_atomic import atomic_write_json
 from runtime_debug_log import log_jsonl, redirect_std_streams, setup_component_logger
 from sim_nav_state import heading_rad_to_nav_deg, load_sim_nav_state, mavlink_heading_cdeg_valid, parse_sim_home
 from spatial_frame import (
@@ -234,6 +260,8 @@ def _gps_week_tow_ms_from_unix(now_s: float) -> tuple:
 BAUD_RATE = 115200
 CONTROL_LOOP_HZ = max(5.0, min(10.0, float(CONTROL_HZ)))
 LOOP_DT = 1.0 / CONTROL_LOOP_HZ
+P2_READY_TIMEOUT_S = float(os.environ.get("USV_P2_READY_TIMEOUT_S", "30.0"))
+P2_GATE_MIN_WAIT_TIMEOUT_S = float(os.environ.get("USV_P2_GATE_MIN_WAIT_TIMEOUT_S", "60.0"))
 
 # Mission file default to profile-resolved path
 MISSION_FILE = os.environ.get("MISSION_FILE", MISSION_FILE_DEFAULT)
@@ -275,6 +303,23 @@ FC_EKF_VARIANCE_MAX = float(os.environ.get("FC_EKF_VARIANCE_MAX", "1.0"))
 FC_GPS_FRESH_S = float(os.environ.get("FC_GPS_FRESH_S", "3.0"))
 FC_GLOBAL_POSITION_FRESH_S = float(os.environ.get("FC_GLOBAL_POSITION_FRESH_S", "3.0"))
 FC_EKF_FRESH_S = float(os.environ.get("FC_EKF_FRESH_S", "5.0"))
+FC_START_PREREQ_WAIT_S = float(os.environ.get("FC_START_PREREQ_WAIT_S", "5.0"))
+SIM_EKF_GPS_GLITCH_GRACE_S = float(os.environ.get("SIM_EKF_GPS_GLITCH_GRACE_S", "30.0"))
+_ARM_STATUSTEXT_BLOCKERS = frozenset({
+    "accel_inconsistent_recent",
+    "gyro_inconsistent_recent",
+    "bad_position_recent",
+    "ekf_variance_recent",
+})
+ARM_STATUSTEXT_BLOCK_S = float(os.environ.get(
+    "ARM_STATUSTEXT_BLOCK_S",
+    "15.0" if os.environ.get("USV_SIM") == "1" else "8.0",
+))
+FC_ARM_READY_WAIT_S = float(os.environ.get(
+    "FC_ARM_READY_WAIT_S",
+    "12.0" if os.environ.get("USV_SIM") == "1" else "8.0",
+))
+SIM_EKF_ORIGIN_ARM_DELAY_S = float(os.environ.get("SIM_EKF_ORIGIN_ARM_DELAY_S", "1.5"))
 # Sim + yerel dosya: idle Pixhawk indirmesi MAVLink'i kirletir; mission_item_*_timeout gösterebilir.
 _SIM_SKIP_IDLE_PIXHAWK_SOURCES = frozenset({
     "local_flat_file",
@@ -327,24 +372,24 @@ LIDAR_GRID_SPAN_M = 60.0
 LIDAR_MAP_OCC_LOG_ODDS = 1.2
 LIDAR_MAP_FREE_LOG_ODDS = -1.0
 LIDAR_MAP_OCC_STABLE_COUNT = 3
-LIDAR_MAP_DISPLAY_STABLE_COUNT = int(os.environ.get("LIDAR_MAP_DISPLAY_STABLE_COUNT", "5"))
+_is_sim_lidar = os.environ.get("USV_SIM") == "1"
+LIDAR_MAP_DISPLAY_STABLE_COUNT = int(os.environ.get("LIDAR_MAP_DISPLAY_STABLE_COUNT", "3" if _is_sim_lidar else "5"))
 LIDAR_MAP_PERSIST_STABLE_COUNT = int(os.environ.get("LIDAR_MAP_PERSIST_STABLE_COUNT", "8"))
 LIDAR_MAP_PERSIST_MIN_HITS = int(os.environ.get("LIDAR_MAP_PERSIST_MIN_HITS", "12"))
 LIDAR_MAP_MAX_LOG_ODDS = 4.0
 LIDAR_MAP_MIN_LOG_ODDS = -4.0
-LIDAR_TAU_STABLE_S = float(os.environ.get("LIDAR_TAU_STABLE_S", "22.0"))
-LIDAR_TAU_TENTATIVE_S = 3.0
+LIDAR_TAU_STABLE_S = float(os.environ.get("LIDAR_TAU_STABLE_S", "45.0" if _is_sim_lidar else "22.0"))
+LIDAR_TAU_TENTATIVE_S = float(os.environ.get("LIDAR_TAU_TENTATIVE_S", "8.0" if _is_sim_lidar else "3.0"))
 LIDAR_BLOCKED_ENTER = 0.65
 LIDAR_BLOCKED_EXIT = 0.45
 LIDAR_SIDE_LOCK_S = 1.0
 LIDAR_SIDE_SWITCH_PENALTY = 0.12
-LIDAR_UNRELIABLE_DECAY_GAIN_MAX = 4.0
+LIDAR_UNRELIABLE_DECAY_GAIN_MAX = float(os.environ.get("LIDAR_UNRELIABLE_DECAY_GAIN_MAX", "1.5" if _is_sim_lidar else "4.0"))
 LIDAR_UNRELIABLE_STABLE_DROP = 2
 LIDAR_UNRELIABLE_RISK_DECAY = 0.72
 LIDAR_UNRELIABLE_CLEAR_BLOCK_CONSEC = 5
 LIDAR_DEGRADED_LIMIT_TIMEOUT_S = 4.0
 LIDAR_DEGRADED_HOLD_TIMEOUT_S = 8.0
-NAV_MIN_PROGRESS_SPEED_MPS = 0.50
 SIM_AVOID_RECOVERY_WINDOW_S = 6.0
 SIM_AVOID_RECOVERY_DIST_GROWTH_M = 0.90
 SIM_AVOID_RECOVERY_BLOCKED_MIN = 0.95
@@ -379,11 +424,11 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
 
 
 def normalize_heading_error(error):
-    if error > 180:
-        error -= 360
-    if error < -180:
-        error += 360
-    return error
+    try:
+        err_rad = math.radians(float(error))
+    except (TypeError, ValueError):
+        return 0.0
+    return math.degrees(math.atan2(math.sin(err_rad), math.cos(err_rad)))
 
 
 def _smooth_lidar_sector_m(prev, raw):
@@ -445,6 +490,7 @@ class USVStateMachine:
         self.mission_active = False
         self.mission_start_time = 0.0
         self.start_phase = "idle"
+        self._boot_mono = time.monotonic()
         self.command_lock = False
 
         # Initialize GPS position from SIM_HOME if in simulation mode
@@ -546,6 +592,11 @@ class USVStateMachine:
             "xtrack_error": 0.0,
             "ts_monotonic": 0.0,
         }
+        self.mission_current_seq = -1
+        self.mission_current_ts = 0.0
+        self.mission_reached_seq = -1
+        self.mission_reached_ts = 0.0
+        self.race_p1_completion_source = "none"
         self.fc_ekf_flags = 0
         self.fc_ekf_variances = {}
         self.fc_ekf_report_seen = False
@@ -558,6 +609,7 @@ class USVStateMachine:
         self.fc_guided_block_reason = "boot"
         self._last_ekf_variance_statustext_ts = 0.0
         self._fc_start_blocker_ts = {}
+        self._sim_ekf_origin_set_mono = 0.0
         self.fc_start_ready = False
         self.fc_start_block_reason = "boot"
         self._mode_state_last_signature = None
@@ -650,6 +702,7 @@ class USVStateMachine:
         self._nav_align_t0 = None
         self._wp_transition_until = 0.0
         self._nav_align_lock_until = 0.0
+        self._nav_align_stable_since = None
         self._nav_align_phase_last = "idle"
         self._last_guided_diag_ts = 0.0
         self._last_guided_velocity_ne = (0.0, 0.0)
@@ -774,19 +827,31 @@ class USVStateMachine:
         self._avoid_recovery_count = 0
         self._avoid_recovery_last_ts = 0.0
 
-        self.fusion_policy = "reject_if_lidar_unavailable"
+        self.fusion_policy = "concurrent_lidar_camera"
         self.ghost_gate_count = 0
         self.ghost_target_count = 0
+        self.ghost_yellow_count = 0
+        self.ghost_orange_count = 0
         self.last_confirmed_gate_dist_m = None
         self.last_confirmed_target_dist_m = None
+        self.last_confirmed_yellow_dist_m = None
+        self.last_confirmed_orange_dist_m = None
         self._last_gate_confirm_ts = 0.0
         self._last_target_confirm_ts = 0.0
+        self._last_yellow_confirm_ts = 0.0
+        self._last_orange_confirm_ts = 0.0
         self._gate_fusion_hold_since = None
         self._target_fusion_hold_since = None
+        self._yellow_fusion_hold_since = None
+        self._orange_fusion_hold_since = None
         self._gate_ghost_latched = False
         self._target_ghost_latched = False
+        self._yellow_ghost_latched = False
+        self._orange_ghost_latched = False
         self._gate_camera_only_since = None
         self._target_camera_only_since = None
+        self._yellow_camera_only_since = None
+        self._orange_camera_only_since = None
         self._p2_local_minima_start_ts = None
         self._p2_local_minima_active = False
         self.dynamic_speed_profile = {
@@ -928,6 +993,13 @@ class USVStateMachine:
         self.post_start_mission_change_rejected = False
         self.mission_validated_at_timestamp = None
         self.mission_split_profile = get_mission_split_profile(0)
+        self.mission_profile = {}
+        self.mission_profile_valid = False
+        self.mission_profile_race_ready = False
+        self.mission_profile_error = "not_loaded"
+        self.p2_min_gate_count = int(MISSION_PROFILE_DEFAULT_P2_MIN_GATE_COUNT)
+        self.p3_engagement_mode = str(MISSION_PROFILE_DEFAULT_P3_ENGAGEMENT_MODE)
+        self.phase_transition_policy = dict(MISSION_PROFILE_DEFAULT_TRANSITION_POLICY)
         self.gate_count = 0
         self._gate_event_start = None
         self._gate_event_latched = False
@@ -1351,6 +1423,17 @@ class USVStateMachine:
         yaw_rate = float(self.current_yaw_rate_dps or 0.0)
         err_abs = abs(err)
         yaw_abs = abs(yaw_rate)
+        if speed <= 0.01:
+            self._wrong_turn_since = None
+            self._wrong_turn_active = False
+            return err, speed, False
+        if bool(NAV_STRICT_HEADING_FIRST) and (
+            str(getattr(self, "_nav_align_mode", "align")) == "align"
+            or err_abs > float(NAV_ALIGN_HEADING_DONE_DEG)
+        ):
+            self._wrong_turn_since = None
+            self._wrong_turn_active = False
+            return err, speed, False
         # Large post-waypoint turns can briefly look like a wrong turn while yaw catches up.
         if err_abs >= 28.0:
             self._wrong_turn_since = None
@@ -1377,17 +1460,28 @@ class USVStateMachine:
                 self._wrong_turn_count += 1
             self._wrong_turn_active = True
             if not self._autonomy_pwm_via_rc_override():
-                self.heading_control_diagnostic = "wrong_turn_observed:guided_autopilot_control"
+                hold_speed = 0.0 if os.environ.get("USV_SIM") == "1" else float(speed)
+                diagnostic = (
+                    "wrong_turn_hold:sim_guided_yaw_only"
+                    if os.environ.get("USV_SIM") == "1"
+                    else "wrong_turn_observed:guided_autopilot_control"
+                )
+                self.heading_control_diagnostic = diagnostic
                 if (now - float(self._wrong_turn_last_log_ts or 0.0)) >= 0.5:
+                    mode_label = "sim_guided_yaw_hold" if hold_speed <= 0.0 else "guided diagnostic_only"
                     print(
-                        "[WRONG_TURN] observed err={:.1f} yaw_rate={:.2f} speed={:.2f} count={} mode=guided diagnostic_only".format(
+                        "[WRONG_TURN] observed err={:.1f} yaw_rate={:.2f} speed={:.2f}->{:.2f} count={} mode={}".format(
                             err,
                             yaw_rate,
                             speed,
+                            hold_speed,
                             int(self._wrong_turn_count),
+                            mode_label,
                         )
                     )
                     self._wrong_turn_last_log_ts = now
+                if hold_speed <= 0.0:
+                    return float(err), 0.0, True
                 return float(err), float(speed), False
             guarded_err = 0.0
             guarded_speed = 0.0
@@ -1595,6 +1689,20 @@ class USVStateMachine:
             if nearest is None or distance_m < nearest:
                 nearest = distance_m
         return nearest
+
+    def _camera_lidar_obstacle_concurrent(self, *, raw_detected, bearing_deg):
+        """True when camera and lidar both contribute for the same obstacle bearing."""
+        if not bool(raw_detected):
+            return False
+        if not (bool(self.camera_ready) and bool(self.lidar_ready)):
+            return False
+        try:
+            bearing = float(bearing_deg)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(bearing):
+            return False
+        return self._nearest_lidar_distance_for_camera_bearing(bearing) is not None
 
     def _camera_obstacle_confirmed(self, bearing_deg, area_norm, seen_since, *, min_dwell_s, strong_area_norm):
         try:
@@ -1898,15 +2006,23 @@ class USVStateMachine:
     @staticmethod
     def _classify_fc_start_blocker(text):
         low_text = str(text or "").lower()
+        if "smartrtl" in low_text:
+            return ""
         if "gyros inconsistent" in low_text and ("arm:" in low_text or "prearm:" in low_text):
             return "gyro_inconsistent_recent"
         if "accels inconsistent" in low_text and ("arm:" in low_text or "prearm:" in low_text):
             return "accel_inconsistent_recent"
         if "ekf variance" in low_text:
             return "ekf_variance_recent"
-        if "bad position" in low_text:
+        if "bad position" in low_text and ("arm:" in low_text or "prearm:" in low_text):
             return "bad_position_recent"
         return ""
+
+    @staticmethod
+    def _fc_arm_blocker_ttl_s(reason):
+        if str(reason or "") in _ARM_STATUSTEXT_BLOCKERS:
+            return float(ARM_STATUSTEXT_BLOCK_S)
+        return float(FC_START_STABLE_S)
 
     def _mark_fc_start_blocker(self, reason):
         reason = str(reason or "").strip()
@@ -1917,11 +2033,14 @@ class USVStateMachine:
         self._fc_start_blocker_ts[reason] = time.monotonic()
         self.fc_start_ready = False
         self.fc_start_block_reason = reason
-        if reason in ("ekf_variance_recent", "bad_position_recent"):
+        if reason in ("ekf_variance_recent", "bad_position_recent", "accel_inconsistent_recent", "gyro_inconsistent_recent"):
             self._last_ekf_variance_statustext_ts = time.monotonic()
-            self.fc_nav_mode_ready = False
-            self.fc_nav_mode_ready_since = None
-            self.fc_guided_block_reason = "ekf_variance_recent" if reason == "ekf_variance_recent" else "bad_position_recent"
+            if reason in ("ekf_variance_recent", "bad_position_recent"):
+                self.fc_nav_mode_ready = False
+                self.fc_nav_mode_ready_since = None
+                self.fc_guided_block_reason = (
+                    "ekf_variance_recent" if reason == "ekf_variance_recent" else "bad_position_recent"
+                )
 
     def _recent_fc_start_block_reason(self, now=None):
         now = float(now if now is not None else time.monotonic())
@@ -1934,7 +2053,7 @@ class USVStateMachine:
                 age = now - float(ts or 0.0)
             except (TypeError, ValueError):
                 continue
-            if 0.0 <= age < float(FC_START_STABLE_S):
+            if 0.0 <= age < self._fc_arm_blocker_ttl_s(reason):
                 recent.append((age, str(reason)))
         if not recent:
             return "none"
@@ -1998,6 +2117,12 @@ class USVStateMachine:
         gps_glitch = bool(flags & 1024)
         accel_error = bool(flags & 4096)
         if gps_glitch:
+            if (
+                os.environ.get("USV_SIM") == "1"
+                and (time.monotonic() - float(getattr(self, "_boot_mono", 0.0) or 0.0))
+                < float(SIM_EKF_GPS_GLITCH_GRACE_S)
+            ):
+                return ""
             return "gps_glitch"
         if accel_error:
             return "accel_error"
@@ -2809,7 +2934,11 @@ class USVStateMachine:
             return True, 1.0
 
         if not self.lidar_ready:
-            camera_only_attr = "_gate_camera_only_since" if "gate" in label else "_target_camera_only_since"
+            camera_only_attr = "_gate_camera_only_since" if "gate" in label else (
+                "_target_camera_only_since" if "target" in label else (
+                    "_yellow_camera_only_since" if "yellow" in label else "_orange_camera_only_since"
+                )
+            )
             camera_only_since = getattr(self, camera_only_attr)
             now = time.monotonic()
             if camera_only_since is None:
@@ -2921,6 +3050,64 @@ class USVStateMachine:
         if not target_detected:
             fused["target_bearing_error_deg"] = 0.0
             fused["target_area_norm"] = 0.0
+
+        yellow_actionable = bool(camera_data.get("yellow_actionable", True))
+        orange_actionable = bool(camera_data.get("orange_actionable", True))
+        yellow_raw_detected = bool(camera_data.get("yellow_obstacle_detected_raw", False)) and yellow_actionable
+        orange_raw_detected = bool(camera_data.get("orange_boundary_detected_raw", False)) and orange_actionable
+        try:
+            yellow_bearing_raw = float(camera_data.get("yellow_obstacle_bearing_deg_raw", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            yellow_bearing_raw = 0.0
+        try:
+            orange_bearing_raw = float(camera_data.get("orange_boundary_bearing_deg_raw", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            orange_bearing_raw = 0.0
+
+        yellow_detected, yellow_dist = self._fuse_visual_detection(
+            label="yellow_obstacle",
+            raw_detected=yellow_raw_detected,
+            raw_bearing_deg=yellow_bearing_raw,
+            hold_attr="_yellow_fusion_hold_since",
+            ghost_latch_attr="_yellow_ghost_latched",
+            ghost_count_attr="ghost_yellow_count",
+            confirm_ts_attr="_last_yellow_confirm_ts",
+            last_dist_attr="last_confirmed_yellow_dist_m",
+        )
+        orange_detected, orange_dist = self._fuse_visual_detection(
+            label="orange_boundary",
+            raw_detected=orange_raw_detected,
+            raw_bearing_deg=orange_bearing_raw,
+            hold_attr="_orange_fusion_hold_since",
+            ghost_latch_attr="_orange_ghost_latched",
+            ghost_count_attr="ghost_orange_count",
+            confirm_ts_attr="_last_orange_confirm_ts",
+            last_dist_attr="last_confirmed_orange_dist_m",
+        )
+
+        if yellow_actionable:
+            fused["yellow_obstacle_detected"] = bool(yellow_detected)
+            if yellow_detected:
+                fused["yellow_obstacle_bearing_deg"] = round(float(yellow_bearing_raw), 3)
+                fused["yellow_obstacle_area_norm"] = round(
+                    float(camera_data.get("yellow_obstacle_area_norm_raw", 0.0) or 0.0),
+                    4,
+                )
+            elif not yellow_raw_detected:
+                fused["yellow_obstacle_bearing_deg"] = 0.0
+                fused["yellow_obstacle_area_norm"] = 0.0
+
+        if orange_actionable:
+            fused["orange_boundary_detected"] = bool(orange_detected)
+            if orange_detected:
+                fused["orange_boundary_bearing_deg"] = round(float(orange_bearing_raw), 3)
+                fused["orange_boundary_area_norm"] = round(
+                    float(camera_data.get("orange_boundary_area_norm_raw", 0.0) or 0.0),
+                    4,
+                )
+            elif not orange_raw_detected:
+                fused["orange_boundary_bearing_deg"] = 0.0
+                fused["orange_boundary_area_norm"] = 0.0
 
         return fused
 
@@ -3121,6 +3308,8 @@ class USVStateMachine:
                 "policy": self.fusion_policy,
                 "ghost_gate_count": int(self.ghost_gate_count),
                 "ghost_target_count": int(self.ghost_target_count),
+                "ghost_yellow_count": int(self.ghost_yellow_count),
+                "ghost_orange_count": int(self.ghost_orange_count),
                 "last_confirmed_gate_dist_m": (
                     round(float(self.last_confirmed_gate_dist_m), 3)
                     if self.last_confirmed_gate_dist_m is not None
@@ -3131,7 +3320,18 @@ class USVStateMachine:
                     if self.last_confirmed_target_dist_m is not None
                     else None
                 ),
+                "last_confirmed_yellow_dist_m": (
+                    round(float(self.last_confirmed_yellow_dist_m), 3)
+                    if self.last_confirmed_yellow_dist_m is not None
+                    else None
+                ),
+                "last_confirmed_orange_dist_m": (
+                    round(float(self.last_confirmed_orange_dist_m), 3)
+                    if self.last_confirmed_orange_dist_m is not None
+                    else None
+                ),
                 "lidar_ready": bool(self.lidar_ready),
+                "camera_ready": bool(self.camera_ready),
             }
             active_waypoint_index = int(self._active_waypoint_index) if self._active_waypoint_index >= 0 else -1
             camera_pipeline = self.camera_status.get("pipeline", {})
@@ -3139,14 +3339,21 @@ class USVStateMachine:
                 camera_pipeline = {}
             lidar_points_local_for_state = []
             lidar_points_world_for_state = []
-            if bool(self._lidar_quality_ready) and str(self._lidar_frame_status).startswith("ok"):
-                seen_world = set()
-                for wx_m, wy_m in self._occupied_lidar_map_points_world(limit=8192, min_stable_count=LIDAR_MAP_DISPLAY_STABLE_COUNT):
-                    key = (round(float(wx_m), 2), round(float(wy_m), 2))
-                    if key in seen_world:
-                        continue
-                    seen_world.add(key)
-                    lidar_points_world_for_state.append([key[0], key[1]])
+            lidar_frame_ok = bool(self._lidar_quality_ready) and str(self._lidar_frame_status).startswith("ok")
+            display_stable = int(LIDAR_MAP_DISPLAY_STABLE_COUNT)
+            if not lidar_frame_ok:
+                display_stable = max(int(LIDAR_MAP_OCC_STABLE_COUNT), display_stable - 1)
+            seen_world = set()
+            for wx_m, wy_m in self._occupied_lidar_map_points_world(
+                limit=8192,
+                min_stable_count=display_stable,
+            ):
+                key = (round(float(wx_m), 2), round(float(wy_m), 2))
+                if key in seen_world:
+                    continue
+                seen_world.add(key)
+                lidar_points_world_for_state.append([key[0], key[1]])
+            if lidar_frame_ok:
                 for item in list(self._stable_map_points)[:640]:
                     if not isinstance(item, (list, tuple)) or len(item) < 2:
                         continue
@@ -3218,6 +3425,9 @@ class USVStateMachine:
                 "last_mode_command": dict(self.last_mode_command),
                 "last_command_ack": dict(self.last_command_ack),
                 "last_statustext": dict(self.last_statustext),
+                "mission_current_seq": int(self.mission_current_seq),
+                "mission_reached_seq": int(self.mission_reached_seq),
+                "race_p1_completion_source": str(self.race_p1_completion_source),
                 "start_time": self.mission_start_time,
                 "start_requested": bool(os.path.exists(FLAG_START)),
                 "hold_reason": self.hold_reason,
@@ -3255,6 +3465,11 @@ class USVStateMachine:
                     "schema_version": 1,
                     "upload_source": self.mission_upload_source,
                     "mission_synced": bool(self.mission_synced),
+                    "mission_profile_valid": bool(self.mission_profile_valid),
+                    "mission_profile_race_ready": bool(self.mission_profile_race_ready),
+                    "mission_profile_error": str(self.mission_profile_error or ""),
+                    "p2_min_gate_count": int(self.p2_min_gate_count),
+                    "p3_engagement_mode": str(self.p3_engagement_mode),
                     "pixhawk_mission_count": int(self.pixhawk_mission_count),
                     "pixhawk_mission_synced_at": self.pixhawk_mission_synced_at,
                     "pixhawk_mission_sync_error": str(self.pixhawk_mission_sync_error or ""),
@@ -3272,6 +3487,13 @@ class USVStateMachine:
                 "pixhawk_mirror_error": str(self.pixhawk_mirror_error or ""),
                 "mission_validated_at_timestamp": self.mission_validated_at_timestamp,
                 "post_start_mission_change_rejected": bool(self.post_start_mission_change_rejected),
+                "mission_profile": dict(self.mission_profile),
+                "mission_profile_valid": bool(self.mission_profile_valid),
+                "mission_profile_race_ready": bool(self.mission_profile_race_ready),
+                "mission_profile_error": str(self.mission_profile_error or ""),
+                "phase_transition_policy": dict(self.phase_transition_policy),
+                "p2_min_gate_count": int(self.p2_min_gate_count),
+                "p3_engagement_mode": str(self.p3_engagement_mode),
                 "waypoint_counts": {
                     "nav_total": len(self.nav_waypoints) if hasattr(self, 'nav_waypoints') else 0,
                     "has_engage": self.engage_wp is not None if hasattr(self, 'engage_wp') else False,
@@ -3329,6 +3551,10 @@ class USVStateMachine:
                 "nav_arrival_phase": self.nav_arrival_phase,
                 "nav_align_mode": str(self._nav_align_mode),
                 "nav_align_phase": "ACQUIRE_HEADING" if self._nav_align_mode == "align" else "TRACK_LEG",
+                "nav_strict_heading_first": bool(NAV_STRICT_HEADING_FIRST),
+                "nav_align_stable_s": round(float(NAV_ALIGN_STABLE_S), 3),
+                "surge_allowed": bool(self._nav_surge_allowed(self.nav_heading_error_deg)),
+                "advance_stable_elapsed_s": round(float(self._nav_advance_stable_elapsed_s()), 3),
                 "guided_vx_north_mps": round(float(self._last_guided_velocity_ne[0]), 4),
                 "guided_vy_east_mps": round(float(self._last_guided_velocity_ne[1]), 4),
                 "avoidance_active": bool(self.avoidance_active),
@@ -3450,6 +3676,9 @@ class USVStateMachine:
                     old.get('sim_nav_valid') == payload['sim_nav_valid'] and
                     old.get('last_command_ack') == payload['last_command_ack'] and
                     old.get('last_statustext') == payload['last_statustext'] and
+                    old.get('mission_current_seq') == payload['mission_current_seq'] and
+                    old.get('mission_reached_seq') == payload['mission_reached_seq'] and
+                    old.get('race_p1_completion_source') == payload['race_p1_completion_source'] and
                     old.get('target') == payload['target'] and
                     old.get('wp_info') == payload['wp_info'] and
                     old.get('active_waypoint_index') == payload['active_waypoint_index'] and
@@ -3472,6 +3701,12 @@ class USVStateMachine:
                     old.get('mission_lifecycle') == payload['mission_lifecycle'] and
                     old.get('mission_upload_source') == payload['mission_upload_source'] and
                     old.get('mission_synced') == payload['mission_synced'] and
+                    old.get('mission_profile_valid') == payload['mission_profile_valid'] and
+                    old.get('mission_profile_race_ready') == payload['mission_profile_race_ready'] and
+                    old.get('mission_profile_error') == payload['mission_profile_error'] and
+                    old.get('phase_transition_policy') == payload['phase_transition_policy'] and
+                    old.get('p2_min_gate_count') == payload['p2_min_gate_count'] and
+                    old.get('p3_engagement_mode') == payload['p3_engagement_mode'] and
                     old.get('pixhawk_mission_count') == payload['pixhawk_mission_count'] and
                     old.get('target_color') == payload['target_color'] and
                     old.get('perception_policy') == payload['perception_policy'] and
@@ -3532,24 +3767,13 @@ class USVStateMachine:
             
             # Write only if logical state changed or 1 second heartbeat timeout exceeded
             if logical_state_changed or (now - self._last_state_write_time >= 1.0):
-                os.makedirs(CONTROL_DIR, exist_ok=True)
-                # Use temporary file with atomic rename for safe I/O
-                import tempfile
-                try:
-                    # Create temp file in same directory (for atomic rename)
-                    temp_fd, tmp_path = tempfile.mkstemp(dir=CONTROL_DIR, prefix='.tmp_state_', suffix='.json')
-                    with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                        json.dump(payload, f)
-                        f.flush()
-                        os.fsync(f.fileno())  # Force disk write
-                    # Atomic rename
-                    os.replace(tmp_path, STATE_FILE)
-                except Exception as tmp_exc:
-                    # Fallback: direct write (less safe but better than failure)
-                    with open(STATE_FILE, 'w', encoding='utf-8') as f:
-                        json.dump(payload, f)
-                
-                # Update cache
+                if not atomic_write_json(STATE_FILE, payload):
+                    self._bump_error(
+                        "state_write_error",
+                        "[WARN] [STATE] Atomic yazma basarisiz; onceki gecerli state korunuyor",
+                    )
+                    return
+
                 self._last_state_write_time = now
                 self._last_written_state = payload
                 
@@ -3941,11 +4165,12 @@ class USVStateMachine:
                             points.append((x_m, y_m))
                         if quality_ready:
                             for deg, r in front_samples:
-                                if deg > 22.0:
+                                sector = classify_lidar_scan_sector(deg)
+                                if sector == "left":
                                     left = min(left, r)
-                                elif deg < -22.0:
+                                elif sector == "right":
                                     right = min(right, r)
-                                else:
+                                elif sector == "center":
                                     center = min(center, r)
                             current_left = float(left)
                             current_center = float(center)
@@ -4361,15 +4586,24 @@ class USVStateMachine:
                     print(f"[WARN] [ARM] Normal arm reddedildi; blocker={start_status.get('block_reason')}")
                     return False
                 print("[WARN] [ARM] Normal arm timeout, SITL stabilize beklenip normal retry deneniyor")
-                stable_deadline = time.monotonic() + float(FC_START_STABLE_S)
-                retry_deadline = time.monotonic() + max(6.0, float(FC_START_STABLE_S) + 2.0)
-                while time.monotonic() < stable_deadline and time.monotonic() < retry_deadline:
-                    self._drain_mav_messages()
-                    start_status = self._fc_start_status()
-                    if not start_status.get("ready", False):
-                        stable_deadline = time.monotonic() + float(FC_START_STABLE_S)
+                retry_deadline = time.monotonic() + max(8.0, float(ARM_STATUSTEXT_BLOCK_S))
+                stable_since = None
+                while time.monotonic() < retry_deadline:
+                    self._service_startup_wait_once()
+                    try:
+                        self._sitl_gps_input_from_sim()
+                    except Exception:
+                        pass
+                    arm_ready, _, start_status = self._arm_ready_now()
+                    if arm_ready:
+                        if stable_since is None:
+                            stable_since = time.monotonic()
+                        elif time.monotonic() - float(stable_since) >= float(FC_START_STABLE_S):
+                            break
+                    else:
+                        stable_since = None
                     time.sleep(0.1)
-                if not self._fc_start_status().get("ready", False):
+                else:
                     print(f"[WARN] [ARM] Retry oncesi FC start hazir degil: {self.fc_start_block_reason}")
                     return False
                 self.master.arducopter_arm()
@@ -4437,9 +4671,9 @@ class USVStateMachine:
 
             distances = [65535] * 72
             sector_values = (
-                (-60.0, -22.5, range_cm(left_m)),
-                (-22.5, 22.5, range_cm(center_m)),
-                (22.5, 60.0, range_cm(right_m)),
+                (-LIDAR_OA_SECTOR_SIDE_MAX_DEG, -LIDAR_OA_SECTOR_CENTER_HALF_DEG, range_cm(left_m)),
+                (-LIDAR_OA_SECTOR_CENTER_HALF_DEG, LIDAR_OA_SECTOR_CENTER_HALF_DEG, range_cm(center_m)),
+                (LIDAR_OA_SECTOR_SIDE_MIN_DEG, LIDAR_OA_SECTOR_SIDE_MAX_DEG, range_cm(right_m)),
             )
             angle_offset = -90.0
             increment_f = 2.5
@@ -4600,21 +4834,31 @@ class USVStateMachine:
         )
         if not should_write:
             return
-        try:
-            os.makedirs(CONTROL_DIR, exist_ok=True)
-            tmp_path = f"{MOTOR_COMMAND_FILE}.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle)
-            os.replace(tmp_path, MOTOR_COMMAND_FILE)
+        if atomic_write_json(MOTOR_COMMAND_FILE, payload):
             self._last_motor_command_write_time = now
             self._last_written_motor_command = payload
-        except Exception as exc:
-            self._warn_throttled("motor_command_write", f"[WARN] [MOTOR] motor_command yazilamadi: {exc}", period_s=2.0)
+        else:
+            self._warn_throttled(
+                "motor_command_write",
+                "[WARN] [MOTOR] motor_command atomic yazma basarisiz; onceki dosya korunuyor",
+                period_s=2.0,
+            )
 
     def _send_guided_speed_heading(self, speed_mps, heading_deg, reason="autonomy", display_pwm=None):
         """Primary autonomy actuator path: Rover GUIDED velocity + yaw setpoint."""
         speed_mps = max(0.0, float(speed_mps))
         heading_deg = float(heading_deg) % 360.0
+        heading_err = normalize_heading_error(float(heading_deg) - float(self.current_heading))
+        turn_phase = abs(float(heading_err)) > float(NAV_ALIGN_HEADING_DONE_DEG)
+        body_forward_only = False
+        if turn_phase and speed_mps > 0.0:
+            creep_cap = max(0.0, float(NAV_ALIGN_CREEP_SPEED_MPS))
+            if creep_cap > 0.0:
+                speed_mps = min(float(speed_mps), creep_cap)
+                body_forward_only = True
+            else:
+                speed_mps = 0.0
+                body_forward_only = True
         self.v_target = speed_mps
         self.heading_target = heading_deg
         self._last_sent_rc_override = {
@@ -4653,7 +4897,8 @@ class USVStateMachine:
             from pymavlink import mavutil
 
             yaw_rad = math.radians(heading_deg)
-            vx, vy = compass_heading_to_ne_velocity(speed_mps, heading_deg)
+            velocity_heading_deg = float(self.current_heading) if body_forward_only else heading_deg
+            vx, vy = compass_heading_to_ne_velocity(speed_mps, velocity_heading_deg)
             self._last_guided_velocity_ne = (float(vx), float(vy))
             self.master.mav.set_position_target_global_int_send(
                 int(time.time() * 1000) & 0xFFFFFFFF,
@@ -4684,7 +4929,9 @@ class USVStateMachine:
                     speed_mps=round(float(speed_mps), 3),
                     heading_target_deg=round(float(heading_deg), 3),
                     current_heading_deg=round(float(self.current_heading), 3),
-                    heading_error_deg=round(normalize_heading_error(float(heading_deg) - float(self.current_heading)), 3),
+                    heading_error_deg=round(float(heading_err), 3),
+                    turn_phase=bool(turn_phase),
+                    body_forward_only=bool(body_forward_only),
                     vx_north_mps=round(float(vx), 4),
                     vy_east_mps=round(float(vy), 4),
                     yaw_rad=round(float(yaw_rad), 5),
@@ -5076,8 +5323,15 @@ class USVStateMachine:
                             if "ekf failsafe cleared" in low_text:
                                 self._last_ekf_variance_statustext_ts = 0.0
                                 if isinstance(getattr(self, "_fc_start_blocker_ts", None), dict):
-                                    self._fc_start_blocker_ts.pop("ekf_variance_recent", None)
-                                    self._fc_start_blocker_ts.pop("bad_position_recent", None)
+                                    for _block_key in (
+                                        "ekf_variance_recent",
+                                        "bad_position_recent",
+                                        "accel_inconsistent_recent",
+                                        "gyro_inconsistent_recent",
+                                    ):
+                                        self._fc_start_blocker_ts.pop(_block_key, None)
+                            if "origin set" in low_text and os.environ.get("USV_SIM") == "1":
+                                self._sim_ekf_origin_set_mono = time.monotonic()
                             blocker = self._classify_fc_start_blocker(text)
                             if blocker:
                                 self._mark_fc_start_blocker(blocker)
@@ -5238,6 +5492,18 @@ class USVStateMachine:
                         }
                     except Exception as nav_ctl_exc:
                         self._warn_throttled("nav_controller_parse", f"[WARN] [MAV] NAV_CONTROLLER_OUTPUT parse hatasi: {nav_ctl_exc}")
+                elif mtype == "MISSION_CURRENT":
+                    try:
+                        self.mission_current_seq = int(getattr(msg, "seq", -1) or -1)
+                        self.mission_current_ts = time.monotonic()
+                    except Exception as mission_current_exc:
+                        self._warn_throttled("mission_current_parse", f"[WARN] [MAV] MISSION_CURRENT parse hatasi: {mission_current_exc}")
+                elif mtype in ("MISSION_ITEM_REACHED", "MISSION_REACHED"):
+                    try:
+                        self.mission_reached_seq = int(getattr(msg, "seq", -1) or -1)
+                        self.mission_reached_ts = time.monotonic()
+                    except Exception as mission_reached_exc:
+                        self._warn_throttled("mission_reached_parse", f"[WARN] [MAV] MISSION_REACHED parse hatasi: {mission_reached_exc}")
                 elif mtype == "VFR_HUD":
                     try:
                         self.current_speed_mps = float(getattr(msg, "groundspeed", 0.0) or 0.0)
@@ -5508,10 +5774,16 @@ class USVStateMachine:
         else:
             self._gate_fusion_hold_since = None
             self._target_fusion_hold_since = None
+            self._yellow_fusion_hold_since = None
+            self._orange_fusion_hold_since = None
             self._gate_ghost_latched = False
             self._target_ghost_latched = False
+            self._yellow_ghost_latched = False
+            self._orange_ghost_latched = False
             self._gate_camera_only_since = None
             self._target_camera_only_since = None
+            self._yellow_camera_only_since = None
+            self._orange_camera_only_since = None
 
         adapt = data.get("camera_adaptation", {})
         if not isinstance(adapt, dict):
@@ -5736,6 +6008,7 @@ class USVStateMachine:
         self.nav_heading_error_delta_deg = 0.0
         self._nav_align_mode = "align"
         self._nav_align_t0 = time.monotonic()
+        self._nav_align_stable_since = None
         self._wp_transition_until = time.monotonic() + float(NAV_ALIGN_TURN_IMMUNITY_S)
         self._nav_align_lock_until = time.monotonic() + float(NAV_ALIGN_TURN_IMMUNITY_S)
         self._nav_align_phase_last = "ACQUIRE_HEADING"
@@ -5790,7 +6063,9 @@ class USVStateMachine:
         arrival_radius = float(R_WP_M)
         hold_required_s = float(T_HOLD_S)
         pass_radius = max(arrival_radius + 0.4, min(float(R_WP_M), 2.8))
+        exit_margin = float(NAV_WP_ARRIVAL_EXIT_MARGIN_M)
         within_arrival = dist_m <= arrival_radius
+        within_arrival_latch = dist_m <= (arrival_radius + exit_margin)
 
         result = False
         hold_active = False
@@ -5799,6 +6074,12 @@ class USVStateMachine:
             if self._wp_accept_hold_start is None:
                 self._wp_accept_hold_start = time.monotonic()
             hold_s = time.monotonic() - self._wp_accept_hold_start
+            self.waypoint_accept_reason = "arrival_radius"
+            self.nav_arrival_phase = "holding" if hold_s < hold_required_s else "accepted"
+            result = bool(hold_s >= hold_required_s)
+            hold_active = True
+        elif within_arrival_latch and self._wp_accept_hold_start is not None:
+            hold_s = time.monotonic() - float(self._wp_accept_hold_start)
             self.waypoint_accept_reason = "arrival_radius"
             self.nav_arrival_phase = "holding" if hold_s < hold_required_s else "accepted"
             result = bool(hold_s >= hold_required_s)
@@ -6024,6 +6305,82 @@ class USVStateMachine:
 
             time.sleep(max(0.05, float(PIXHAWK_MISSION_READY_SERVICE_DT_S)))
 
+    def _arm_ready_now(self):
+        guided_prereq = self._guided_prereq_status()
+        fc_start = self._fc_start_status(guided_prereq=guided_prereq)
+        if not guided_prereq.get("ready", False) or not fc_start.get("ready", False):
+            return False, guided_prereq, fc_start
+        if os.environ.get("USV_SIM") == "1":
+            if not bool(self.fc_ekf_report_seen) or not bool(self.fc_nav_mode_ready):
+                return False, guided_prereq, fc_start
+            origin_mono = float(getattr(self, "_sim_ekf_origin_set_mono", 0.0) or 0.0)
+            if origin_mono > 0.0:
+                since_origin = time.monotonic() - origin_mono
+                if since_origin < float(SIM_EKF_ORIGIN_ARM_DELAY_S):
+                    return False, guided_prereq, fc_start
+        return True, guided_prereq, fc_start
+
+    def _wait_for_arm_ready(self, deadline_s=None):
+        deadline = time.monotonic() + max(0.0, float(
+            deadline_s if deadline_s is not None else FC_ARM_READY_WAIT_S
+        ))
+        last_log = 0.0
+        ready, guided_prereq, fc_start = self._arm_ready_now()
+        while True:
+            if ready:
+                return True, guided_prereq, fc_start
+
+            now = time.monotonic()
+            if now - last_log >= 2.0:
+                last_log = now
+                block_reason = str(fc_start.get("block_reason", "unknown"))
+                print(f"[START] Arm hazirlik bekleniyor (block={block_reason})")
+
+            if now >= deadline:
+                return False, guided_prereq, fc_start
+
+            self._service_startup_wait_once()
+            ready, guided_prereq, fc_start = self._arm_ready_now()
+            time.sleep(max(0.05, float(PIXHAWK_MISSION_READY_SERVICE_DT_S)))
+
+    def _wait_for_fc_start_ready(self, deadline_s=None):
+        deadline = time.monotonic() + max(0.0, float(
+            deadline_s if deadline_s is not None else FC_START_PREREQ_WAIT_S
+        ))
+        last_log = 0.0
+        guided_prereq = self._guided_prereq_status()
+        fc_start = self._fc_start_status(guided_prereq=guided_prereq)
+        while True:
+            if guided_prereq.get("ready", False) and fc_start.get("ready", False):
+                return True, guided_prereq, fc_start
+
+            now = time.monotonic()
+            if now - last_log >= 2.0:
+                last_log = now
+                missing = ",".join(guided_prereq.get("missing", [])) or "unknown"
+                block_reason = str(fc_start.get("block_reason", "unknown"))
+                print(
+                    f"[START] FC hazirlik bekleniyor (missing={missing}, block={block_reason})"
+                )
+
+            if now >= deadline:
+                return False, guided_prereq, fc_start
+
+            self._service_startup_wait_once()
+            guided_prereq = self._guided_prereq_status()
+            fc_start = self._fc_start_status(guided_prereq=guided_prereq)
+            time.sleep(max(0.05, float(PIXHAWK_MISSION_READY_SERVICE_DT_S)))
+
+    def _start_request_pending(self):
+        if os.path.exists(FLAG_START):
+            return True
+        return str(getattr(self, "start_phase", "idle") or "idle") in (
+            "requested",
+            "preflight",
+            "fc_prereq",
+            "arming",
+        )
+
     def _mission_upload_home(self, coords):
         try:
             from sim_nav_state import parse_sim_home
@@ -6071,6 +6428,8 @@ class USVStateMachine:
     def _upload_local_mission_to_pixhawk(self, coords, source):
         if not self._sim_test_should_upload_local_mission():
             return False
+        if self._start_request_pending():
+            return False
         try:
             from pymavlink import mavutil
 
@@ -6099,7 +6458,9 @@ class USVStateMachine:
             # mission_state.json do not go stale before the main loop starts.
             prereq = self._guided_prereq_status()
             prereq_ready = bool(prereq.get("ready", False))
-            if not prereq_ready and USV_MODE == USV_MODE_RACE:
+            if not prereq_ready and (
+                USV_MODE == USV_MODE_RACE or self._sim_test_should_upload_local_mission()
+            ):
                 prereq_ready, prereq = self._wait_for_mission_upload_prereq()
             if not prereq_ready:
                 missing = ",".join(prereq.get("missing", [])) or "unknown"
@@ -6137,9 +6498,7 @@ class USVStateMachine:
                     self.master.target_system,
                     self.master.target_component,
                 )
-            time.sleep(0.05)
-            while self.master.recv_match(blocking=False) is not None:
-                pass
+            self._service_startup_wait_once()
 
             try:
                 self.master.mav.mission_count_send(
@@ -6159,10 +6518,11 @@ class USVStateMachine:
             sent = set()
             ack_result = None
             while time.monotonic() < deadline:
+                self._service_startup_wait_once()
                 msg = self.master.recv_match(
                     type=["MISSION_REQUEST_INT", "MISSION_REQUEST", "MISSION_ACK"],
                     blocking=True,
-                    timeout=0.4,
+                    timeout=0.15,
                 )
                 if msg is None:
                     continue
@@ -6177,9 +6537,13 @@ class USVStateMachine:
                     sent.add(seq)
 
             if ack_result is None:
-                ack = self.master.recv_match(type=["MISSION_ACK"], blocking=True, timeout=1.0)
-                if ack is not None:
-                    ack_result = int(getattr(ack, "type", -1) or -1)
+                ack_deadline = time.monotonic() + 1.0
+                while time.monotonic() < ack_deadline:
+                    self._service_startup_wait_once()
+                    ack = self.master.recv_match(type=["MISSION_ACK"], blocking=True, timeout=0.15)
+                    if ack is not None:
+                        ack_result = int(getattr(ack, "type", -1) or -1)
+                        break
 
             if ack_result not in (None, int(mavutil.mavlink.MAV_MISSION_ACCEPTED)):
                 ack_names = {
@@ -6218,6 +6582,8 @@ class USVStateMachine:
                     f"ack={ack_result}({ack_names.get(int(ack_result), 'UNKNOWN')}) "
                     f"sent={len(sent)}/{count}"
                 )
+                if not self._start_request_pending():
+                    self._pixhawk_mission_upload_attempt_hash = ""
                 return False
             if len(sent) < count:
                 self.pixhawk_mission_sync_error = f"mission_upload_incomplete_{len(sent)}_of_{count}"
@@ -6390,6 +6756,83 @@ class USVStateMachine:
         self.mission_validated_at_timestamp = time.time()
         self.mission_synced = True
 
+    def _apply_mission_profile_parse(self, parsed, *, target_color_override=""):
+        """Apply mission_profile metadata without assuming static P1/P2/P3 splits."""
+        parsed = parsed if isinstance(parsed, dict) else {}
+        profile = parsed.get("mission_profile") if isinstance(parsed.get("mission_profile"), dict) else {}
+        self.mission_profile = dict(profile or {})
+        self.mission_profile_valid = bool(parsed.get("mission_profile_valid", bool(profile)))
+        self.mission_profile_race_ready = bool(parsed.get("race_ready", False) and self.mission_profile_valid)
+        self.mission_profile_error = str(parsed.get("profile_error", "") or "")
+        self.p2_min_gate_count = int(
+            self.mission_profile.get("p2_min_gate_count", MISSION_PROFILE_DEFAULT_P2_MIN_GATE_COUNT)
+            or MISSION_PROFILE_DEFAULT_P2_MIN_GATE_COUNT
+        )
+        self.p3_engagement_mode = str(
+            self.mission_profile.get("p3_engagement_mode", MISSION_PROFILE_DEFAULT_P3_ENGAGEMENT_MODE)
+            or MISSION_PROFILE_DEFAULT_P3_ENGAGEMENT_MODE
+        )
+        policy = self.mission_profile.get("phase_transition_policy")
+        if isinstance(policy, dict):
+            merged_policy = dict(MISSION_PROFILE_DEFAULT_TRANSITION_POLICY)
+            merged_policy.update(policy)
+            self.phase_transition_policy = merged_policy
+        else:
+            self.phase_transition_policy = dict(MISSION_PROFILE_DEFAULT_TRANSITION_POLICY)
+        profile_target = str(self.mission_profile.get("target_color") or parsed.get("target_color") or "").strip().upper()
+        if target_color_override:
+            profile_target = str(target_color_override).strip().upper()
+        if profile_target:
+            self.target_color = profile_target
+        if self.mission_profile_valid:
+            self.mission_split_profile = dict(self.mission_split_profile or {})
+            self.mission_split_profile.update({
+                "mission_profile_valid": True,
+                "mission_profile_race_ready": bool(self.mission_profile_race_ready),
+                "p2_min_gate_count": int(self.p2_min_gate_count),
+                "p3_engagement_mode": str(self.p3_engagement_mode),
+                "p1_waypoint_count_hint": self.mission_profile.get("p1_waypoint_count"),
+                "parkur_ranges_hint": self.mission_profile.get("parkur_ranges"),
+            })
+
+    def _load_mission_profile_metadata_from_file(self, filepath):
+        """Load optional profile metadata while preserving Pixhawk mission waypoints."""
+        if not filepath or not os.path.exists(filepath):
+            return False
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+            if not isinstance(raw_data, dict) or "mission_profile" not in raw_data:
+                return False
+            parsed = parse_mission_profile_payload(
+                raw_data,
+                upload_source=self.mission_upload_source,
+                validation_timestamp=time.time(),
+                race_required=False,
+            )
+            self._apply_mission_profile_parse(parsed)
+            print(
+                "[MISSION_PROFILE] Loaded profile metadata "
+                f"target={self.target_color} p3_mode={self.p3_engagement_mode}"
+            )
+            log_jsonl(
+                "usv_main",
+                False,
+                event="mission_profile_loaded",
+                source="mission_file_metadata",
+                race_ready=bool(self.mission_profile_race_ready),
+                target_color=str(self.target_color),
+                p2_min_gate_count=int(self.p2_min_gate_count),
+                p3_engagement_mode=str(self.p3_engagement_mode),
+            )
+            return True
+        except Exception as exc:
+            self.mission_profile_valid = False
+            self.mission_profile_race_ready = False
+            self.mission_profile_error = str(exc)
+            self._warn_throttled("mission_profile_load", f"[WARN] [MISSION_PROFILE] yuklenemedi: {exc}", period_s=2.0)
+            return False
+
     def _sync_pixhawk_mission_if_available(self):
         coords = self._download_pixhawk_mission()
         if not coords:
@@ -6460,6 +6903,7 @@ class USVStateMachine:
             )
         else:
             if self._sync_pixhawk_mission_if_available():
+                self._load_mission_profile_metadata_from_file(fp)
                 print(
                     f"[OK] [GOREV] Pixhawk mission kullaniliyor nav={len(self.nav_waypoints)} "
                     f"count={self.pixhawk_mission_count}"
@@ -6482,9 +6926,11 @@ class USVStateMachine:
                 mission_target_color = ""
                 coords_for_pixhawk_upload = []
                 if isinstance(raw_data, list):
-                    coords = validate_coordinate_mission(raw_data)
+                    parsed = parse_mission_profile_payload(raw_data, race_required=False)
+                    coords = validate_coordinate_mission(parsed.get("flat_waypoints", raw_data))
                     coords_for_pixhawk_upload = list(coords)
-                    self.nav_waypoints, self.engage_wp = split_nav_engage(coords)
+                    self.nav_waypoints = list(parsed.get("nav_waypoints", []))
+                    self.engage_wp = parsed.get("engage_wp")
                     # Legacy compat
                     self.waypoints_p1 = self.nav_waypoints
                     self.waypoints_p2 = []
@@ -6492,26 +6938,58 @@ class USVStateMachine:
                     self.mission_input_format = MISSION_INPUT_FORMAT
                     self.mission_upload_source = "local_flat_file"
                     self.mission_split_profile = get_mission_split_profile(len(coords))
+                    self._apply_mission_profile_parse(parsed)
                     self.pixhawk_mission_last_hash = self._mission_hash(coords)
                 elif isinstance(raw_data, dict):
-                    mission = adapt_mission_to_structured(raw_data, strict=True)
-                    self.nav_waypoints = mission.get("nav_waypoints", mission.get("parkur1", []))
-                    self.engage_wp = mission.get("engage_wp", (mission["parkur3"][0] if mission.get("parkur3") else None))
-                    # Legacy compat
-                    self.waypoints_p1 = self.nav_waypoints
-                    self.waypoints_p2 = []
-                    self.waypoints_p3 = [self.engage_wp] if self.engage_wp is not None else []
-                    mission_target_color = str(mission.get("target_color") or "").strip().upper()
-                    self.mission_input_format = mission.get("_mission_input_format", "structured_legacy")
-                    self.mission_upload_source = mission.get("_adapter_source", "structured_legacy")
-                    self.mission_split_profile = dict(mission.get("_split_profile") or {})
-                    structured_coords = list(self.nav_waypoints)
-                    if self.engage_wp is not None:
-                        structured_coords.append(self.engage_wp)
-                    coords_for_pixhawk_upload = list(structured_coords)
-                    self.pixhawk_mission_last_hash = self._mission_hash(structured_coords)
+                    if "mission_profile" in raw_data:
+                        parsed = parse_mission_profile_payload(
+                            raw_data,
+                            upload_source="structured_profile",
+                            validation_timestamp=time.time(),
+                            race_required=False,
+                        )
+                        self.nav_waypoints = list(parsed.get("nav_waypoints", []))
+                        self.engage_wp = parsed.get("engage_wp")
+                        self.waypoints_p1 = list(parsed.get("parkur1", [])) or self.nav_waypoints
+                        self.waypoints_p2 = list(parsed.get("parkur2", []))
+                        self.waypoints_p3 = list(parsed.get("p3_search_waypoints", parsed.get("parkur3", [])))
+                        mission_target_color = str(parsed.get("target_color") or "").strip().upper()
+                        self.mission_input_format = parsed.get("input_format", "structured_profile")
+                        self.mission_upload_source = "structured_profile"
+                        coords_for_pixhawk_upload = list(parsed.get("flat_waypoints", []))
+                        self.mission_split_profile = get_mission_split_profile(len(coords_for_pixhawk_upload))
+                        self._apply_mission_profile_parse(parsed, target_color_override=mission_target_color)
+                        self.pixhawk_mission_last_hash = self._mission_hash(coords_for_pixhawk_upload)
+                    else:
+                        mission = adapt_mission_to_structured(raw_data, strict=True)
+                        parsed = parse_mission_profile_payload(
+                            raw_data,
+                            upload_source="structured_legacy",
+                            validation_timestamp=time.time(),
+                            race_required=False,
+                        )
+                        self.nav_waypoints = parsed.get("nav_waypoints", mission.get("nav_waypoints", mission.get("parkur1", [])))
+                        self.engage_wp = parsed.get("engage_wp", mission.get("engage_wp", None))
+                        # Legacy compat
+                        self.waypoints_p1 = list(parsed.get("parkur1", self.nav_waypoints))
+                        self.waypoints_p2 = list(parsed.get("parkur2", []))
+                        self.waypoints_p3 = list(parsed.get("p3_search_waypoints", parsed.get("parkur3", [])))
+                        mission_target_color = str(parsed.get("target_color") or mission.get("target_color") or "").strip().upper()
+                        self.mission_input_format = parsed.get("input_format", mission.get("_mission_input_format", "structured_legacy"))
+                        self.mission_upload_source = mission.get("_adapter_source", "structured_legacy")
+                        coords_for_pixhawk_upload = list(parsed.get("flat_waypoints", []))
+                        if not coords_for_pixhawk_upload:
+                            coords_for_pixhawk_upload = list(self.nav_waypoints)
+                            if self.engage_wp is not None:
+                                coords_for_pixhawk_upload.append(self.engage_wp)
+                        self.mission_split_profile = dict(mission.get("_split_profile") or get_mission_split_profile(len(coords_for_pixhawk_upload)))
+                        self._apply_mission_profile_parse(parsed, target_color_override=mission_target_color)
+                        self.pixhawk_mission_last_hash = self._mission_hash(coords_for_pixhawk_upload)
                 else:
                     raise ValueError(f"Mission must be list or object, got {type(raw_data).__name__}")
+
+                if not self.nav_waypoints and self.engage_wp is None:
+                    raise ValueError("Mission file contains profile metadata but no local navigation waypoints")
 
                 total_count = len(self.nav_waypoints) + (1 if self.engage_wp is not None else 0)
                 if not self.mission_split_profile:
@@ -6672,6 +7150,35 @@ class USVStateMachine:
             self.start_phase = "rejected"
             self._write_state()
             return False
+        if USV_MODE == USV_MODE_RACE:
+            race_profile_errors = []
+            if not self.mission_profile_valid or not self.mission_profile_race_ready:
+                race_profile_errors.append("mission_profile_not_race_ready")
+            if not str(self.target_color or "").strip() or str(self.target_color).strip() == "--":
+                race_profile_errors.append("target_color_not_locked")
+            if str(self.p3_engagement_mode or "") not in (
+                "vision_color_track",
+                "vision_color_track_with_gps_fallback",
+            ):
+                race_profile_errors.append("invalid_p3_engagement_mode")
+            if race_profile_errors:
+                reason = "+".join(race_profile_errors)
+                self.mission_end_reason = f"start_rejected:{reason}"
+                print(f"START_REJECTED: {reason}")
+                log_jsonl(
+                    "usv_main",
+                    False,
+                    event="START_REJECTED",
+                    reason=reason,
+                    mission_profile_valid=bool(self.mission_profile_valid),
+                    mission_profile_race_ready=bool(self.mission_profile_race_ready),
+                    mission_profile_error=str(self.mission_profile_error or ""),
+                    target_color=str(self.target_color or ""),
+                    p3_engagement_mode=str(self.p3_engagement_mode or ""),
+                )
+                self.start_phase = "rejected"
+                self._write_state()
+                return False
         self.start_phase = "preflight"
         self._drain_mav_messages()
         self._read_camera_status()
@@ -6710,9 +7217,9 @@ class USVStateMachine:
             return False
 
         self.start_phase = "fc_prereq"
-        guided_prereq = self._guided_prereq_status()
-        fc_start = self._fc_start_status(guided_prereq=guided_prereq)
-        if not guided_prereq.get("ready", False) or not fc_start.get("ready", False):
+        self._drain_mav_messages()
+        fc_ready, guided_prereq, fc_start = self._wait_for_fc_start_ready()
+        if not fc_ready:
             missing = ",".join(guided_prereq.get("missing", [])) or "unknown"
             block_reason = str(fc_start.get("block_reason", "unknown"))
             if not guided_prereq.get("ready", False):
@@ -6767,6 +7274,25 @@ class USVStateMachine:
         self._lidar_stale_consecutive = 0
         self._lidar_stale_warned = False
         self._lidar_stale_blocked = False
+        arm_ready, guided_prereq, fc_start = self._wait_for_arm_ready()
+        if not arm_ready:
+            block_reason = str(fc_start.get("block_reason", "unknown"))
+            self.mission_end_reason = f"start_rejected:arm_prereq_timeout:{block_reason}"
+            print(f"START_REJECTED: {self.mission_end_reason}")
+            log_jsonl(
+                "usv_main",
+                False,
+                event="START_REJECTED",
+                reason="arm_prereq_timeout",
+                fc_start_block_reason=block_reason,
+                missing=list(guided_prereq.get("missing", [])),
+            )
+            self.command_lock = False
+            self.state = self.STATE_IDLE
+            self.stop_motors()
+            self.start_phase = "rejected"
+            self._write_state()
+            return False
         if not self._arm():
             print("❌ [START] Arming basarisiz")
             arm_block = str(self.fc_start_block_reason or "unknown")
@@ -6816,12 +7342,31 @@ class USVStateMachine:
     def _wait_p2_ready(self):
         print("[CHECK] [P1->P2] Kamera/Lidar hazirlik kontrolu")
         next_log = 0.0
+        started = time.monotonic()
         while self.mission_active:
             if self._check_abort():
                 return False
             if self.camera_ready and self.lidar_ready:
                 print("[OK] [P1->P2] Hazirlik tamam")
                 return True
+            elapsed = time.monotonic() - started
+            if elapsed >= float(P2_READY_TIMEOUT_S):
+                self.mission_end_reason = "p2_ready_timeout"
+                print(
+                    f"[ERR] [P1->P2] READY_TIMEOUT {elapsed:.1f}s "
+                    f"camera_ready={self.camera_ready} lidar_ready={self.lidar_ready}"
+                )
+                log_jsonl(
+                    "usv_main",
+                    False,
+                    event="p2_ready_timeout",
+                    elapsed_s=round(float(elapsed), 3),
+                    timeout_s=round(float(P2_READY_TIMEOUT_S), 3),
+                    camera_ready=bool(self.camera_ready),
+                    lidar_ready=bool(self.lidar_ready),
+                )
+                self._enter_hold("P2_READY_TIMEOUT")
+                return False
             self._command_speed_heading(P2_WAIT_SPEED_MPS, 0.0)
             if time.monotonic() >= next_log:
                 print(
@@ -6869,6 +7414,101 @@ class USVStateMachine:
             self._gate_event_start = None
             self._gate_event_latched = False
             self._gate_bearing_prev = None
+
+    def _p2_entry_evidence(self):
+        """Return whether passive AUTO monitoring has reached P2-like perception."""
+        self._read_camera_status()
+        gate_detected = bool(
+            self.camera_status.get("gate_detected", False)
+            or self.camera_status.get("gate_detected_raw", False)
+        )
+        try:
+            gate_stable_s = float(self.camera_status.get("gate_stable_s", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            gate_stable_s = 0.0
+        gate_event = bool(
+            self.camera_status.get("gate_passed_event", False)
+            or self.camera_status.get("gate_passed_event_raw", False)
+        )
+        yellow_seen = bool(
+            self.camera_status.get("yellow_obstacle_detected", False)
+            or self.camera_status.get("yellow_obstacle_detected_raw", False)
+        )
+        orange_seen = bool(
+            self.camera_status.get("orange_boundary_detected", False)
+            or self.camera_status.get("orange_boundary_detected_raw", False)
+        )
+        sensors_ready = bool(self.camera_ready and self.lidar_ready)
+        visual_evidence = bool(
+            gate_event
+            or (gate_detected and gate_stable_s >= float(P2_STABLE_S))
+            or yellow_seen
+            or orange_seen
+        )
+        if sensors_ready and visual_evidence:
+            reason_parts = []
+            if gate_event:
+                reason_parts.append("gate_event")
+            if gate_detected:
+                reason_parts.append(f"gate_stable:{gate_stable_s:.1f}s")
+            if yellow_seen:
+                reason_parts.append("yellow_obstacle")
+            if orange_seen:
+                reason_parts.append("orange_boundary")
+            return True, "+".join(reason_parts) or "p2_visual_evidence"
+        if not sensors_ready:
+            return False, f"waiting_sensors:camera={self.camera_ready}:lidar={self.lidar_ready}"
+        return False, "waiting_p2_visual_evidence"
+
+    def _p2_remaining_start_index_from_fc(self):
+        """Best-effort local waypoint index for switching from Pixhawk AUTO to Pi GUIDED."""
+        candidates = []
+        if int(self.mission_current_seq) >= 0:
+            candidates.append(int(self.mission_current_seq))
+        if int(self.mission_reached_seq) >= 0:
+            candidates.append(int(self.mission_reached_seq) + 1)
+        if not candidates:
+            return 0
+        return max(0, min(len(self.nav_waypoints), max(candidates)))
+
+    def _wait_for_p2_gate_minimum(self):
+        required = max(0, int(getattr(self, "p2_min_gate_count", MISSION_PROFILE_DEFAULT_P2_MIN_GATE_COUNT)))
+        if required <= 0 or self.gate_count >= required:
+            return True
+        print(f"[CHECK] [P2] gate_count={self.gate_count}/{required} ek kapi kaniti bekleniyor")
+        deadline = time.monotonic() + float(P2_GATE_MIN_WAIT_TIMEOUT_S)
+        next_log = 0.0
+        while self.mission_active and self.gate_count < required:
+            if self._check_abort():
+                return False
+            if time.monotonic() >= deadline:
+                self.mission_end_reason = "p2_gate_min_timeout"
+                print(f"[ERR] [P2] gate_min_timeout gate={self.gate_count}/{required}")
+                log_jsonl(
+                    "usv_main",
+                    False,
+                    event="p2_gate_min_timeout",
+                    gate_count=int(self.gate_count),
+                    required=int(required),
+                    timeout_s=round(float(P2_GATE_MIN_WAIT_TIMEOUT_S), 3),
+                )
+                return False
+            self._read_camera_status()
+            self._track_gate_event()
+            front = float(getattr(self, "lidar_center_dist", 99.0) or 99.0)
+            if front < float(D_MIN_M):
+                self._command_speed_heading(0.0, 0.0)
+            else:
+                gate_detected = bool(self.camera_status.get("gate_detected", False))
+                gate_bearing = float(self.camera_status.get("gate_center_bearing_deg", 0.0) or 0.0)
+                speed = min(float(P2_WAIT_SPEED_MPS), 0.6) if gate_detected else 0.0
+                self._command_speed_heading(speed, gate_bearing if gate_detected else 0.0)
+            if time.monotonic() >= next_log:
+                print(f"[WAIT] [P2] gate_count={self.gate_count}/{required}")
+                next_log = time.monotonic() + 1.5
+            self._write_state()
+            time.sleep(LOOP_DT)
+        return self.gate_count >= required
 
     def _validate_lidar_frame(self, msg):
         now_wall = time.time()
@@ -7075,6 +7715,19 @@ class USVStateMachine:
         for key, cell in items:
             stable_n = int(cell.get("stable_count", 0))
             hit_n = int(cell.get("hit_count", 0))
+            last_seen = float(cell.get("last_seen_ts", 0.0) or 0.0)
+            if (
+                stable_n >= int(LIDAR_MAP_PERSIST_STABLE_COUNT)
+                and hit_n >= int(LIDAR_MAP_PERSIST_MIN_HITS)
+                and (now - last_seen) < float(LIDAR_TAU_STABLE_S)
+            ):
+                occupied = (
+                    float(cell.get("log_odds", 0.0)) > float(LIDAR_MAP_OCC_LOG_ODDS)
+                    and stable_n >= int(LIDAR_MAP_OCC_STABLE_COUNT)
+                )
+                if occupied:
+                    occ_cells += 1
+                continue
             if stable_n > 0:
                 tau = float(LIDAR_TAU_STABLE_S)
                 if stable_n >= int(LIDAR_MAP_PERSIST_STABLE_COUNT):
@@ -7189,16 +7842,17 @@ class USVStateMachine:
             d_m = math.hypot(x_m, y_m)
             if d_m > max_range_m:
                 continue
-            bearing = math.degrees(math.atan2(y_m, x_m))
+            bearing = normalize_lidar_bearing_deg(math.degrees(math.atan2(y_m, x_m)))
             weight = clamp(log_odds / max(float(LIDAR_MAP_OCC_LOG_ODDS), 0.1), 0.0, 1.8)
             occupied_cells += 1
-            if -35.0 <= bearing <= 35.0:
+            map_sector = classify_lidar_map_sector(bearing)
+            if map_sector == "front":
                 front_risk += weight / max(0.6, d_m)
                 front_min = min(front_min, d_m)
-            elif 20.0 <= bearing <= 70.0:
+            elif map_sector == "left":
                 left_risk += weight / max(0.6, d_m)
                 left_min = min(left_min, d_m)
-            elif -70.0 <= bearing <= -20.0:
+            elif map_sector == "right":
                 right_risk += weight / max(0.6, d_m)
                 right_min = min(right_min, d_m)
 
@@ -7341,6 +7995,25 @@ class USVStateMachine:
         self._avoid_side_lock_until = now + float(LIDAR_SIDE_LOCK_S)
         return chosen
 
+    def _nav_surge_allowed(self, heading_error_deg):
+        err_abs = abs(float(heading_error_deg))
+        if str(getattr(self, "_nav_align_mode", "align")) != "advance":
+            return False
+        if err_abs > float(NAV_ALIGN_ENTER_ADVANCE_DEG):
+            return False
+        if bool(NAV_STRICT_HEADING_FIRST) and err_abs > float(NAV_ALIGN_HEADING_DONE_DEG):
+            return False
+        stable_since = getattr(self, "_nav_align_stable_since", None)
+        if stable_since is not None:
+            return False
+        return True
+
+    def _nav_advance_stable_elapsed_s(self):
+        stable_since = getattr(self, "_nav_align_stable_since", None)
+        if stable_since is None:
+            return 0.0
+        return max(0.0, time.monotonic() - float(stable_since))
+
     def _apply_nav_speed_governor(
         self,
         speed_cmd,
@@ -7354,6 +8027,14 @@ class USVStateMachine:
         err_abs = abs(float(heading_err_deg))
         blocked = clamp(float(blocked_level), 0.0, 1.0)
         reason = "nominal"
+
+        if bool(NAV_STRICT_HEADING_FIRST) and str(getattr(self, "_nav_align_mode", "align")) == "align":
+            self._final_speed_limiter = "heading_align_hold"
+            return 0.0, "heading_align_hold"
+
+        if bool(NAV_STRICT_HEADING_FIRST) and err_abs > float(NAV_ALIGN_HEADING_DONE_DEG):
+            self._final_speed_limiter = "heading_align_hold"
+            return 0.0, "heading_align_hold"
 
         if bool(lidar_emergency) and blocked >= 0.85:
             self._final_speed_limiter = "critical_block_stop"
@@ -7378,7 +8059,19 @@ class USVStateMachine:
             speed = min(speed, 0.35)
             reason = "align_turn_cap"
 
-        if speed_cmd > 0.0 and not lidar_emergency and blocked < 0.85 and dist_m > 1.2:
+        allow_min_progress = (
+            not bool(align_follow)
+            and err_abs <= float(NAV_ALIGN_HEADING_DONE_DEG)
+            and str(getattr(self, "_nav_align_mode", "align")) == "advance"
+        )
+        if (
+            allow_min_progress
+            and speed_cmd > 0.0
+            and not lidar_emergency
+            and blocked < 0.85
+            and dist_m > 1.2
+            and float(NAV_MIN_PROGRESS_SPEED_MPS) > 0.0
+        ):
             speed = max(speed, float(NAV_MIN_PROGRESS_SPEED_MPS))
             if reason in ("turn_priority", "heading_reduced", "heading_full"):
                 reason = f"{reason}_min_progress"
@@ -7429,11 +8122,12 @@ class USVStateMachine:
             if deg < -90.0 or deg > 90.0:
                 continue
             valid_hits += 1
-            if deg > 22.0:
+            sector = classify_lidar_scan_sector(deg)
+            if sector == "left":
                 left = min(left, r)
-            elif deg < -22.0:
+            elif sector == "right":
                 right = min(right, r)
-            else:
+            elif sector == "center":
                 center = min(center, r)
         return left, center, right, int(valid_hits)
 
@@ -7495,25 +8189,34 @@ class USVStateMachine:
         return P2_ESCAPE_MAX_DEG * urgency
 
     @staticmethod
-    def _allow_simple_avoidance_bias(nav_turn_priority, lidar_emergency):
+    def _allow_simple_avoidance_bias(nav_turn_priority, lidar_emergency, camera_lidar_fused=False, acquiring_heading=False):
         """Warn-level simple avoidance must not override waypoint bearing during turn acquisition."""
-        return not (bool(nav_turn_priority) and not bool(lidar_emergency))
+        if bool(lidar_emergency) or bool(camera_lidar_fused):
+            return True
+        return not (bool(nav_turn_priority) and bool(acquiring_heading))
 
     @staticmethod
     def _resolve_nav_align_pivot_speed(nav_turn_priority, heading_error_deg, front_min_m, speed_mps):
-        """Prefer in-place pivot over forward creep on large turns near obstacles."""
+        """Prefer yaw-only pivot on large turns; optional creep only when configured."""
         large_turn_near_obstacle = (
             abs(float(heading_error_deg)) >= float(NAV_TURN_SPEED_CAP_HARD_ERR_DEG)
             and float(front_min_m) < float(P2_LIDAR_WARN_M)
         )
+        creep_cap = max(0.0, float(NAV_ALIGN_CREEP_SPEED_MPS))
         if large_turn_near_obstacle or not bool(nav_turn_priority):
             return 0.0, "nav_align_pivot_hold"
-        return min(float(speed_mps), float(NAV_ALIGN_CREEP_SPEED_MPS)), "nav_align_turn_creep"
+        if creep_cap <= 0.0:
+            return 0.0, "nav_align_yaw_only"
+        return min(float(speed_mps), creep_cap), "nav_align_turn_creep"
 
     @staticmethod
-    def _allow_local_minima_boost(nav_turn_priority, heading_error_deg):
+    def _allow_local_minima_boost(nav_turn_priority, heading_error_deg, nav_align_mode="advance"):
         """Do not escalate to 65deg local-minima escape while acquiring waypoint heading."""
         if bool(nav_turn_priority):
+            return False
+        if str(nav_align_mode or "align") == "align":
+            return False
+        if bool(NAV_STRICT_HEADING_FIRST) and abs(float(heading_error_deg)) > float(NAV_ALIGN_HEADING_DONE_DEG):
             return False
         if abs(float(heading_error_deg)) >= float(NAV_ALIGN_REACQUIRE_DEG):
             return False
@@ -7555,7 +8258,7 @@ class USVStateMachine:
             )
         except (TypeError, ValueError):
             heading_err = 0.0
-        allow_local_minima_boost = self._allow_local_minima_boost(nav_turn_priority, heading_err)
+        allow_local_minima_boost = self._allow_local_minima_boost(nav_turn_priority, heading_err, self._nav_align_mode)
 
         now = time.monotonic()
         if min_r < D_MIN_M:
@@ -7841,6 +8544,11 @@ class USVStateMachine:
         alpha = clamp(float(NAV_HEADING_DAMPING_LPF_ALPHA), 0.01, 1.0)
         filtered_cmd = prev_cmd + (alpha * (slew_cmd - prev_cmd))
         filtered_cmd = clamp_heading_error(filtered_cmd)
+        acquiring = str(getattr(self, "_nav_align_mode", "advance")) == "align"
+        if acquiring and abs(heading_err) > float(NAV_ALIGN_HEADING_DONE_DEG):
+            min_ratio = 0.65
+            if abs(filtered_cmd) < abs(heading_err) * min_ratio:
+                filtered_cmd = clamp_heading_error(float(heading_err) * min_ratio)
         if (
             abs(heading_err) > max(float(HEADING_DEADZONE_DEG), float(NAV_ALIGN_HEADING_DONE_DEG))
             and abs(heading_err) <= 45.0
@@ -7858,6 +8566,8 @@ class USVStateMachine:
         """Prefer turning over forward surge on large heading error and near-waypoint turns."""
         speed = max(0.0, float(speed_mps))
         heading_abs = abs(float(heading_error_deg))
+        if bool(NAV_STRICT_HEADING_FIRST) and heading_abs > float(NAV_ALIGN_HEADING_DONE_DEG):
+            return 0.0
         if heading_abs >= float(NAV_TURN_SPEED_CAP_HARD_ERR_DEG):
             speed = min(speed, float(NAV_TURN_SPEED_CAP_HARD_MPS))
         elif heading_abs >= float(NAV_TURN_SPEED_CAP_MEDIUM_ERR_DEG):
@@ -8022,8 +8732,12 @@ class USVStateMachine:
             self._front_min_smooth = (0.34 * float(front_min)) + (0.66 * prev_smooth)
             front_min_nav = float(self._front_min_smooth)
             wp_transition_s_early = max(0.0, float(getattr(self, "_wp_transition_until", 0.0) or 0.0) - time.monotonic())
-            heading_reacquire_needed = abs(float(gps_heading_err)) >= float(NAV_ALIGN_REACQUIRE_DEG)
-            nav_turn_priority = bool(wp_transition_s_early > 0.0 or heading_reacquire_needed)
+            heading_not_aligned = abs(float(gps_heading_err)) >= float(NAV_ALIGN_HEADING_DONE_DEG)
+            acquiring_heading = bool(self._nav_align_mode == "align")
+            nav_turn_priority = bool(
+                heading_not_aligned
+                or (wp_transition_s_early > 0.0 and acquiring_heading)
+            )
             lidar_guard_mode = self._update_lidar_degraded_guard()
             if lidar_guard_mode == "hold":
                 log_jsonl(
@@ -8039,22 +8753,18 @@ class USVStateMachine:
             # Yakın bacakta lidar "advance" zorlaması: önce burun WP'ye; yoksa cross-track sınır dubaları arasından iter
             h_abs_pre = abs(float(gps_heading_err))
             align_resume_blocked = False
-            if self._nav_align_mode == "align" and float(front_min) < float(NAV_ALIGN_SUSPEND_NEAR_M):
+            if acquiring_heading and float(front_min) < float(NAV_ALIGN_SUSPEND_NEAR_M):
                 tight_m = float(front_min) < float(NAV_ALIGN_TIGHT_OBSTACLE_M)
                 near_wp = float(dist) <= float(NAV_ALIGN_LIDAR_SUSPEND_MAX_DIST_M)
                 head_ok = h_abs_pre <= float(NAV_ALIGN_HEADING_DONE_DEG)
-                if tight_m or near_wp:
-                    # Dar önde yalnızca heading uygunsa advance; aksi halde pivot + kaçınma
-                    if head_ok:
-                        self._nav_align_mode = "advance"
-                    elif near_wp and not tight_m:
-                        align_resume_blocked = True
+                if (tight_m or near_wp) and not head_ok:
+                    align_resume_blocked = True
             map_threat_allowed = bool(lidar_quality_ok and self._lidar_occ_cells_count > 0)
             map_front_min = float(map_metrics.get("front_min_m", 99.0)) if map_threat_allowed else 99.0
             lidar_emergency = bool(lidar_quality_ok and current_center_known and current_center_d < D_MIN_M)
             current_lidar_warning = bool(lidar_quality_ok and current_front_min < P2_LIDAR_WARN_M)
-            if nav_turn_priority and not current_lidar_warning and not lidar_emergency:
-                # During a new-leg heading acquisition, do not let persistent map residue
+            if nav_turn_priority and acquiring_heading and not current_lidar_warning and not lidar_emergency:
+                # During heading acquisition, do not let persistent map residue
                 # or smoothed historical front distance erase the waypoint bearing.
                 front_min_nav = max(float(front_min_nav), float(P2_LIDAR_WARN_M) + 0.65)
             raw_in_warn = bool(
@@ -8078,7 +8788,7 @@ class USVStateMachine:
                 self._update_blocked_hysteresis(0.0)
                 blocked_by_map = False
             in_warn = bool(self._p2_warn_latch or blocked_by_map)
-            if nav_turn_priority and not current_lidar_warning and not lidar_emergency:
+            if nav_turn_priority and acquiring_heading and not current_lidar_warning and not lidar_emergency:
                 in_warn = False
                 blocked_by_map = False
 
@@ -8109,21 +8819,40 @@ class USVStateMachine:
             t_nav = time.monotonic()
             if self._nav_align_t0 is None:
                 self._nav_align_t0 = t_nav
-            if not in_warn and not lidar_emergency:
+            if not in_warn and not lidar_emergency and not align_resume_blocked:
                 if self._nav_align_mode == "align":
-                    if h_abs <= float(NAV_ALIGN_HEADING_DONE_DEG):
-                        self._nav_align_mode = "advance"
-                    elif (t_nav - float(self._nav_align_t0)) >= float(NAV_ALIGN_TIMEOUT_S):
-                        # Timeout only relaxes small residual error; large waypoint turns must acquire heading.
+                    if h_abs <= float(NAV_ALIGN_ENTER_ADVANCE_DEG):
+                        if self._nav_align_stable_since is None:
+                            self._nav_align_stable_since = t_nav
+                        elif (t_nav - float(self._nav_align_stable_since)) >= float(NAV_ALIGN_STABLE_S):
+                            self._nav_align_mode = "advance"
+                            self._nav_align_stable_since = None
+                    else:
+                        self._nav_align_stable_since = None
+                    if (
+                        self._nav_align_mode == "align"
+                        and not bool(NAV_STRICT_HEADING_FIRST)
+                        and (t_nav - float(self._nav_align_t0)) >= float(NAV_ALIGN_TIMEOUT_S)
+                    ):
                         if h_abs <= float(NAV_ALIGN_REACQUIRE_DEG) and float(front_min) >= float(NAV_ALIGN_TIGHT_OBSTACLE_M):
                             self._nav_align_mode = "advance"
+                            self._nav_align_stable_since = None
+                        elif (
+                            os.environ.get("USV_SIM") == "1"
+                            and h_abs <= float(NAV_ALIGN_TIMEOUT_LARGE_ERR_DEG)
+                            and float(front_min) >= float(NAV_ALIGN_TIGHT_OBSTACLE_M)
+                        ):
+                            self._nav_align_mode = "advance"
+                            self._nav_align_stable_since = None
                 elif (
                     self._nav_align_mode == "advance"
                     and h_abs > float(NAV_ALIGN_REVERT_ALIGN_DEG)
+                    and float(getattr(self, "v_target", 0.0) or 0.0) > 0.1
                     and time.monotonic() >= float(getattr(self, "_nav_align_lock_until", 0.0) or 0.0)
                 ):
                     self._nav_align_mode = "align"
                     self._nav_align_t0 = t_nav
+                    self._nav_align_stable_since = None
 
             base_speed = schedule_waypoint_speed(
                 distance_m=dist,
@@ -8136,6 +8865,7 @@ class USVStateMachine:
 
             align_follow = (
                 self._nav_align_mode == "align"
+                and not align_resume_blocked
                 and not in_warn
                 and not lidar_emergency
                 and not unknown_escape
@@ -8143,7 +8873,7 @@ class USVStateMachine:
             if align_follow:
                 base_speed = min(base_speed, float(NAV_ALIGN_MAX_SPEED_MPS))
 
-            align_pivot_threshold_deg = max(float(NAV_ALIGN_ACQUIRE_DEG), float(NAV_ALIGN_HEADING_DONE_DEG))
+            align_pivot_threshold_deg = max(float(NAV_ALIGN_PIVOT_UNTIL_DEG), float(NAV_ALIGN_ACQUIRE_DEG))
             align_pivot_eligible = align_follow and (
                 abs(float(gps_heading_err)) > align_pivot_threshold_deg
             )
@@ -8201,18 +8931,40 @@ class USVStateMachine:
             if not bool(self._get_perception_policy().get("yellow_obstacle", False)):
                 esc_c = 0.0
             esc_o = self._p2_camera_orange_escape_deg()
+            yellow_raw = bool(self.camera_status.get("yellow_obstacle_detected_raw"))
+            orange_raw = bool(self.camera_status.get("orange_boundary_detected_raw"))
+            try:
+                yellow_bear = float(self.camera_status.get("yellow_obstacle_bearing_deg_raw", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                yellow_bear = 0.0
+            try:
+                orange_bear = float(self.camera_status.get("orange_boundary_bearing_deg_raw", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                orange_bear = 0.0
+            yellow_fused = bool(self.camera_status.get("yellow_obstacle_detected")) or self._camera_lidar_obstacle_concurrent(
+                raw_detected=yellow_raw,
+                bearing_deg=yellow_bear,
+            )
+            orange_fused = bool(self.camera_status.get("orange_boundary_detected")) or self._camera_lidar_obstacle_concurrent(
+                raw_detected=orange_raw,
+                bearing_deg=orange_bear,
+            )
+            camera_lidar_fused = bool(yellow_fused or orange_fused)
             cam_w = float(P2_CAM_YELLOW_WEIGHT)
-            if bool(self.camera_status.get("yellow_obstacle_detected_raw")) and (
-                raw_in_warn or float(front_min) < float(P2_LIDAR_WARN_M) + 1.0
-            ):
-                cam_w = min(1.0, float(P2_CAM_YELLOW_WEIGHT) * float(P2_CAM_YELLOW_FUSION_MULT))
-            if nav_turn_priority and not current_lidar_warning and not lidar_emergency:
-                # New waypoint legs must first acquire the waypoint bearing. Camera
-                # boundary/target residue may still be logged, but it cannot steer
-                # until a close lidar-confirmed threat exists.
-                esc_c = 0.0
-                esc_o = 0.0
-                cam_w = 0.0
+            if yellow_raw and bool(self.camera_ready) and bool(self.lidar_ready):
+                if camera_lidar_fused or raw_in_warn or float(front_min) < float(P2_LIDAR_WARN_M) + 1.0:
+                    cam_w = min(1.0, float(P2_CAM_YELLOW_WEIGHT) * float(P2_CAM_YELLOW_FUSION_MULT))
+            if nav_turn_priority and acquiring_heading and not current_lidar_warning and not lidar_emergency:
+                if not camera_lidar_fused:
+                    esc_c = 0.0
+                    esc_o = 0.0
+                    cam_w = 0.0
+                else:
+                    esc_c = clamp(float(esc_c), -12.0, 12.0)
+                    esc_o = clamp(float(esc_o), -12.0, 12.0)
+            elif self._nav_align_mode == "advance":
+                esc_c = clamp(float(esc_c), -18.0, 18.0)
+                esc_o = clamp(float(esc_o), -18.0, 18.0)
             avoid = self._p2_avoid_heading_smoothed(
                 esc_l,
                 esc_c,
@@ -8226,12 +8978,17 @@ class USVStateMachine:
                 self.escape_side = str(side)
                 side_bias = (35.0 if side == "right" else -35.0) * clamp(front_risk, 0.0, 1.0)
                 avoid = (0.4 * float(avoid)) + (0.6 * float(side_bias))
-            elif nav_turn_priority:
+            elif nav_turn_priority and acquiring_heading and not camera_lidar_fused:
                 avoid = self._apply_avoid_bias_slew(0.0, emergency=False)
             if (
                 simple_avoidance.active
                 and (abs(float(avoid)) < 1.0 or simple_avoidance.state == "blocked")
-                and self._allow_simple_avoidance_bias(nav_turn_priority, lidar_emergency)
+                and self._allow_simple_avoidance_bias(
+                    nav_turn_priority,
+                    lidar_emergency,
+                    camera_lidar_fused=bool(camera_lidar_fused),
+                    acquiring_heading=bool(acquiring_heading),
+                )
             ):
                 avoid = float(simple_avoidance.yaw_bias_deg)
                 self.escape_side = str(simple_avoidance.escape_side)
@@ -8245,7 +9002,12 @@ class USVStateMachine:
                 front_distance_for_decision = float(P2_LIDAR_WARN_M) - 0.05
             wp_transition_s = max(0.0, float(getattr(self, "_wp_transition_until", 0.0) or 0.0) - time.monotonic())
             large_turn = abs(float(gps_heading_err)) >= float(NAV_ALIGN_REACQUIRE_DEG)
-            if (wp_transition_s > 0.0 or large_turn) and not current_lidar_warning and not lidar_emergency:
+            if (
+                acquiring_heading
+                and (wp_transition_s > 0.0 or large_turn)
+                and not current_lidar_warning
+                and not lidar_emergency
+            ):
                 front_distance_for_decision = max(
                     float(front_distance_for_decision),
                     float(P2_LIDAR_WARN_M) + 0.65,
@@ -8254,7 +9016,7 @@ class USVStateMachine:
                     float(center_distance_for_decision),
                     float(P2_LIDAR_WARN_M) + 0.65,
                 )
-            if not (nav_turn_priority and not current_lidar_warning and not lidar_emergency):
+            if not (nav_turn_priority and acquiring_heading and not current_lidar_warning and not lidar_emergency):
                 front_distance_for_decision = min(
                     float(front_distance_for_decision),
                     float(front_min_nav),
@@ -8263,12 +9025,25 @@ class USVStateMachine:
             # Emergency: 100% avoidance
             # No obstacle: gate bearing preferred
             # No obstacle, no gate: pure waypoint bearing
+            gate_detected = bool(self.camera_status.get("gate_detected", False))
+            try:
+                gate_stable_s = float(self.camera_status.get("gate_stable_s", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                gate_stable_s = 0.0
+            try:
+                gate_bearing_deg = float(self.camera_status.get("gate_center_bearing_deg", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                gate_bearing_deg = 0.0
+            if nav_turn_priority and acquiring_heading and not current_lidar_warning and not lidar_emergency:
+                gate_detected = False
+                gate_stable_s = 0.0
+                gate_bearing_deg = 0.0
             decision = compute_nav_decision(
                 distance_m=dist,
                 gps_heading_error_deg=gps_heading_for_nav,
-                gate_detected=False,
-                gate_stable_s=0.0,
-                gate_bearing_deg=0.0,
+                gate_detected=gate_detected,
+                gate_stable_s=gate_stable_s,
+                gate_bearing_deg=gate_bearing_deg,
                 base_speed_mps=base_speed,
                 avoidance_bias_deg=avoid,
                 front_distance_m=front_distance_for_decision,
@@ -8294,7 +9069,12 @@ class USVStateMachine:
             camera_orange_threat = bool(abs(float(esc_o)) > 0.02)
             simple_avoidance_threat = bool(
                 simple_avoidance.active
-                and self._allow_simple_avoidance_bias(nav_turn_priority, lidar_emergency)
+                and self._allow_simple_avoidance_bias(
+                    nav_turn_priority,
+                    lidar_emergency,
+                    camera_lidar_fused=bool(camera_lidar_fused),
+                    acquiring_heading=bool(acquiring_heading),
+                )
             )
             obstacle_threat = bool(
                 lidar_emergency
@@ -8304,8 +9084,11 @@ class USVStateMachine:
                 or simple_avoidance_threat
                 or camera_yellow_threat
                 or camera_orange_threat
+                or camera_lidar_fused
             )
             threat_src = []
+            if camera_lidar_fused:
+                threat_src.append("camera_lidar_fused")
             if camera_yellow_threat:
                 threat_src.append("camera_yellow")
             if camera_orange_threat:
@@ -8443,10 +9226,16 @@ class USVStateMachine:
                     "usv_main",
                     False,
                     event="nav_track",
+                    heading_error_deg=round(float(command_heading_err), 3),
                     dist_m=round(float(dist), 3),
                     gps_heading_err_deg=round(float(gps_heading_err), 3),
                     corrected_heading_err_deg=round(float(corrected_heading_err), 3),
                     command_heading_err_deg=round(float(command_heading_err), 3),
+                    heading_target_deg=round(float((self.current_heading + command_heading_err) % 360.0), 3),
+                    current_heading_deg=round(float(self.current_heading), 3),
+                    yaw_rate_dps=round(float(self.current_yaw_rate_dps or 0.0), 3),
+                    guidance_source=str(self._get_guidance_source()),
+                    guidance_detail_source=str(self.guidance_detail_source),
                     decision_mode=str(decision.mode),
                     unknown_escape=bool(unknown_escape),
                     speed_mps=round(float(speed), 3),
@@ -8460,10 +9249,12 @@ class USVStateMachine:
                     final_speed_limiter=str(self._final_speed_limiter),
                     nav_align_mode=str(self._nav_align_mode),
                     nav_align_phase=str(nav_align_phase),
+                    nav_strict_heading_first=bool(NAV_STRICT_HEADING_FIRST),
+                    nav_align_stable_s=round(float(NAV_ALIGN_STABLE_S), 3),
+                    surge_allowed=bool(self._nav_surge_allowed(gps_heading_err)),
+                    advance_stable_elapsed_s=round(float(self._nav_advance_stable_elapsed_s()), 3),
                     align_follow=bool(align_follow),
                     target_bearing_deg=round(float(self.nav_target_bearing_deg), 3),
-                    heading_target_deg=round(float((self.current_heading + command_heading_err) % 360.0), 3),
-                    current_heading_deg=round(float(self.current_heading), 3),
                     current_front_min_m=round(float(current_front_min), 3),
                     front_min_nav_m=round(float(front_min_nav), 3),
                     nav_turn_priority=bool(nav_turn_priority),
@@ -8479,12 +9270,135 @@ class USVStateMachine:
             time.sleep(LOOP_DT)
         return False
 
+    def _validate_p3_target_lock(self):
+        """Fail closed if P3 target color changed after mission start."""
+        target_state = load_target_state(TARGET_STATE_FILE)
+        state_color = str(target_state.get("target_color") or "").strip().upper()
+        profile_color = str((self.mission_profile or {}).get("target_color") or "").strip().upper()
+        runtime_color = str(self.target_color or "").strip().upper()
+        locked_color = state_color or profile_color or runtime_color
+        changed_at_raw = target_state.get("target_color_changed_at", 0.0)
+        try:
+            changed_at = float(changed_at_raw or 0.0)
+        except (TypeError, ValueError):
+            changed_at = 0.0
+
+        reject_reason = ""
+        try:
+            locked_color = validate_mission_target_color(locked_color)
+        except ValueError:
+            reject_reason = "target_color_not_locked"
+
+        if not reject_reason and profile_color and state_color and profile_color != state_color:
+            reject_reason = "target_color_profile_state_mismatch"
+        if (
+            not reject_reason
+            and float(self.mission_start_time or 0.0) > 0.0
+            and changed_at > float(self.mission_start_time) + 1e-3
+        ):
+            reject_reason = "target_color_changed_after_start"
+        if not reject_reason and str(self.p3_engagement_mode or "") not in MISSION_PROFILE_ALLOWED_P3_ENGAGEMENT_MODES:
+            reject_reason = "invalid_p3_engagement_mode"
+
+        if reject_reason:
+            self.mission_end_reason = f"p3_target_lock_rejected:{reject_reason}"
+            print(
+                f"[ERR] [P3] Target lock gecersiz: reason={reject_reason} "
+                f"state={state_color or '--'} profile={profile_color or '--'} runtime={runtime_color or '--'} "
+                f"changed_at={changed_at:.3f} start={float(self.mission_start_time or 0.0):.3f}"
+            )
+            log_jsonl(
+                "usv_main",
+                False,
+                event="p3_target_color_lock_rejected",
+                reason=str(reject_reason),
+                state_target_color=state_color or None,
+                profile_target_color=profile_color or None,
+                runtime_target_color=runtime_color or None,
+                target_color_changed_at=round(float(changed_at), 3),
+                mission_start_time=round(float(self.mission_start_time or 0.0), 3),
+                p3_engagement_mode=str(self.p3_engagement_mode or ""),
+            )
+            return False
+
+        self.target_color = locked_color
+        log_jsonl(
+            "usv_main",
+            False,
+            event="p3_target_color_lock_verified",
+            target_color=str(self.target_color),
+            target_color_changed_at=round(float(changed_at), 3),
+            p3_engagement_mode=str(self.p3_engagement_mode or ""),
+        )
+        return True
+
+    def _p3_contact_evidence(
+        self,
+        *,
+        target_detected,
+        target_area,
+        dist_m,
+        lidar_center_m,
+        lidar_ready,
+        collision_stuck,
+        wrong_target_contact_risk,
+        wrong_target_detected,
+        wrong_target_area,
+        wrong_target_bearing,
+        wrong_target_class,
+    ):
+        """Return P3 contact quorum decision and detailed evidence state."""
+        gps_valid = self.engage_wp is not None and 0.0 <= float(dist_m) < 9000.0
+        evidence = {
+            "vision_area": bool(target_detected and float(target_area) >= 0.20),
+            "gps_proximity": bool(gps_valid and float(dist_m) <= 1.0),
+            "lidar_proximity": bool(lidar_ready and float(lidar_center_m) < 0.8),
+            "lidar_collision": bool(collision_stuck),
+            "low_speed": bool(abs(float(self.current_speed_mps or 0.0)) <= 0.25),
+            "wrong_target_contact_risk": bool(wrong_target_contact_risk),
+            "wrong_target_detected": bool(wrong_target_detected),
+        }
+        primary_sources = [
+            name
+            for name in ("vision_area", "gps_proximity", "lidar_proximity", "lidar_collision")
+            if evidence[name]
+        ]
+        sources = [
+            name
+            for name in ("vision_area", "gps_proximity", "lidar_proximity", "lidar_collision", "low_speed")
+            if evidence[name]
+        ]
+        quorum_ok = False
+        if not evidence["wrong_target_contact_risk"]:
+            quorum_ok = (
+                (evidence["vision_area"] and (evidence["gps_proximity"] or evidence["lidar_proximity"] or evidence["lidar_collision"]))
+                or (evidence["gps_proximity"] and evidence["lidar_proximity"])
+                or (evidence["lidar_collision"] and (evidence["low_speed"] or evidence["lidar_proximity"]))
+                or len(primary_sources) >= 2
+            )
+        details = {
+            **evidence,
+            "sources": list(sources),
+            "primary_source_count": int(len(primary_sources)),
+            "target_area_norm": round(float(target_area), 4),
+            "gps_dist_m": round(float(dist_m), 3),
+            "lidar_center_m": round(float(lidar_center_m), 3),
+            "current_speed_mps": round(float(self.current_speed_mps or 0.0), 3),
+            "wrong_target_area_norm": round(float(wrong_target_area), 4),
+            "wrong_target_bearing_deg": round(float(wrong_target_bearing), 3),
+            "wrong_target_class": str(wrong_target_class or ""),
+        }
+        return bool(quorum_ok), sources, details
+
     def _run_engage_attempt(self, timeout_s):
         start_t = time.monotonic()
         contact_start = None
         next_invalid_log = 0.0
-        # engage_wp: GPS fallback hedefi (kamera yoksa)
-        wp = self.engage_wp if self.engage_wp is not None else [self.current_lat, self.current_lon]
+        gps_fallback_allowed = (
+            self.engage_wp is not None
+            and str(self.p3_engagement_mode or "") == "vision_color_track_with_gps_fallback"
+        )
+        wp = self.engage_wp if gps_fallback_allowed else [self.current_lat, self.current_lon]
         while self.mission_active and (time.monotonic() - start_t) < timeout_s:
             if self._check_abort():
                 return False
@@ -8498,7 +9412,13 @@ class USVStateMachine:
             wrong_target_class = str(self.camera_status.get("wrong_target_class", ""))
             wrong_target_contact_risk = bool(
                 wrong_target_detected
-                and (wrong_target_area >= 0.08 or (wrong_target_area >= 0.025 and abs(wrong_target_bearing) <= 18.0))
+                and (
+                    wrong_target_area >= float(CAM_WRONG_TARGET_STRONG_AREA_NORM)
+                    or (
+                        wrong_target_area >= float(CAM_WRONG_TARGET_MIN_AREA_NORM)
+                        and abs(wrong_target_bearing) <= float(CAM_WRONG_TARGET_BEARING_MAX_DEG)
+                    )
+                )
             )
             if dist >= 9000.0 and not target_detected:
                 self._command_speed_heading(0.0, 0.0)
@@ -8510,7 +9430,11 @@ class USVStateMachine:
                 continue
             if wrong_target_contact_risk:
                 away_sign = -1.0 if wrong_target_bearing >= 0.0 else 1.0
-                heading_err = away_sign * max(22.0, min(42.0, abs(wrong_target_bearing) + 18.0))
+                heading_err = clamp(
+                    away_sign * max(22.0, min(42.0, abs(wrong_target_bearing) + 18.0)),
+                    -float(P3_TARGET_HEADING_CLAMP_DEG),
+                    float(P3_TARGET_HEADING_CLAMP_DEG),
+                )
                 speed = 0.25
                 fallback_mode = "p3_wrong_target_avoid"
                 fallback_reason = "wrong_target_contact_risk"
@@ -8531,10 +9455,18 @@ class USVStateMachine:
                         wrong_target_area_norm=round(wrong_target_area, 4),
                         wrong_target_bearing_deg=round(wrong_target_bearing, 3),
                         heading_error_deg=round(heading_err, 3),
+                        heading_target_deg=round(float((self.current_heading + heading_err) % 360.0), 3),
+                        current_heading_deg=round(float(self.current_heading), 3),
+                        yaw_rate_dps=round(float(self.current_yaw_rate_dps or 0.0), 3),
+                        guidance_source=str(self._get_guidance_source()),
                     )
                     self._p3_wrong_target_last_log_ts = time.monotonic()
             elif target_detected:
-                heading_err = target_bearing
+                heading_err = clamp(
+                    float(target_bearing) * float(P3_TARGET_BEARING_GAIN),
+                    -float(P3_TARGET_HEADING_CLAMP_DEG),
+                    float(P3_TARGET_HEADING_CLAMP_DEG),
+                )
                 speed = max(0.25, P3_MAX_SPEED_MPS * (1.0 - clamp(target_area, 0.0, 0.85)))
                 fallback_mode = "p3_target_track"
                 fallback_reason = "vision_target_track"
@@ -8542,13 +9474,22 @@ class USVStateMachine:
                 fallback_limit = "vision_close_loop"
                 self.p3_wrong_target_avoidance = False
                 self.p3_wrong_target_class = ""
-            else:
+            elif gps_fallback_allowed:
                 heading_err = gps_heading_err
                 speed = 0.6
                 fallback_mode = "p3_waypoint_fallback"
                 fallback_reason = "gps_waypoint_fallback"
                 fallback_source = "p3_waypoint"
                 fallback_limit = "gps_fallback"
+                self.p3_wrong_target_avoidance = False
+                self.p3_wrong_target_class = ""
+            else:
+                heading_err = 0.0
+                speed = 0.0
+                fallback_mode = "p3_target_search_hold"
+                fallback_reason = "vision_target_not_detected"
+                fallback_source = "p3_search_hold"
+                fallback_limit = "no_target_hold"
                 self.p3_wrong_target_avoidance = False
                 self.p3_wrong_target_class = ""
             if dist < 2.0:
@@ -8576,33 +9517,69 @@ class USVStateMachine:
             speed_cmd = min(max(0.0, float(decision.speed_mps)), P3_MAX_SPEED_MPS)
             heading_cmd = float(decision.heading_error_deg)
             self._command_speed_heading(speed_cmd, heading_cmd)
+            if not hasattr(self, "_last_p3_track_jsonl_ts"):
+                self._last_p3_track_jsonl_ts = 0.0
+            now_p3 = time.monotonic()
+            if now_p3 - float(self._last_p3_track_jsonl_ts) >= 1.0:
+                self._last_p3_track_jsonl_ts = now_p3
+                log_jsonl(
+                    "usv_main",
+                    False,
+                    event="p3_track",
+                    heading_error_deg=round(float(heading_cmd), 3),
+                    heading_target_deg=round(float(self.heading_target), 3),
+                    current_heading_deg=round(float(self.current_heading), 3),
+                    yaw_rate_dps=round(float(self.current_yaw_rate_dps or 0.0), 3),
+                    guidance_source=str(self._get_guidance_source()),
+                    guidance_detail_source=str(self.guidance_detail_source),
+                    decision_mode=str(decision.mode),
+                    target_detected=bool(target_detected),
+                    target_bearing_deg=round(float(target_bearing), 3),
+                    target_bearing_gain=round(float(P3_TARGET_BEARING_GAIN), 3),
+                    target_heading_clamp_deg=round(float(P3_TARGET_HEADING_CLAMP_DEG), 3),
+                    target_area_norm=round(float(target_area), 4),
+                    speed_mps=round(float(speed_cmd), 3),
+                    wrong_target_contact_risk=bool(wrong_target_contact_risk),
+                )
 
-            # Multi-cue contact decision: camera area + GPS proximity + lidar distance + collision stuck
+            # Multi-cue contact decision: never latch P3 from a single weak cue.
             lidar_center = float(self.lidar_center_dist)
             lidar_ready = bool(self.lidar_ready)
             lidar_proximity_ok = lidar_ready and lidar_center < 0.8
             is_collision_stuck = self._check_collision(for_p3_contact=True)
-            proximity_ok = (not wrong_target_contact_risk) and (
-                (dist <= 1.0) or (target_area >= 0.20) or lidar_proximity_ok or is_collision_stuck
+            contact_ok, contact_sources, contact_evidence = self._p3_contact_evidence(
+                target_detected=target_detected,
+                target_area=target_area,
+                dist_m=dist,
+                lidar_center_m=lidar_center,
+                lidar_ready=lidar_ready,
+                collision_stuck=is_collision_stuck,
+                wrong_target_contact_risk=wrong_target_contact_risk,
+                wrong_target_detected=wrong_target_detected,
+                wrong_target_area=wrong_target_area,
+                wrong_target_bearing=wrong_target_bearing,
+                wrong_target_class=wrong_target_class,
             )
-            if proximity_ok:
+            if contact_ok:
                 if contact_start is None:
                     contact_start = time.monotonic()
                 elif (time.monotonic() - contact_start) >= 0.6:
-                    # Build contact confirmation source based on which cues triggered
-                    sources = []
-                    if target_area >= 0.20:
-                        sources.append("vision_area")
-                    if dist <= 1.0:
-                        sources.append("gps_proximity")
-                    if lidar_proximity_ok:
-                        sources.append("lidar_proximity")
-                    if is_collision_stuck:
-                        sources.append("lidar_collision")
-                    self.p3_contact_confirmation_source = "+".join(sources) if sources else "unknown"
+                    self.p3_contact_confirmation_source = "+".join(contact_sources) if contact_sources else "unknown"
                     print(
                         f"[ENGAGE] [P3] Angajman tamam (source={self.p3_contact_confirmation_source}, "
                         f"dist={dist:.2f}m area={target_area:.3f} lidar={lidar_center:.2f}m collision={is_collision_stuck})"
+                    )
+                    log_jsonl(
+                        "usv_main",
+                        False,
+                        event="P3_CONTACT_LATCH",
+                        p3_contact_confirmation_source=str(self.p3_contact_confirmation_source),
+                        heading_error_deg=round(float(heading_cmd), 3),
+                        heading_target_deg=round(float(self.heading_target), 3),
+                        current_heading_deg=round(float(self.current_heading), 3),
+                        yaw_rate_dps=round(float(self.current_yaw_rate_dps or 0.0), 3),
+                        guidance_source=str(self._get_guidance_source()),
+                        **contact_evidence,
                     )
                     self.stop_motors()
                     return True
@@ -8648,14 +9625,80 @@ class USVStateMachine:
         #   self._set_guidance_source("nav_auto_monitor")
         #   self.motor_limit_reason = "pixhawk_auto"
         p1_auto_env = os.environ.get("USV_RACE_P1_AUTO_WAYPOINTS", "").strip()
-        p1_auto_count = max(1, min(len(self.nav_waypoints), int(p1_auto_env or "1")))
-        if USV_MODE == USV_MODE_RACE and p1_auto_env == "" and len(self.nav_waypoints) > 1:
-            print(
-                f"[WARN] [RACE] USV_RACE_P1_AUTO_WAYPOINTS not set; defaulting to 1 of {len(self.nav_waypoints)} "
-                "waypoints in AUTO. Set env var explicitly to avoid unexpected P1→P2 boundary."
-            )
+        p1_auto_count = 0
+        if p1_auto_env:
+            try:
+                p1_auto_count = max(1, min(len(self.nav_waypoints), int(p1_auto_env)))
+            except (TypeError, ValueError):
+                self.mission_end_reason = "invalid_p1_auto_waypoint_count"
+                print(f"[ERR] [RACE] USV_RACE_P1_AUTO_WAYPOINTS gecersiz: {p1_auto_env}")
+                log_jsonl(
+                    "usv_main",
+                    False,
+                    event="race_p1_auto_config_invalid",
+                    value=str(p1_auto_env),
+                )
+                return False
         prev_wp = None
         self._race_p1_auto_completed_count = 0
+        self.race_p1_completion_source = "none"
+        if USV_MODE == USV_MODE_RACE and not p1_auto_env:
+            print("[RACE] [P1_AUTO] Statik P1/P2 waypoint split yok; P2 kamera/lidar kaniti bekleniyor")
+            deadline = time.monotonic() + float(P1_AUTO_WAYPOINT_TIMEOUT_S)
+            next_log = 0.0
+            while self.mission_active:
+                if self._check_abort():
+                    return False
+                self._drain_mav_messages()
+                ok, reason = self._p2_entry_evidence()
+                self._wp_info = f"AUTO / {len(self.nav_waypoints)}"
+                self._active_waypoint_index = self._p2_remaining_start_index_from_fc()
+                self.guidance_mode = "nav_pixhawk_auto"
+                self.guidance_reason = "pixhawk_auto_p2_evidence_wait"
+                self._set_guidance_source("nav_auto_monitor")
+                self.avoidance_bias_deg = 0.0
+                self.cross_track_error_m = 0.0
+                self.nominal_heading_deg = 0.0
+                self.gate_assist_bias_deg = 0.0
+                self.motor_limit_reason = "pixhawk_auto"
+                if ok:
+                    self._race_p1_auto_completed_count = self._p2_remaining_start_index_from_fc()
+                    self.race_p1_completion_source = f"p2_evidence:{reason}"
+                    print(
+                        f"[OK] [RACE] P1_AUTO tamam source={self.race_p1_completion_source} "
+                        f"next_idx={self._race_p1_auto_completed_count}"
+                    )
+                    log_jsonl(
+                        "usv_main",
+                        False,
+                        event="race_p1_auto_completed",
+                        source=str(self.race_p1_completion_source),
+                        mission_current_seq=int(self.mission_current_seq),
+                        mission_reached_seq=int(self.mission_reached_seq),
+                        next_local_index=int(self._race_p1_auto_completed_count),
+                    )
+                    return True
+                if time.monotonic() >= deadline:
+                    self.mission_end_reason = "p1_auto_p2_evidence_timeout"
+                    print(f"[ERR] [RACE] P1_AUTO P2 evidence timeout reason={reason}")
+                    log_jsonl(
+                        "usv_main",
+                        False,
+                        event="race_p1_auto_timeout",
+                        reason=str(reason),
+                        timeout_s=round(float(P1_AUTO_WAYPOINT_TIMEOUT_S), 3),
+                    )
+                    return False
+                if time.monotonic() >= next_log:
+                    print(
+                        f"[WAIT] [RACE] P1_AUTO source=pixhawk_auto reason={reason} "
+                        f"mission_current={self.mission_current_seq} mission_reached={self.mission_reached_seq}"
+                    )
+                    next_log = time.monotonic() + 1.5
+                self._write_state()
+                time.sleep(LOOP_DT)
+            return False
+
         for idx, wp in enumerate(self.nav_waypoints[:p1_auto_count], start=1):
             self._wp_info = f"{idx} / {len(self.nav_waypoints)}"
             self._active_waypoint_index = idx - 1
@@ -8674,6 +9717,7 @@ class USVStateMachine:
                         )
                         prev_wp = wp
                         self._race_p1_auto_completed_count = idx
+                        self.race_p1_completion_source = "explicit_count_timeout_progress"
                         break
                     else:
                         print(
@@ -8705,6 +9749,7 @@ class USVStateMachine:
                     )
                     prev_wp = wp
                     self._race_p1_auto_completed_count = idx
+                    self.race_p1_completion_source = "explicit_count_waypoint_acceptance"
                     break
                 self._write_state()
                 time.sleep(LOOP_DT)
@@ -8742,8 +9787,9 @@ class USVStateMachine:
             self._track_gate_event()
             self._write_state()
 
-        if self.gate_count <= 0:
-            print("[INFO] [NAV] Kapi tespiti yok; unified waypoint + kacınma ile tamamlandi")
+        if self.gate_count < int(self.p2_min_gate_count):
+            if not self._wait_for_p2_gate_minimum():
+                return False
         print(f"[OK] [NAV] Unified tamam gate={self.gate_count}")
         return True
 
@@ -8834,6 +9880,9 @@ class USVStateMachine:
                     return False
                 self._track_gate_event()
                 self._write_state()
+            if self.gate_count < int(self.p2_min_gate_count):
+                if not self._wait_for_p2_gate_minimum():
+                    return False
             print("[OK] [NAV] Tamam")
             return True
 
@@ -8859,8 +9908,9 @@ class USVStateMachine:
             self._track_gate_event()
             self._write_state()
 
-        if self.gate_count <= 0:
-            print("[INFO] [NAV] Kapi tespiti yok; koridor waypoint + kacınma ile tamamlandi")
+        if self.gate_count < int(self.p2_min_gate_count):
+            if not self._wait_for_p2_gate_minimum():
+                return False
         print(f"[OK] [NAV] Tamam gate={self.gate_count}")
         return True
 
@@ -8872,6 +9922,9 @@ class USVStateMachine:
         print("  [ENGAGE] HSV HEDEFLEME + ANGAJMAN")
         print("=" * 52)
         time.sleep(0.3)  # Allow brief heading stabilization
+        if not self._validate_p3_target_lock():
+            self._enter_hold("P3_TARGET_LOCK_INVALID")
+            return False
         self.state = self.STATE_ENGAGE
         self.p3_wrong_target_avoidance = False
         self.p3_wrong_target_class = ""
@@ -8883,9 +9936,7 @@ class USVStateMachine:
             return False
         self._write_state()
         if self.engage_wp is None:
-            print("[WARN] [ENGAGE] Hedef waypoint yok")
-            self.mission_end_reason = "engage_skipped_no_waypoint"
-            return True
+            print("[ENGAGE] P3 waypoint yok; renk algilama ile vision-only angajman yapilacak")
         if self._run_engage_attempt(P3_TIMEOUT_S):
             self.mission_end_reason = "engage_success"
             return True
@@ -9016,9 +10067,6 @@ class USVStateMachine:
             self._check_time()
             if self.state == self.STATE_NAV:
                 if self.run_nav():
-                    if self.engage_wp is None:
-                        self.state = self.STATE_COMPLETED
-                        continue
                     self.state = self.STATE_ENGAGE
                 else:
                     if self.state != self.STATE_HOLD:
@@ -9133,7 +10181,7 @@ if __name__ == "__main__":
                 else:
                     usv.v_target = 0.0
                     usv.heading_target = usv.current_heading
-                if usv.master:
+                if usv.master and not usv._start_request_pending():
                     _im_now = time.monotonic()
                     _skip_idle_ph = bool(
                         os.environ.get("USV_SIM") == "1"

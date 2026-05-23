@@ -1,3 +1,5 @@
+let _unifiedSpatialMapSpanEma = null;
+
 function drawUnifiedSpatialMap(canvas, payload) {
     if (!canvas || !payload) return;
     const rect = canvas.getBoundingClientRect();
@@ -51,6 +53,13 @@ function drawUnifiedSpatialMap(canvas, payload) {
     for (const p of allPts) {
         span = Math.max(span, Math.hypot(p[0] - cx, p[1] - cy) * 1.25);
     }
+    span = Math.max(span, 15.0);
+    if (_unifiedSpatialMapSpanEma == null || !Number.isFinite(_unifiedSpatialMapSpanEma)) {
+        _unifiedSpatialMapSpanEma = span;
+    } else {
+        _unifiedSpatialMapSpanEma = (0.15 * span) + (0.85 * _unifiedSpatialMapSpanEma);
+    }
+    span = _unifiedSpatialMapSpanEma;
 
     const scale = Math.min(width, height) / (2.0 * span);
     const toPx = (x, y) => {
@@ -96,8 +105,8 @@ function drawUnifiedSpatialMap(canvas, payload) {
     const lidarAge = payload.lidar && payload.lidar.age_s != null ? Number(payload.lidar.age_s) : null;
     const lidarStale = Boolean(payload.lidar && payload.lidar.stale);
     let lidarAlpha = 0.65;
-    if (lidarStale) lidarAlpha = 0.18;
-    else if (lidarAge != null && lidarAge > 0.35) lidarAlpha = 0.25;
+    if (lidarStale) lidarAlpha = 0.35;
+    else if (lidarAge != null && lidarAge > 0.35) lidarAlpha = 0.35;
     ctx.fillStyle = `rgba(56,189,248,${lidarAlpha})`;
     for (const p of lidarWorldPts) {
         const q = toPx(Number(p[0]), Number(p[1]));

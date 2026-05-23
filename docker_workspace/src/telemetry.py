@@ -30,6 +30,7 @@ from compliance_profile import (
     USV_MODE,
     USV_MODE_RACE,
 )
+from json_atomic import atomic_read_json, atomic_write_json
 from mission_adapter import (
     adapt_mission_to_structured,
     validate_target_color,
@@ -156,6 +157,7 @@ EVENT_LAST = {
     "failsafe_state": "--",
     "estop_state": False,
     "timeout_count": 0,
+    "start_phase": "idle",
 }
 EVENT_LOCK = threading.Lock()
 SPATIAL_TRAIL = deque(maxlen=2000)
@@ -169,8 +171,6 @@ LOG_FILE_ALLOWLIST = {
     "telemetry.log": f"{LOG_DIR}/telemetry.debug.log",
     "telemetry.debug.log": f"{LOG_DIR}/telemetry.debug.log",
     "telemetry.jsonl": f"{LOG_DIR}/telemetry.jsonl",
-    "telemetry_mavlink.jsonl": f"{LOG_DIR}/telemetry.jsonl",
-    "telemetry_http.jsonl": f"{LOG_DIR}/telemetry.jsonl",
     "sitl.log": f"{_sim_base}/sitl.log",
     "gazebo.log": f"{_sim_base}/gazebo.log",
     "cam.log": f"{LOG_DIR}/cam.debug.log",
@@ -182,12 +182,11 @@ LOG_FILE_ALLOWLIST = {
     "usv_main.log": f"{LOG_DIR}/usv_main.debug.log",
     "usv_main.debug.log": f"{LOG_DIR}/usv_main.debug.log",
     "usv_main.jsonl": f"{LOG_DIR}/usv_main.jsonl",
-    "usv_mavlink.jsonl": f"{LOG_DIR}/usv_main.jsonl",
-    "usv_collision.jsonl": f"{LOG_DIR}/usv_main.jsonl",
     "lidar_map.log": f"{LOG_DIR}/lidar_map.debug.log",
     "lidar_map.debug.log": f"{LOG_DIR}/lidar_map.debug.log",
     "lidar_map.jsonl": f"{LOG_DIR}/lidar_map.jsonl",
     "check_stack.log": f"{_sim_base}/check_stack.log",
+    "compliance_race_test.log": f"{_sim_base}/compliance_race_test.log",
     "telemetri_verisi.csv": CSV_FILE,
     "file3_local_map_index.csv": f"{LOG_DIR}/file3_local_map_index.csv",
 }
@@ -300,21 +299,6 @@ def _start_request_pending(state=None):
     return False
 
 
-def _atomic_write_json(path, payload):
-    directory = os.path.dirname(path)
-    tmp_path = f"{path}.tmp"
-    for attempt in range(2):
-        try:
-            os.makedirs(directory, exist_ok=True)
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f)
-            os.replace(tmp_path, path)
-            return
-        except FileNotFoundError:
-            if attempt == 1:
-                raise
-            time.sleep(0.05)
-
 
 def _emit_event(kind, payload=None):
     global EVENT_ID
@@ -383,6 +367,23 @@ def _sync_events_from_state(state):
             for idx in range(prev_timeout + 1, timeout_count + 1):
                 to_emit.append(("timeout", {"timeout_count": idx}))
         EVENT_LAST["timeout_count"] = timeout_count
+
+        start_phase = str(state.get("start_phase", "idle") or "idle")
+        prev_start_phase = str(EVENT_LAST.get("start_phase", "idle") or "idle")
+        if start_phase == "rejected" and prev_start_phase != "rejected":
+            mission_end_reason = str(state.get("mission_end_reason", "none") or "none")
+            to_emit.append(
+                (
+                    "start_rejected",
+                    {
+                        "start_phase": start_phase,
+                        "mission_end_reason": mission_end_reason,
+                        "fc_start_block_reason": str(state.get("fc_start_block_reason", "unknown") or "unknown"),
+                        "guided_ready_missing": list(state.get("guided_ready_missing", []) or []),
+                    },
+                )
+            )
+        EVENT_LAST["start_phase"] = start_phase
 
     for kind, payload in to_emit:
         _emit_event(kind, payload)
@@ -506,6 +507,8 @@ HTML_PAGE = """
         .m-mp-line b { color:var(--accent); font-family:var(--mono); font-weight:600; }
         .m-reject-reason { font-size:0.72rem; color:var(--danger); margin-top:8px; padding:6px 8px; border-radius:6px; border:1px solid rgba(255,80,80,0.35); background:rgba(80,20,20,0.25); display:none; text-align:left; }
         .m-reject-reason.visible { display:block; }
+        .conn-banner { font-size:0.78rem; color:var(--danger); margin:8px 0; padding:8px 10px; border-radius:6px; border:1px solid rgba(255,80,80,0.35); background:rgba(80,20,20,0.25); display:none; text-align:center; }
+        .conn-banner.visible { display:block; }
         .m-btns { display:flex; flex-direction:column; gap:6px; margin-top:auto; }
         .btn { padding:10px; border:none; border-radius:8px; font-weight:700; font-size:0.8rem; cursor:pointer; transition:all 0.15s; text-transform:uppercase; letter-spacing:0.5px; font-family:var(--sans); }
         .btn:active { transform:scale(0.97); }
@@ -579,6 +582,7 @@ HTML_PAGE = """
         <div class="card mission-panel">
             <div class="card-h"><span>Mission Control</span><span class="dot dot-g" id="mc_dot"></span></div>
             <div class="card-b">
+                <div class="conn-banner" id="conn_banner"></div>
                 <div class="m-timer" id="m_timer">00:00<small>ELAPSED</small></div>
 
                 <div class="m-state">
@@ -595,7 +599,12 @@ HTML_PAGE = """
                 <div class="m-wp" id="m_wp">Waypoint: <b>-- / --</b></div>
                 <div class="m-wp">Hedef: <b id="m_target">--</b></div>
                 <div class="m-mp-line">Mission kaynagi: <b id="m_upload_src">--</b></div>
-                <div class="m-mp-line">Pixhawk sync: <b id="m_sync_err">OK</b></div>
+                <div class="m-mp-line">Pixhawk sync: <b id="m_sync_err">--</b></div>
+                <div class="m-mp-line">FC start: <b id="m_fc_start">--</b></div>
+                <div class="m-mp-line">Son FC mesaji: <b id="m_fc_text">--</b></div>
+                <div class="m-mp-line">Nav faz: <b id="m_nav_phase">--</b></div>
+                <div class="m-mp-line">Heading hata: <b id="m_nav_hdg_err">--</b></div>
+                <div class="m-mp-line">Surge izni: <b id="m_nav_surge">--</b></div>
                 <div class="m-mp-line">MP/GCS heartbeat yasi: <b id="m_gcs_age">--</b></div>
                 <div class="m-reject-reason" id="m_reject_reason"></div>
 
@@ -701,11 +710,61 @@ HTML_PAGE = """
         // --- DATA UPDATE ---
         let missionStartTime = 0;
         let missionStartPending = false;
+        let lastStartRejectAlert = '';
+
+        const ARM_BLOCK_HINTS = {
+            accel_inconsistent_recent: 'IMU/ivme sensörü henüz hazır değil. 10-15 sn bekleyip tekrar deneyin.',
+            gyro_inconsistent_recent: 'Jiroskop henüz hazır değil. 10-15 sn bekleyip tekrar deneyin.',
+            bad_position_recent: 'FC konum çözümü henüz arm için hazır değil. Biraz bekleyip tekrar deneyin.',
+            ekf_variance_recent: 'EKF varyansı yüksek. FC oturana kadar bekleyin.',
+        };
+
+        function humanizeStartReject(reason) {
+            const text = String(reason || '').trim();
+            if (!text.startsWith('start_rejected:')) return text;
+            const code = text.split(':').pop() || '';
+            return ARM_BLOCK_HINTS[code] || text;
+        }
+
+        function showStartRejectAlert(reason) {
+            const text = String(reason || '').trim();
+            if (!text.startsWith('start_rejected:') || text === lastStartRejectAlert) {
+                return;
+            }
+            lastStartRejectAlert = text;
+            alert('Görev başlatılamadı: ' + humanizeStartReject(text));
+        }
+
+        function setDashboardConnectionState(ok, detail) {
+            const banner = document.getElementById('conn_banner');
+            const modeEl = document.getElementById('mode');
+            const dotEl = document.getElementById('mc_dot');
+            if (ok) {
+                if (banner) {
+                    banner.textContent = '';
+                    banner.className = 'conn-banner';
+                }
+                return;
+            }
+            if (banner) {
+                banner.textContent = detail || 'Telemetry API baglantisi yok. Sim stack calisiyor mu?';
+                banner.className = 'conn-banner visible';
+            }
+            if (modeEl) {
+                modeEl.innerText = 'BAGLANTI YOK';
+                modeEl.style.color = 'var(--danger)';
+            }
+            if (dotEl) dotEl.className = 'dot dot-r';
+        }
 
         function updateStats() {
             fetch('/api/data')
-                .then(r => r.json())
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
                 .then(d => {
+                    setDashboardConnectionState(true);
                     // Header
                     document.getElementById('sys_cpu').innerText = d.Sys_CPU + '%';
                     document.getElementById('sys_ram').innerText = d.Sys_RAM + '%';
@@ -777,6 +836,11 @@ HTML_PAGE = """
                         if (d.mission_active || !d.start_requested) {
                             missionStartPending = false;
                         }
+                        if (d.start_phase === 'rejected' && !d.mission_active) {
+                            missionStartPending = false;
+                            const btn = document.getElementById('btn_start');
+                            if (btn) btn.innerText = '▶ Görevi Başlat';
+                        }
 
                         // Mission dot
                         document.getElementById('mc_dot').className = 'dot ' + (d.mission_active ? 'dot-g' : 'dot-r');
@@ -803,6 +867,35 @@ HTML_PAGE = """
                             syncEl.style.color = legacyError ? 'var(--danger)' : 'var(--success)';
                         }
                     }
+                    const fcStartEl = document.getElementById('m_fc_start');
+                    if (fcStartEl) {
+                        const fcReady = Boolean(d.fc_start_ready);
+                        const fcBlock = String(d.fc_start_block_reason || 'none');
+                        fcStartEl.innerText = (fcReady ? 'hazir' : fcBlock);
+                        fcStartEl.style.color = fcReady ? 'var(--success)' : 'var(--danger)';
+                    }
+                    const fcTextEl = document.getElementById('m_fc_text');
+                    if (fcTextEl) {
+                        const st = (d.last_statustext && d.last_statustext.text) ? String(d.last_statustext.text) : '--';
+                        fcTextEl.innerText = st;
+                        fcTextEl.style.color = /prearm:|arm:/i.test(st) ? 'var(--danger)' : 'var(--text2)';
+                    }
+                    const navPhaseEl = document.getElementById('m_nav_phase');
+                    if (navPhaseEl) {
+                        navPhaseEl.innerText = String(d.nav_align_phase || d.nav_align_mode || '--');
+                        navPhaseEl.style.color = String(d.nav_align_phase || '').includes('ACQUIRE') ? 'var(--warning)' : 'var(--success)';
+                    }
+                    const navHdgEl = document.getElementById('m_nav_hdg_err');
+                    if (navHdgEl) {
+                        const herr = d.nav_heading_error_deg;
+                        navHdgEl.innerText = (herr === null || herr === undefined || Number.isNaN(Number(herr))) ? '--' : Number(herr).toFixed(1) + ' deg';
+                    }
+                    const navSurgeEl = document.getElementById('m_nav_surge');
+                    if (navSurgeEl) {
+                        const surge = Boolean(d.surge_allowed);
+                        navSurgeEl.innerText = surge ? 'evet' : 'hayir';
+                        navSurgeEl.style.color = surge ? 'var(--success)' : 'var(--warning)';
+                    }
                     const gcsAgeEl = document.getElementById('m_gcs_age');
                     if (gcsAgeEl) {
                         const ga = d.mission_planner_gcs_age_s;
@@ -816,9 +909,12 @@ HTML_PAGE = """
                         const show = mer.startsWith('start_rejected:');
                         rej.textContent = show ? mer : '';
                         rej.className = 'm-reject-reason' + (show ? ' visible' : '');
+                        if (show) showStartRejectAlert(mer);
                     }
                 })
-                .catch(() => {});
+                .catch(() => {
+                    setDashboardConnectionState(false, 'Veri alinamadi: sim stack kapali veya http://127.0.0.1:8080/dashboard erisilemiyor.');
+                });
         }
 
         // Mission Timer
@@ -1056,7 +1152,7 @@ class SmartTelemetry:
             "error_counters": dict(self.error_counters),
         }
         try:
-            _atomic_write_json(LINK_STATE_FILE, payload)
+            atomic_write_json(LINK_STATE_FILE, payload)
             self._last_link_state_write = now
             # Logging only every 5 seconds to avoid spam
             if not hasattr(self, '_last_heartbeat_log') or (now - self._last_heartbeat_log) >= 5.0:
@@ -2308,6 +2404,23 @@ CONTROLLER_PAGE = """
         let latestEventId = 0;
         let logFilesLoaded = false;
         let startPending = false;
+        let lastStartRejectAlert2 = '';
+
+        function showStartRejectAlert2(reason) {
+            const text = String(reason || '').trim();
+            if (!text.startsWith('start_rejected:') || text === lastStartRejectAlert2) {
+                return;
+            }
+            lastStartRejectAlert2 = text;
+            const hints = {
+                accel_inconsistent_recent: 'IMU/ivme sensörü henüz hazır değil. 10-15 sn bekleyip tekrar deneyin.',
+                gyro_inconsistent_recent: 'Jiroskop henüz hazır değil. 10-15 sn bekleyip tekrar deneyin.',
+                bad_position_recent: 'FC konum çözümü henüz arm için hazır değil. Biraz bekleyip tekrar deneyin.',
+                ekf_variance_recent: 'EKF varyansı yüksek. FC oturana kadar bekleyin.',
+            };
+            const code = text.split(':').pop() || '';
+            alert('Görev başlatılamadı: ' + (hints[code] || text));
+        }
 
         function fmtNum(v, d=3) {
             if (v === null || v === undefined || Number.isNaN(Number(v))) return '--';
@@ -2355,32 +2468,72 @@ CONTROLLER_PAGE = """
             text('eventMeta', `${root.children.length} event`);
         }
 
-        async function loadLogFiles() {
-            const res = await fetch('/api/log_files');
-            const data = await res.json();
-            const select = document.getElementById('logSelect');
-            const current = select.value;
-            select.innerHTML = '';
-            for (const item of data.files || []) {
-                const opt = document.createElement('option');
-                opt.value = item.name;
-                opt.textContent = item.name;
-                select.appendChild(opt);
+        const LOG_DEFAULT_CANDIDATES = [
+            'usv_main.debug.log',
+            'usv_main.jsonl',
+            'telemetry.debug.log',
+            'telemetry.jsonl',
+        ];
+
+        function pickDefaultLogName(files) {
+            const list = Array.isArray(files) ? files : [];
+            for (const preferred of LOG_DEFAULT_CANDIDATES) {
+                const hit = list.find((item) => item.name === preferred && item.exists && Number(item.size || 0) > 0);
+                if (hit) return hit.name;
             }
-            if (current) select.value = current;
-            if (!select.value && select.options.length) select.value = select.options[0].value;
-            logFilesLoaded = true;
+            const nonempty = list
+                .filter((item) => item.exists && Number(item.size || 0) > 0)
+                .sort((a, b) => Number(b.size || 0) - Number(a.size || 0));
+            if (nonempty.length) return nonempty[0].name;
+            return list.length ? list[0].name : '';
+        }
+
+        async function loadLogFiles() {
+            try {
+                const res = await fetch('/api/log_files');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                const select = document.getElementById('logSelect');
+                const current = select.value;
+                select.innerHTML = '';
+                for (const item of data.files || []) {
+                    const opt = document.createElement('option');
+                    opt.value = item.name;
+                    const sizeKb = Number(item.size || 0) > 0 ? ` (${Math.max(1, Math.round(item.size / 1024))} KB)` : ' (boş)';
+                    opt.textContent = `${item.name}${sizeKb}`;
+                    select.appendChild(opt);
+                }
+                if (current && [...select.options].some((opt) => opt.value === current)) {
+                    select.value = current;
+                } else {
+                    const picked = pickDefaultLogName(data.files || []);
+                    if (picked) select.value = picked;
+                }
+                logFilesLoaded = true;
+            } catch (err) {
+                logFilesLoaded = false;
+                text('logMeta', 'Log listesi alınamadı (sim stack kapalı olabilir)');
+                const body = document.getElementById('logBody');
+                if (body && !body.textContent) {
+                    body.textContent = '[sim stack kapalı — dosyalar diskte kalır: logs/system/*.debug.log ve *.jsonl]';
+                }
+            }
         }
 
         async function refreshLogs() {
-            if (!logFilesLoaded) await loadLogFiles();
-            const name = document.getElementById('logSelect').value;
-            const lines = document.getElementById('logLines').value || '120';
-            if (!name) return;
-            const res = await fetch(`/api/log_tail?name=${encodeURIComponent(name)}&lines=${encodeURIComponent(lines)}`);
-            const data = await res.json();
-            text('logMeta', `${data.name || name} | ${data.exists ? 'OK' : 'missing'} | ${data.lines || 0} satır`);
-            document.getElementById('logBody').textContent = data.content || '[boş]';
+            try {
+                if (!logFilesLoaded) await loadLogFiles();
+                const name = document.getElementById('logSelect').value;
+                const lines = document.getElementById('logLines').value || '120';
+                if (!name) return;
+                const res = await fetch(`/api/log_tail?name=${encodeURIComponent(name)}&lines=${encodeURIComponent(lines)}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                text('logMeta', `${data.name || name} | ${data.exists ? 'OK' : 'missing'} | ${data.lines || 0} satır`);
+                document.getElementById('logBody').textContent = data.content || '[boş]';
+            } catch (err) {
+                text('logMeta', 'Log okunamadı (sim stack kapalı olabilir)');
+            }
         }
 
         function bindCameraFeed(el) {
@@ -2489,6 +2642,13 @@ CONTROLLER_PAGE = """
             if (active || !Boolean(data.start_requested)) {
                 startPending = false;
             }
+            if (data.start_phase === 'rejected' && !active) {
+                startPending = false;
+                const mer = String(data.mission_end_reason || 'none');
+                if (mer.startsWith('start_rejected:')) {
+                    showStartRejectAlert2(mer);
+                }
+            }
             document.getElementById('startBtn').disabled =
                 active ||
                 Boolean(data.start_requested) ||
@@ -2509,6 +2669,10 @@ CONTROLLER_PAGE = """
                 latestEventId = data.latest_id || latestEventId;
                 for (const ev of data.events || []) {
                     prependEvent(ev.kind || 'event', JSON.stringify(ev.payload || {}));
+                    if (ev.kind === 'start_rejected') {
+                        const payload = ev.payload || {};
+                        showStartRejectAlert2(payload.mission_end_reason || payload.reason || '');
+                    }
                 }
             } catch (err) {
                 prependEvent('events_error', String(err));
@@ -2693,17 +2857,10 @@ def lidar_map():
 def _read_mission_state():
     """usv_main tarafından yazılan state dosyasını oku."""
     global last_state_cache
-    try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, 'r', encoding='utf-8') as f:
-                state = json.load(f)
-            if isinstance(state, dict):
-                last_state_cache = state
-                return state
-    except Exception as exc:
-        # Atomic olmayan yazım anında parse hatası olabilir; son geçerli state'e düş.
-        # Silent fail - don't bump error counter at module level
-        pass
+    state = atomic_read_json(STATE_FILE, default=None)
+    if isinstance(state, dict):
+        last_state_cache = state
+        return state
     return last_state_cache
 
 
@@ -3071,6 +3228,10 @@ def get_data():
     out['nav_arrival_phase'] = state.get('nav_arrival_phase', '--')
     out['nav_align_mode'] = state.get('nav_align_mode', '--')
     out['nav_align_phase'] = state.get('nav_align_phase', '--')
+    out['nav_heading_error_deg'] = state.get('nav_heading_error_deg')
+    out['surge_allowed'] = bool(state.get('surge_allowed', False))
+    out['nav_strict_heading_first'] = bool(state.get('nav_strict_heading_first', True))
+    out['advance_stable_elapsed_s'] = state.get('advance_stable_elapsed_s', 0.0)
     out['guided_vx_north_mps'] = state.get('guided_vx_north_mps', 0.0)
     out['guided_vy_east_mps'] = state.get('guided_vy_east_mps', 0.0)
     out['avoidance_active'] = bool(state.get('avoidance_active', False))
@@ -3117,6 +3278,12 @@ def get_data():
     out['target_color'] = target_state.get('target_color', state.get('target_color', '--'))
     out['mission_input_format'] = state.get('mission_input_format', MISSION_INPUT_FORMAT)
     out['mission_split_profile'] = state.get('mission_split_profile', {})
+    out['mission_profile'] = state.get('mission_profile', {})
+    out['mission_profile_valid'] = bool(state.get('mission_profile_valid', False))
+    out['mission_profile_race_ready'] = bool(state.get('mission_profile_race_ready', False))
+    out['mission_profile_error'] = str(state.get('mission_profile_error', '') or '')
+    out['p2_min_gate_count'] = int(state.get('p2_min_gate_count', 2) or 2)
+    out['p3_engagement_mode'] = str(state.get('p3_engagement_mode', 'vision_color_track') or 'vision_color_track')
     mission_lifecycle = state.get('mission_lifecycle', {})
     if not isinstance(mission_lifecycle, dict):
         mission_lifecycle = {}
@@ -3348,6 +3515,10 @@ def get_data():
             'post_start_mission_change_rejected': out['post_start_mission_change_rejected'],
             'active_waypoint_index': out['active_waypoint_index'],
             'target_color': out['target_color'],
+            'mission_profile_valid': out['mission_profile_valid'],
+            'mission_profile_race_ready': out['mission_profile_race_ready'],
+            'p2_min_gate_count': out['p2_min_gate_count'],
+            'p3_engagement_mode': out['p3_engagement_mode'],
             'gate_count': out['gate_count'],
         },
         'event_flags': {
@@ -3540,19 +3711,16 @@ def upload_mission():
     # Mission dosyasına canonical flat formatta yaz.
     mission_file = os.environ.get("MISSION_FILE", MISSION_FILE_DEFAULT)
     try:
-        os.makedirs(os.path.dirname(mission_file), exist_ok=True)
-        with open(mission_file, 'w', encoding='utf-8') as f:
-            json.dump(flat_mission, f, indent=2)
+        if not atomic_write_json(mission_file, flat_mission, indent=2):
+            return jsonify({'error': 'Mission dosyası yazılamadı (atomic write failed)'}), 500
 
         if target_color_from_legacy:
-            os.makedirs(os.path.dirname(TARGET_STATE_FILE), exist_ok=True)
-            tmp_target = f"{TARGET_STATE_FILE}.tmp"
-            with open(tmp_target, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'target_color': validate_target_color(target_color_from_legacy),
-                    'target_color_changed_at': time.time(),
-                }, f, indent=2)
-            os.replace(tmp_target, TARGET_STATE_FILE)
+            target_payload = {
+                'target_color': validate_target_color(target_color_from_legacy),
+                'target_color_changed_at': time.time(),
+            }
+            if not atomic_write_json(TARGET_STATE_FILE, target_payload, indent=2):
+                return jsonify({'error': 'Target state yazılamadı (atomic write failed)'}), 500
 
         print(f"✓ [API] Mission dosyası başarıyla yüklendi: {mission_file}")
         return jsonify({
@@ -3607,14 +3775,13 @@ def set_target_color():
 
     try:
         os.makedirs(os.path.dirname(TARGET_STATE_FILE), exist_ok=True)
-        tmp_path = f"{TARGET_STATE_FILE}.tmp"
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump({
-                'target_color': target_color,
-                'target_color_changed_at': time.time(),
-            }, f, indent=2)
-        os.replace(tmp_path, TARGET_STATE_FILE)
-        
+        target_payload = {
+            'target_color': target_color,
+            'target_color_changed_at': time.time(),
+        }
+        if not atomic_write_json(TARGET_STATE_FILE, target_payload, indent=2):
+            return jsonify({'error': 'Target color yazılamadı (atomic write failed)'}), 500
+
         print(f"✓ [API] Target color güncellendi: {target_color}")
         return jsonify({
             'ok': True,

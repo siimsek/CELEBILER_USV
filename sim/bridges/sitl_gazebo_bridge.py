@@ -17,6 +17,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT / "docker_workspace" / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "docker_workspace" / "src"))
+from json_atomic import atomic_write_json
 from runtime_debug_log import log_jsonl, redirect_std_streams, setup_component_logger
 
 log = setup_component_logger("sitl_gazebo_bridge", prefer_simulation=True)
@@ -31,6 +32,9 @@ SPAWN_Y = float(os.environ.get("SIM_GZ_SPAWN_Y", "0"))
 POSE_ARM_S = max(0.0, float(os.environ.get("SIM_GZ_POSE_ARM_S", "0")))
 MAX_LINEAR_VELOCITY_MPS = max(0.1, float(os.environ.get("SIM_GZ_MAX_LINEAR_VELOCITY_MPS", "3.0")))
 MAX_YAW_RATE_RAD_S = max(0.1, float(os.environ.get("SIM_GZ_MAX_YAW_RATE_RAD_S", "1.0")))
+PWM_MIN_US = float(os.environ.get("SIM_GZ_PWM_MIN_US", "1100"))
+PWM_TRIM_US = float(os.environ.get("SIM_GZ_PWM_TRIM_US", "1500"))
+PWM_MAX_US = float(os.environ.get("SIM_GZ_PWM_MAX_US", "1900"))
 try:
     SIM_GZ_YAW_SIGN = -1.0 if float(os.environ.get("SIM_GZ_YAW_SIGN", "-1.0")) < 0.0 else 1.0
 except (TypeError, ValueError):
@@ -70,8 +74,16 @@ def _normalize_pwm(value, default=1500.0):
         return float(default)
 
 def _normalized_motor_outputs(left_pwm, right_pwm):
-    left_n = (float(left_pwm) - 1500.0) / 500.0
-    right_n = (float(right_pwm) - 1500.0) / 500.0
+    def norm(pwm):
+        pwm = float(pwm)
+        if pwm >= PWM_TRIM_US:
+            span = max(1.0, PWM_MAX_US - PWM_TRIM_US)
+            return (pwm - PWM_TRIM_US) / span
+        span = max(1.0, PWM_TRIM_US - PWM_MIN_US)
+        return (pwm - PWM_TRIM_US) / span
+
+    left_n = norm(left_pwm)
+    right_n = norm(right_pwm)
     if LEFT_MOTOR_REVERSED:
         left_n *= -1.0
     if RIGHT_MOTOR_REVERSED:
@@ -165,12 +177,17 @@ class SitlGazeboBridge:
         self._last_neutral_pwm_diag = 0.0
         log.info(
             "[SIM-MOTOR] Servo mapping: SERVO1/CH1=%s SERVO3/CH3=%s yaw_sign=%.1f left_rev=%s right_rev=%s "
-            "(override with SIM_GZ_SERVO1_MOTOR/SIM_GZ_SERVO3_MOTOR/SIM_GZ_YAW_SIGN)",
+            "pwm_min/trim/max=%.0f/%.0f/%.0f bench_json_override=%s "
+            "(override with SIM_GZ_SERVO1_MOTOR/SIM_GZ_SERVO3_MOTOR/SIM_GZ_YAW_SIGN/SIM_GZ_PWM_*_US)",
             SIM_GZ_SERVO1_MOTOR,
             SIM_GZ_SERVO3_MOTOR,
             SIM_GZ_YAW_SIGN,
             LEFT_MOTOR_REVERSED,
             RIGHT_MOTOR_REVERSED,
+            PWM_MIN_US,
+            PWM_TRIM_US,
+            PWM_MAX_US,
+            ALLOW_MOTOR_COMMAND_JSON_OVERRIDE,
         )
         log_jsonl(
             "sitl_gazebo_bridge",
@@ -179,9 +196,31 @@ class SitlGazeboBridge:
             servo1_motor=str(SIM_GZ_SERVO1_MOTOR),
             servo3_motor=str(SIM_GZ_SERVO3_MOTOR),
             yaw_sign=float(SIM_GZ_YAW_SIGN),
+            pwm_min_us=float(PWM_MIN_US),
+            pwm_trim_us=float(PWM_TRIM_US),
+            pwm_max_us=float(PWM_MAX_US),
+            pwm_1100_norm=_normalized_motor_outputs(PWM_MIN_US, PWM_TRIM_US)[0],
+            pwm_1500_norm=_normalized_motor_outputs(PWM_TRIM_US, PWM_TRIM_US)[0],
+            pwm_1900_norm=_normalized_motor_outputs(PWM_MAX_US, PWM_TRIM_US)[0],
+            bench_json_override_allowed=bool(ALLOW_MOTOR_COMMAND_JSON_OVERRIDE),
             left_motor_reversed=bool(LEFT_MOTOR_REVERSED),
             right_motor_reversed=bool(RIGHT_MOTOR_REVERSED),
             yaw_contract="left_norm_minus_right_norm_positive_increases_nav_heading",
+        )
+        log_jsonl(
+            "sitl_gazebo_bridge",
+            True,
+            event="sim_bridge_self_check",
+            yaw_sign=float(SIM_GZ_YAW_SIGN),
+            servo1_motor=str(SIM_GZ_SERVO1_MOTOR),
+            servo3_motor=str(SIM_GZ_SERVO3_MOTOR),
+            race_mode=USV_MODE == "race",
+            bench_json_override_env=os.environ.get("SIM_GZ_ALLOW_MOTOR_COMMAND_JSON", "0"),
+            bench_json_override_allowed=bool(ALLOW_MOTOR_COMMAND_JSON_OVERRIDE),
+            pwm_normalization="piecewise_min_trim_max",
+            pwm_min_us=float(PWM_MIN_US),
+            pwm_trim_us=float(PWM_TRIM_US),
+            pwm_max_us=float(PWM_MAX_US),
         )
 
         # Parse SIM_HOME
@@ -578,12 +617,8 @@ class SitlGazeboBridge:
                     "yaw_sign": SIM_GZ_YAW_SIGN,
                     "source": "sitl_gazebo_bridge_json"
                 }
-                tmp_path = POS_FILE.with_suffix(f"{POS_FILE.suffix}.tmp")
-                with open(tmp_path, "w", encoding="utf-8") as handle:
-                    json.dump(payload, handle)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(tmp_path, POS_FILE)
+                if not atomic_write_json(POS_FILE, payload):
+                    log.warning("vehicle_position.json atomic write failed; previous file preserved")
             except Exception as exc:
                 log.warning("JSON write error: %s", exc)
             time.sleep(0.1)

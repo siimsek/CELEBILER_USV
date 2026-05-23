@@ -112,8 +112,8 @@ def main() -> int:
         gate_bearing_deg=0.0,
         base_speed_mps=0.8,
         avoidance_bias_deg=35.0,
-        front_distance_m=2.25,
-        center_distance_m=2.25,
+        front_distance_m=1.85,
+        center_distance_m=1.85,
         warn_distance_m=2.5,
         stop_distance_m=2.0,
         gate_stable_threshold_s=1.0,
@@ -126,13 +126,14 @@ def main() -> int:
 
     usv = object.__new__(USVStateMachine)
     usv.current_yaw_rate_dps = 2.0
+    usv._nav_align_mode = "advance"
     usv._wrong_turn_since = time.monotonic() - float(HEADING_WRONG_TURN_TRIGGER_S) - 0.1
     usv._wrong_turn_active = False
     usv._wrong_turn_count = 0
     usv._wrong_turn_last_log_ts = 0.0
     usv.heading_control_diagnostic = "nominal"
-    err, speed, guarded = USVStateMachine._apply_wrong_turn_guard(usv, -15.0, 0.42)
-    assert_close(err, -15.0)
+    err, speed, guarded = USVStateMachine._apply_wrong_turn_guard(usv, -8.0, 0.42)
+    assert_close(err, -8.0)
     assert_close(speed, 0.42)
     if guarded:
         raise AssertionError("GUIDED wrong-turn diagnostic must not zero speed")
@@ -161,14 +162,16 @@ def main() -> int:
         99.0,
         0.45,
     )
-    if creep_speed != 0.28 or creep_reason != "nav_align_turn_creep":
-        raise AssertionError(f"large turn with clear front may creep: {creep_speed} {creep_reason}")
+    if creep_speed != 0.0 or creep_reason not in ("nav_align_yaw_only", "nav_align_turn_creep"):
+        raise AssertionError(f"large turn with clear front must pivot or optional creep: {creep_speed} {creep_reason}")
 
     if USVStateMachine._allow_local_minima_boost(True, -94.0):
         raise AssertionError("local minima boost must be suppressed during turn priority")
-    if USVStateMachine._allow_local_minima_boost(False, -94.0):
+    if USVStateMachine._allow_local_minima_boost(False, -94.0, "align"):
+        raise AssertionError("local minima boost must be suppressed during align mode")
+    if USVStateMachine._allow_local_minima_boost(False, -94.0, "advance"):
         raise AssertionError("local minima boost must be suppressed during large heading error")
-    if not USVStateMachine._allow_local_minima_boost(False, -10.0):
+    if not USVStateMachine._allow_local_minima_boost(False, -5.0, "advance"):
         raise AssertionError("local minima boost may apply once heading is acquired")
 
 
@@ -213,6 +216,22 @@ def main() -> int:
     )
     if small_active or small_blend != 0.0:
         raise AssertionError("small lateral offset must not trigger align cross-track")
+
+    from navigation import heading_first_waypoint_request  # noqa: E402
+
+    strict_turn = heading_first_waypoint_request(
+        distance_m=8.0,
+        heading_error_deg=35.0,
+        cruise_speed_mps=1.0,
+        approach_speed_mps=0.8,
+        creep_speed_mps=0.0,
+    )
+    if strict_turn.phase != "TURN_TO_WAYPOINT":
+        raise AssertionError(f"expected turn phase, got {strict_turn}")
+    if strict_turn.speed_mps != 0.0:
+        raise AssertionError(f"strict misaligned turn must not surge: {strict_turn.speed_mps}")
+    if strict_turn.reason != "heading_first_yaw_only":
+        raise AssertionError(f"unexpected strict reason: {strict_turn.reason}")
 
     print("nav_guidance_unit: PASS")
     return 0

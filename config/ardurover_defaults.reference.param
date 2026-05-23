@@ -1,0 +1,25 @@
+# Reference ArduRover defaults for compare_pixhawk_param_baseline.py
+# Replace with a fresh Mission Planner "Save to file" default dump when available.
+# Only audited / safety-critical params are listed here.
+ARMING_CHECK,1
+ARMING_REQUIRE,1
+FS_THR_ENABLE,1
+FS_GCS_ENABLE,1
+BATT_FS_LOW_ACT,1
+BATT_FS_CRT_ACT,2
+FS_ACTION,2
+FS_EKF_ACTION,1
+CRUISE_SPEED,2
+WP_SPEED,2
+WP_RADIUS,2
+TURN_RADIUS,0.9
+FRAME_CLASS,2
+FRAME_TYPE,0
+SERVO1_FUNCTION,73
+SERVO3_FUNCTION,73
+SERVO1_MIN,1100
+SERVO1_TRIM,1500
+SERVO1_MAX,1900
+SERVO3_MIN,1100
+SERVO3_TRIM,1500
+SERVO3_MAX,1900

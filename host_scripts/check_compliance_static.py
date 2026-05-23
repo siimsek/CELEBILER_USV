@@ -34,9 +34,11 @@ def main() -> int:
     mission_cfg_py = read(SRC / "mission_config.py")
     mission_adapter_py = read(SRC / "mission_adapter.py")
     usv_py = read(SRC / "usv_main.py")
+    nav_guidance_py = read(SRC / "nav_guidance.py")
     cam_py = read(SRC / "cam.py")
     telem_py = read(SRC / "telemetry.py")
     sim_stack = read(ROOT / "sim" / "bin" / "run_sim_stack.sh")
+    check_stack = read(ROOT / "sim" / "bin" / "check_stack.sh")
     sim_bridge = read(ROOT / "sim" / "bridges" / "sitl_gazebo_bridge.py")
     system_start = read(ROOT / "host_scripts" / "system_start.sh")
     system_stop = read(ROOT / "host_scripts" / "system_stop.sh")
@@ -89,6 +91,7 @@ def main() -> int:
         "p2_guidance_priority_visible": has(usv_py, "Emergency: 100% avoidance") and has(usv_py, "gate bearing preferred") and has(usv_py, "pure waypoint bearing"),
         "sim_startup_blind_wait_removed": not has(sim_stack, "Waiting extra 12 sec for API services"),
         "sim_startup_api_probe": has(sim_stack, "camera_api_ready=True") and has(sim_stack, "probe_camera_endpoint"),
+        "sim_startup_probe_based_waits": has(sim_stack, "wait_for_process_alive") and has(sim_stack, "wait_for_ros_topic") and has(sim_stack, "wait_for_file_fresh") and has(sim_stack, "wait_for_tcp_port 127.0.0.1 8888"),
         "shared_sim_nav_helper": has(telem_py, "from sim_nav_state import load_sim_nav_state"),
         # Spec/behavior alignment: simulation must not hard-force sensors ready.
         "sim_sensor_shortcut_enabled": not has(usv_py, "self.camera_ready = True") and not has(usv_py, "self.lidar_ready = True"),
@@ -97,9 +100,41 @@ def main() -> int:
         "camera_actionable_policy_visible": has(cam_py, "gate_actionable = bool(policy.get(\"gate\", False))") and has(cam_py, "yellow_actionable = bool(policy.get(\"yellow_obstacle\", False))") and has(cam_py, "target_actionable = bool(policy.get(\"target\", False))"),
         "camera_wrong_target_contract_visible": has(cam_py, "wrong_target_detected") and has(cam_py, "wrong_target_bearing_deg") and has(cam_py, "wrong_target_area_norm"),
         "engage_semantics_removed_from_nav": has(usv_py, "esc_c = 0.0"),
-        "engage_target_guidance_present": (has(usv_py, "if target_detected:") or has(usv_py, "elif target_detected:")) and has(usv_py, "heading_err = target_bearing"),
+        "engage_target_guidance_present": (has(usv_py, "if target_detected:") or has(usv_py, "elif target_detected:")) and has(usv_py, "P3_TARGET_BEARING_GAIN"),
+        "heading_wrap_uses_atan2": has(usv_py, "def normalize_heading_error") and has(usv_py, "math.atan2(math.sin(err_rad), math.cos(err_rad))"),
+        "p3_heading_gain_clamp_configured": has(profile_py, "P3_TARGET_BEARING_GAIN") and has(profile_py, "P3_TARGET_HEADING_CLAMP_DEG") and has(usv_py, "P3_TARGET_HEADING_CLAMP_DEG"),
+        "heading_diagnostics_standardized": has(usv_py, "event=\"p3_track\"") and has(usv_py, "yaw_rate_dps=round(float(self.current_yaw_rate_dps") and has(usv_py, "guidance_source=str(self._get_guidance_source())"),
+        "heading_oscillation_analyzer_present": (ROOT / "host_scripts" / "analyze_heading_oscillation.py").exists(),
+        "nav_heading_first_guided_yaw_only": has(usv_py, "turn_phase=bool(turn_phase)") and has(usv_py, "body_forward_only=bool(body_forward_only)") and has(usv_py, "creep_cap = max(0.0, float(NAV_ALIGN_CREEP_SPEED_MPS))"),
+        "nav_min_progress_only_when_aligned": has(usv_py, "allow_min_progress") and has(usv_py, "NAV_ALIGN_HEADING_DONE_DEG") and has(usv_py, '_nav_align_mode", "align")) == "advance"'),
+        "nav_sim_turn_creep_default": has(profile_py, "def resolve_nav_turn_creep_speed_mps") and has(profile_py, 'default = "0.18" if os.environ.get("USV_SIM") == "1"'),
+        "nav_turn_priority_until_heading_aligned": has(usv_py, "acquiring_heading = bool(self._nav_align_mode") and has(usv_py, "nav_turn_priority = bool(") and has(usv_py, "heading_not_aligned"),
+        "nav_waypoint_first_warn_blend": has(nav_guidance_py, "waypoint_first_warn_blend") and has(nav_guidance_py, "warn_blend"),
+        "sim_wrong_turn_guided_yaw_hold": has(usv_py, "wrong_turn_hold:sim_guided_yaw_only") and has(usv_py, "sim_guided_yaw_hold"),
         "engage_wrong_target_avoidance_present": has(usv_py, "P3_WRONG_TARGET_AVOID") and has(usv_py, "wrong_target_contact_risk") and has(usv_py, "p3_wrong_target_avoidance"),
-        "mission_api_writes_flat": has(telem_py, "json.dump(flat_mission, f, indent=2)") and has(telem_py, "'input_format': MISSION_INPUT_FORMAT"),
+        "json_atomic_module_present": (SRC / "json_atomic.py").exists(),
+        "shared_json_uses_atomic_write": (
+            has(usv_py, "from json_atomic import atomic_write_json")
+            and has(cam_py, "from json_atomic import atomic_write_json")
+            and has(telem_py, "atomic_write_json") and has(telem_py, "from json_atomic import")
+            and has(sim_bridge, "from json_atomic import atomic_write_json")
+            and not has(usv_py, "Fallback: direct write")
+        ),
+        "mission_api_atomic_write": has(telem_py, "atomic_write_json(mission_file") and has(telem_py, "atomic_write_json(TARGET_STATE_FILE"),
+        "lidar_map_jsonl_events": has(read(SRC / "lidar_map.py"), 'event="lidar_heartbeat"') and has(read(SRC / "lidar_map.py"), 'event="scan_timeout"'),
+        "camera_bearing_half_from_profile": has(profile_py, "resolve_camera_bearing_half_deg") and has(cam_py, "resolve_camera_bearing_half_deg"),
+        "camera_hsv_non_overlapping": has(cam_py, "np.array([6, 65, 90])") and has(cam_py, "np.array([23, 100, 100])") and has(cam_py, "np.array([4, 255, 255])"),
+        "camera_wrong_target_policy_configured": has(profile_py, "camera_wrong_target_contract") and has(cam_py, "wrong_target_policy"),
+        "lidar_sector_config_centralized": has(profile_py, "classify_lidar_scan_sector") and has(profile_py, "classify_lidar_map_sector") and has(usv_py, "classify_lidar_scan_sector"),
+        "lidar_status_json_not_used": has(profile_py, "LIDAR_STATUS_JSON_ENABLED = False"),
+        "pixhawk_param_compare_script_present": (ROOT / "host_scripts" / "compare_pixhawk_param_baseline.py").exists(),
+        "race_cert_pixhawk_doc_present": (ROOT / "documents" / "race_cert_pixhawk_arming_failsafe.md").exists(),
+        "servo_mapping_water_test_plan_present": (ROOT / "documents" / "servo_mapping_water_test_plan.md").exists(),
+        "oto_race_cert_docs_linked": has(read(ROOT / "OTOMASYON.md"), "race_cert_pixhawk_arming_failsafe.md") and has(read(ROOT / "OTOMASYON.md"), "servo_mapping_water_test_plan.md"),
+        "mission_profile_unit_script_present": (ROOT / "host_scripts" / "check_mission_profile_unit.py").exists(),
+        "race_readiness_score_script_present": (ROOT / "host_scripts" / "check_race_readiness_score.py").exists(),
+        "manual_operator_checklist_present": (ROOT / "documents" / "manual_operator_verification_checklist.md").exists(),
+        "mission_api_writes_flat": has(telem_py, "'input_format': MISSION_INPUT_FORMAT") and has(telem_py, "atomic_write_json(mission_file"),
         "runtime_loader_uses_target_state": has(usv_py, "load_target_state(TARGET_STATE_FILE)") and has(usv_py, "self.target_color = target_from_state or mission_target_color or self.target_color or \"RED\""),
         "mission_state_contract_visible": has(usv_py, "\"mission_input_format\": self.mission_input_format") and has(usv_py, "\"mission_split_profile\": dict(self.mission_split_profile)"),
         "gear_ui_removed": not has(telem_py, "gear_disp") and not has(telem_py, "<div class=\"label\">Gear</div>"),
@@ -111,7 +146,15 @@ def main() -> int:
         "race_rc_override_env_guard": has(usv_py, "and USV_MODE != USV_MODE_RACE") and has(usv_py, "AUTONOMY_ACTUATOR_MODE = \"rc_override_bench_test\""),
         "guided_failure_holds_no_rc_fallback": has(usv_py, "GUIDED_SETPOINT_SEND_FAILED") and not has(usv_py, "RC override fallback kullaniliyor"),
         "sim_bridge_sitl_servo_primary": has(sim_bridge, "Default is ArduPilot SITL servo output") and has(sim_bridge, "ALLOW_MOTOR_COMMAND_JSON_OVERRIDE") and has(sim_bridge, "and USV_MODE != \"race\""),
+        "sim_bridge_pwm_normalization_calibrated": has(sim_bridge, "SIM_GZ_PWM_MIN_US") and has(sim_bridge, "piecewise_min_trim_max") and has(sim_bridge, "pwm_1100_norm"),
+        "sim_bridge_yaw_self_check_logged": has(sim_bridge, "event=\"sim_bridge_self_check\"") and has(sim_bridge, "SIM_GZ_YAW_SIGN") and has(sim_bridge, "bench_json_override_allowed"),
         "deprecated_sim_bridge_shims_removed": not (ROOT / "sim" / "bridges" / "mavlink_to_gz_pose_simple.py").exists() and not (ROOT / "sim" / "bridges" / "gazebo_pose_updater.py").exists(),
+        "sim_lidar_map_started_before_usv_main": (
+            sim_stack.find("Starting lidar_map service") != -1
+            and sim_stack.find("Starting lidar_map service") < sim_stack.find("USV_SIM=1 LOG_DIR")
+            and has(check_stack, "lidar_map.py")
+        ),
+        "sim_check_stack_log_pairs": has(check_stack, "report_log_pair") and has(check_stack, "sitl_gazebo_bridge") and has(check_stack, "lidar_map"),
         "race_preflight_rejects_pwm_bypass": has(system_start, "USV_USE_RC_OVERRIDE=1 yasak") and has(internal_start, "SIM_GZ_ALLOW_MOTOR_COMMAND_JSON=1 yasak") and has(sim_stack, "SIM_GZ_ALLOW_MOTOR_COMMAND_JSON=1 yasak"),
         "compliance_wrapper_delegates": has(compliance_wrapper, "check_compliance_static.py") and has(compliance_wrapper, "check_compliance_behavior.py") and has(compliance_wrapper, "check_compliance_race.py"),
         # PWM / kontrol yüzeyi: kanıt şartname + rapor + README (ayrı kontrat dosyası yok).
