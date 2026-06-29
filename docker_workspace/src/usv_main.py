@@ -262,6 +262,7 @@ CONTROL_LOOP_HZ = max(5.0, min(10.0, float(CONTROL_HZ)))
 LOOP_DT = 1.0 / CONTROL_LOOP_HZ
 P2_READY_TIMEOUT_S = float(os.environ.get("USV_P2_READY_TIMEOUT_S", "30.0"))
 P2_GATE_MIN_WAIT_TIMEOUT_S = float(os.environ.get("USV_P2_GATE_MIN_WAIT_TIMEOUT_S", "60.0"))
+P2_GATE_NO_DETECTION_TIMEOUT_S = float(os.environ.get("USV_P2_GATE_NO_DETECTION_TIMEOUT_S", "8.0"))
 
 # Mission file default to profile-resolved path
 MISSION_FILE = os.environ.get("MISSION_FILE", MISSION_FILE_DEFAULT)
@@ -323,6 +324,7 @@ SIM_EKF_ORIGIN_ARM_DELAY_S = float(os.environ.get("SIM_EKF_ORIGIN_ARM_DELAY_S", 
 # Sim + yerel dosya: idle Pixhawk indirmesi MAVLink'i kirletir; mission_item_*_timeout gösterebilir.
 _SIM_SKIP_IDLE_PIXHAWK_SOURCES = frozenset({
     "local_flat_file",
+    "structured_profile",
     "structured_legacy",
     "default_sim_mission",
     "sim_default_flat_file",
@@ -6764,10 +6766,15 @@ class USVStateMachine:
         self.mission_profile_valid = bool(parsed.get("mission_profile_valid", bool(profile)))
         self.mission_profile_race_ready = bool(parsed.get("race_ready", False) and self.mission_profile_valid)
         self.mission_profile_error = str(parsed.get("profile_error", "") or "")
-        self.p2_min_gate_count = int(
-            self.mission_profile.get("p2_min_gate_count", MISSION_PROFILE_DEFAULT_P2_MIN_GATE_COUNT)
-            or MISSION_PROFILE_DEFAULT_P2_MIN_GATE_COUNT
-        )
+        if self.mission_profile_valid:
+            self.p2_min_gate_count = int(
+                self.mission_profile.get("p2_min_gate_count", MISSION_PROFILE_DEFAULT_P2_MIN_GATE_COUNT)
+                or MISSION_PROFILE_DEFAULT_P2_MIN_GATE_COUNT
+            )
+        else:
+            # Flat local missions are nav-only/test-video compatible. Race start still
+            # requires a validated mission_profile before accepting the mission.
+            self.p2_min_gate_count = int(MISSION_PROFILE_DEFAULT_P2_MIN_GATE_COUNT if USV_MODE == USV_MODE_RACE else 0)
         self.p3_engagement_mode = str(
             self.mission_profile.get("p3_engagement_mode", MISSION_PROFILE_DEFAULT_P3_ENGAGEMENT_MODE)
             or MISSION_PROFILE_DEFAULT_P3_ENGAGEMENT_MODE
@@ -7001,6 +7008,7 @@ class USVStateMachine:
                 self.mission_synced = True
                 if self._sim_test_should_upload_local_mission() and self.mission_upload_source in (
                     "local_flat_file",
+                    "structured_profile",
                     "structured_legacy",
                 ):
                     self._mark_pixhawk_mirror_pending("pending_fc_ready")
@@ -7477,9 +7485,33 @@ class USVStateMachine:
             return True
         print(f"[CHECK] [P2] gate_count={self.gate_count}/{required} ek kapi kaniti bekleniyor")
         deadline = time.monotonic() + float(P2_GATE_MIN_WAIT_TIMEOUT_S)
+        no_gate_deadline = time.monotonic() + float(P2_GATE_NO_DETECTION_TIMEOUT_S)
         next_log = 0.0
         while self.mission_active and self.gate_count < required:
             if self._check_abort():
+                return False
+            self._read_camera_status()
+            gate_detected = bool(
+                self.camera_status.get("gate_detected", False)
+                or self.camera_status.get("gate_detected_raw", False)
+                or self.camera_status.get("gate_passed_event", False)
+                or self.camera_status.get("gate_passed_event_raw", False)
+            )
+            if gate_detected:
+                no_gate_deadline = time.monotonic() + float(P2_GATE_NO_DETECTION_TIMEOUT_S)
+            elif time.monotonic() >= no_gate_deadline:
+                self.mission_end_reason = "p2_gate_no_detection"
+                print(f"[ERR] [P2] gate_no_detection gate={self.gate_count}/{required}")
+                log_jsonl(
+                    "usv_main",
+                    False,
+                    event="p2_gate_no_detection",
+                    gate_count=int(self.gate_count),
+                    required=int(required),
+                    timeout_s=round(float(P2_GATE_NO_DETECTION_TIMEOUT_S), 3),
+                    camera_ready=bool(self.camera_ready),
+                    lidar_ready=bool(self.lidar_ready),
+                )
                 return False
             if time.monotonic() >= deadline:
                 self.mission_end_reason = "p2_gate_min_timeout"
@@ -7493,18 +7525,16 @@ class USVStateMachine:
                     timeout_s=round(float(P2_GATE_MIN_WAIT_TIMEOUT_S), 3),
                 )
                 return False
-            self._read_camera_status()
             self._track_gate_event()
             front = float(getattr(self, "lidar_center_dist", 99.0) or 99.0)
             if front < float(D_MIN_M):
                 self._command_speed_heading(0.0, 0.0)
             else:
-                gate_detected = bool(self.camera_status.get("gate_detected", False))
                 gate_bearing = float(self.camera_status.get("gate_center_bearing_deg", 0.0) or 0.0)
                 speed = min(float(P2_WAIT_SPEED_MPS), 0.6) if gate_detected else 0.0
                 self._command_speed_heading(speed, gate_bearing if gate_detected else 0.0)
             if time.monotonic() >= next_log:
-                print(f"[WAIT] [P2] gate_count={self.gate_count}/{required}")
+                print(f"[WAIT] [P2] gate_count={self.gate_count}/{required} gate_detected={gate_detected}")
                 next_log = time.monotonic() + 1.5
             self._write_state()
             time.sleep(LOOP_DT)
@@ -8027,14 +8057,25 @@ class USVStateMachine:
         err_abs = abs(float(heading_err_deg))
         blocked = clamp(float(blocked_level), 0.0, 1.0)
         reason = "nominal"
+        creep_cap = max(0.0, float(NAV_ALIGN_CREEP_SPEED_MPS))
+
+        def strict_heading_speed(reason_name):
+            if (
+                creep_cap > 0.0
+                and not bool(lidar_emergency)
+                and blocked < 0.95
+                and float(dist_m) > max(float(R_WP_M) * 1.5, 1.0)
+            ):
+                self._final_speed_limiter = f"{reason_name}_creep"
+                return min(creep_cap, max(creep_cap * 0.5, float(speed_cmd))), self._final_speed_limiter
+            self._final_speed_limiter = reason_name
+            return 0.0, reason_name
 
         if bool(NAV_STRICT_HEADING_FIRST) and str(getattr(self, "_nav_align_mode", "align")) == "align":
-            self._final_speed_limiter = "heading_align_hold"
-            return 0.0, "heading_align_hold"
+            return strict_heading_speed("heading_align_hold")
 
         if bool(NAV_STRICT_HEADING_FIRST) and err_abs > float(NAV_ALIGN_HEADING_DONE_DEG):
-            self._final_speed_limiter = "heading_align_hold"
-            return 0.0, "heading_align_hold"
+            return strict_heading_speed("heading_align_hold")
 
         if bool(lidar_emergency) and blocked >= 0.85:
             self._final_speed_limiter = "critical_block_stop"
@@ -8193,7 +8234,7 @@ class USVStateMachine:
         """Warn-level simple avoidance must not override waypoint bearing during turn acquisition."""
         if bool(lidar_emergency) or bool(camera_lidar_fused):
             return True
-        return not (bool(nav_turn_priority) and bool(acquiring_heading))
+        return not bool(nav_turn_priority)
 
     @staticmethod
     def _resolve_nav_align_pivot_speed(nav_turn_priority, heading_error_deg, front_min_m, speed_mps):
@@ -9142,7 +9183,10 @@ class USVStateMachine:
                 lidar_emergency=lidar_emergency,
             )
             if simple_avoidance.active and simple_avoidance.speed_limit_mps is not None:
-                speed = min(float(speed), float(simple_avoidance.speed_limit_mps))
+                simple_limit = float(simple_avoidance.speed_limit_mps)
+                if simple_limit <= 0.0 and not lidar_emergency:
+                    simple_limit = float(FAILSAFE_SLOW_MPS)
+                speed = min(float(speed), simple_limit)
                 limiter_reason = str(simple_avoidance.reason)
             if unknown_escape:
                 speed = 0.0
@@ -9226,6 +9270,7 @@ class USVStateMachine:
                     "usv_main",
                     False,
                     event="nav_track",
+                    waypoint_info=str(self._wp_info),
                     heading_error_deg=round(float(command_heading_err), 3),
                     dist_m=round(float(dist), 3),
                     gps_heading_err_deg=round(float(gps_heading_err), 3),
@@ -9255,8 +9300,17 @@ class USVStateMachine:
                     advance_stable_elapsed_s=round(float(self._nav_advance_stable_elapsed_s()), 3),
                     align_follow=bool(align_follow),
                     target_bearing_deg=round(float(self.nav_target_bearing_deg), 3),
+                    raw_left_m=round(float(current_left_d), 3),
+                    raw_center_m=round(float(current_center_d), 3),
+                    raw_right_m=round(float(current_right_d), 3),
+                    map_front_min_m=round(float(map_front_min), 3),
                     current_front_min_m=round(float(current_front_min), 3),
                     front_min_nav_m=round(float(front_min_nav), 3),
+                    simple_avoidance_active=bool(simple_avoidance.active),
+                    simple_avoidance_state=str(simple_avoidance.state),
+                    simple_avoidance_reason=str(simple_avoidance.reason),
+                    gate_detected=bool(gate_detected),
+                    gate_stable_s=round(float(gate_stable_s), 3),
                     nav_turn_priority=bool(nav_turn_priority),
                     signed_cross_track_m=round(float(signed_ct_m), 3),
                     cross_track_corr_deg=round(float(cross_track_blend_deg), 3),

@@ -571,7 +571,7 @@ echo "[SIM] Camera target class: $TARGET_CLASS"
 echo "[SIM] Starting camera processor (logging to $LOG_DIR/cam.log)..."
 (
     cd docker_workspace/src
-    USV_SIM=1 LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" python3 cam.py > "$LOG_DIR/cam.log" 2>&1 &
+    LOG_DIR="$LOG_DIR" USV_SIM=1 CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" python3 cam.py > "$LOG_DIR/cam.log" 2>&1 &
     echo $! > "$CAM_PID_FILE"
 )
 echo "[SIM] Camera processor headless (no webserver)"
@@ -579,7 +579,7 @@ echo "[SIM] Camera processor headless (no webserver)"
 echo "[SIM] Starting telemetry dashboard (logging to $LOG_DIR/telemetry.log)..."
 (
     cd docker_workspace/src
-    USV_SIM=1 LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" SIM_LOG_DIR="$SIM_LOG_DIR" python3 telemetry.py > "$LOG_DIR/telemetry.log" 2>&1 &
+    LOG_DIR="$LOG_DIR" USV_SIM=1 CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" SIM_LOG_DIR="$SIM_LOG_DIR" python3 telemetry.py > "$LOG_DIR/telemetry.log" 2>&1 &
     echo $! > "$TELEMETRY_PID_FILE"
 )
 wait_for_http_endpoint "http://127.0.0.1:8080/api/data" "telemetry API" 25 || true

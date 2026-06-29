@@ -25,6 +25,16 @@ from spatial_frame import (  # noqa: E402
 )
 
 
+def _mission_waypoints(payload):
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("waypoints", "mission", "coordinates"):
+            if isinstance(payload.get(key), list):
+                return payload[key]
+    raise AssertionError("mission_parkour_all.json must contain waypoints")
+
+
 def _assert_close(label: str, actual: float, expected: float, tol: float = 0.25) -> None:
     if abs(float(actual) - float(expected)) > tol:
         raise AssertionError(f"{label}: got {actual:.3f}, expected {expected:.3f} (tol={tol})")
@@ -33,7 +43,7 @@ def _assert_close(label: str, actual: float, expected: float, tol: float = 0.25)
 def test_wp1_gps_to_enu() -> None:
     mission_path = ROOT / "sim" / "configs" / "mission_parkour_all.json"
     with open(mission_path, "r", encoding="utf-8") as handle:
-        mission = json.load(handle)
+        mission = _mission_waypoints(json.load(handle))
     wp1_lat, wp1_lon = float(mission[0][0]), float(mission[0][1])
     home_lat, home_lon, _, _ = parse_sim_home()
     east_m, north_m = latlon_to_spatial_enu_m(wp1_lat, wp1_lon, home_lat, home_lon)

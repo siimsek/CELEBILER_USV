@@ -327,19 +327,29 @@ def parse_mission_profile_payload(
     if "mission_profile" in payload:
         coords = _extract_profile_waypoints(payload)
         profile = validate_mission_profile_contract(payload["mission_profile"])
+        parkur1: list[list[float]] = []
+        parkur2: list[list[float]] = []
+        parkur3: list[list[float]] = []
         if coords and "parkur_ranges" in profile:
             profile = dict(profile)
             profile["parkur_ranges"] = _normalize_optional_profile_ranges(profile["parkur_ranges"], len(coords))
+            ranges = profile["parkur_ranges"]
+            if "p1" in ranges:
+                parkur1 = _slice_range(coords, ranges["p1"])
+            if "p2" in ranges:
+                parkur2 = _slice_range(coords, ranges["p2"])
+            if "p3" in ranges:
+                parkur3 = _slice_range(coords, ranges["p3"])
         return {
             "input_format": "structured_profile",
             "race_ready": True,
             "flat_waypoints": coords,
             "nav_waypoints": list(coords),
             "engage_wp": None,
-            "parkur1": [],
-            "parkur2": [],
-            "parkur3": [],
-            "p3_search_waypoints": [],
+            "parkur1": parkur1,
+            "parkur2": parkur2,
+            "parkur3": parkur3,
+            "p3_search_waypoints": parkur3,
             "target_color": profile["target_color"],
             "mission_profile": profile,
             "mission_profile_valid": True,
@@ -404,7 +414,12 @@ def split_nav_engage(
 
 def load_coordinate_mission_file(path: str) -> list[list[float]]:
     with open(path, "r", encoding="utf-8") as handle:
-        return validate_coordinate_mission(json.load(handle))
+        payload = json.load(handle)
+    if isinstance(payload, dict):
+        for key in ("waypoints", "mission", "coordinates"):
+            if key in payload:
+                return validate_coordinate_mission(payload[key])
+    return validate_coordinate_mission(payload)
 
 
 def load_target_state(path: str | None = None) -> dict[str, Any]:

@@ -66,8 +66,19 @@ def resolve_spatial_origin_candidates(
         if os.path.exists(mission_path):
             with open(mission_path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
-            if isinstance(payload, list) and payload and isinstance(payload[0], (list, tuple)) and len(payload[0]) >= 2:
-                candidates.append((payload[0][0], payload[0][1]))
+            mission_waypoints = payload if isinstance(payload, list) else []
+            if isinstance(payload, dict):
+                for key in ("waypoints", "mission", "coordinates"):
+                    value = payload.get(key)
+                    if isinstance(value, list):
+                        mission_waypoints = value
+                        break
+            if (
+                mission_waypoints
+                and isinstance(mission_waypoints[0], (list, tuple))
+                and len(mission_waypoints[0]) >= 2
+            ):
+                candidates.append((mission_waypoints[0][0], mission_waypoints[0][1]))
     except Exception:
         pass
 

@@ -149,10 +149,8 @@ NAV_ALIGN_MAX_SPEED_MPS = float(os.environ.get("USV_SIM_ALIGN_MAX_MPS", "0.8"))
 
 
 def resolve_nav_turn_creep_speed_mps() -> float:
-    """Strict heading-first defaults to pivot-only; bench creep requires USV_NAV_TURN_CREEP_MPS."""
-    if resolve_nav_strict_heading_first() and os.environ.get("USV_NAV_TURN_CREEP_MPS") is None:
-        return 0.0
-    default = "0.18" if os.environ.get("USV_SIM") == "1" else "0.0"
+    """Low, bounded creep prevents long yaw-only stalls while heading-first remains active."""
+    default = "0.18" if os.environ.get("USV_SIM") == "1" else "0.18"
     return max(0.0, float(os.environ.get("USV_NAV_TURN_CREEP_MPS", default)))
 
 

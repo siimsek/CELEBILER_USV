@@ -1,7 +1,52 @@
-[
-  [-35.3632306, 149.1652645],
-  [-35.3631991, 149.1652095],
-  [-35.3631677, 149.1652645],
-  [-35.3631362, 149.165237],
-  [-35.3630195, 149.165237]
-]
+{
+  "waypoints": [
+    [
+      -35.3632306,
+      149.1652645
+    ],
+    [
+      -35.3631991,
+      149.1652095
+    ],
+    [
+      -35.3631677,
+      149.1652645
+    ],
+    [
+      -35.3631362,
+      149.165237
+    ],
+    [
+      -35.3630195,
+      149.165237
+    ]
+  ],
+  "mission_profile": {
+    "profile_schema_version": 1,
+    "target_color": "RED",
+    "upload_source": "structured_profile",
+    "validation_timestamp": 1782757600.0,
+    "phase_transition_policy": {
+      "p1_completion_source": "pixhawk_auto_progress",
+      "p2_completion_source": "gate_count_and_guidance",
+      "p3_entry_source": "target_color_lock"
+    },
+    "p2_min_gate_count": 2,
+    "p3_engagement_mode": "vision_color_track",
+    "p1_waypoint_count": 4,
+    "parkur_ranges": {
+      "p1": {
+        "start_index": 0,
+        "end_index": 4
+      },
+      "p2": {
+        "start_index": 4,
+        "end_index": 5
+      },
+      "p3": {
+        "start_index": 5,
+        "end_index": 5
+      }
+    }
+  }
+}

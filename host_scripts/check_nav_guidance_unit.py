@@ -162,7 +162,13 @@ def main() -> int:
         99.0,
         0.45,
     )
-    if creep_speed != 0.0 or creep_reason not in ("nav_align_yaw_only", "nav_align_turn_creep"):
+    if creep_reason == "nav_align_yaw_only":
+        if creep_speed != 0.0:
+            raise AssertionError(f"large turn yaw-only must hold speed at zero: {creep_speed} {creep_reason}")
+    elif creep_reason == "nav_align_turn_creep":
+        if creep_speed <= 0.0:
+            raise AssertionError(f"large turn optional creep must keep a bounded crawl: {creep_speed} {creep_reason}")
+    else:
         raise AssertionError(f"large turn with clear front must pivot or optional creep: {creep_speed} {creep_reason}")
 
     if USVStateMachine._allow_local_minima_boost(True, -94.0):

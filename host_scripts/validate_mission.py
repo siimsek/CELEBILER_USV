@@ -17,6 +17,17 @@ MISSION_FILE = PROJECT_ROOT / "sim/configs/mission_parkour_all.json"
 WORLD_FILE = PROJECT_ROOT / "sim/worlds/water_world.sdf"
 SIM_HOME = [-35.363262, 149.165237]
 
+def mission_waypoints(payload):
+    """Return waypoint list from flat or structured mission payload."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("waypoints", "mission", "coordinates"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
 def extract_world_markers():
     """Extract world coordinates from water_world.sdf waypoint comments"""
     markers = []
@@ -62,7 +73,10 @@ print(f"Project root: {PROJECT_ROOT}")
 # Load mission file
 try:
     with open(MISSION_FILE) as f:
-        mission = json.load(f)
+        mission_payload = json.load(f)
+    mission = mission_waypoints(mission_payload)
+    if not mission:
+        raise ValueError("mission payload has no waypoint list")
     print(f"✓ Mission file loaded: {len(mission)} waypoints")
 except Exception as e:
     print(f"✗ FAILED to load mission: {e}")

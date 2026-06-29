@@ -45,16 +45,27 @@ def gps_to_xy(base_lat, base_lon, lat, lon):
     return x, y
 
 
+def mission_waypoints(payload):
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("waypoints", "mission", "coordinates"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    return None
+
+
 def main() -> int:
     base_lat, base_lon = load_base()
     with open(MISSION, encoding="utf-8") as f:
-        m = json.load(f)
+        m = mission_waypoints(json.load(f))
 
     ok = True
     eps = 0.03
 
     if not isinstance(m, list):
-        print("[FAIL] mission JSON must be a flat array")
+        print("[FAIL] mission JSON must be a flat array or contain waypoints")
         return 1
     if len(m) != len(POINTS):
         print(f"[FAIL] mission waypoint sayisi {len(m)} != beklenen {len(POINTS)}")
