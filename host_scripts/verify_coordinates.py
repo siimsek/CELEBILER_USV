@@ -28,6 +28,12 @@ def mission_waypoints(payload):
                 return value
     return []
 
+def mission_profile(payload):
+    """Return optional mission_profile object from structured payload."""
+    if isinstance(payload, dict) and isinstance(payload.get("mission_profile"), dict):
+        return payload["mission_profile"]
+    return {}
+
 def extract_waypoints_from_sdf():
     """Extract waypoint poses and GPS from water_world.sdf comments"""
     waypoints = {}
@@ -84,17 +90,39 @@ def extract_waypoints_from_sdf():
     
     return waypoints
 
+def extract_targets_from_sdf():
+    """Extract target buoy poses and convert Gazebo pose to mission ENU world xy."""
+    targets = {}
+    try:
+        with open(WORLD_FILE, 'r') as f:
+            content = f.read()
+        pattern = r'<include><uri>model://target_buoy_([^<]+)</uri><name>(target_buoy_[^<]+)</name><pose>([^ ]+) ([^ ]+)'
+        for match in re.finditer(pattern, content):
+            color = match.group(1).strip().upper()
+            name = match.group(2).strip()
+            pose_x = float(match.group(3))
+            pose_y = float(match.group(4))
+            targets[color] = {
+                'name': name,
+                'world_xy': (-pose_y, pose_x),
+            }
+    except Exception as e:
+        print(f"✗ Error parsing targets: {e}")
+    return targets
+
 def load_mission_gps():
     """Load GPS coordinates from mission_parkour_all.json"""
     gps_list = []
+    profile = {}
     try:
         with open(MISSION_FILE) as f:
             mission = json.load(f)
         gps_list = mission_waypoints(mission)
+        profile = mission_profile(mission)
     except Exception as e:
         print(f"✗ Error loading mission: {e}")
     
-    return gps_list
+    return gps_list, profile
 
 def calculate_bearing(lat1, lon1, lat2, lon2):
     """Standard forward azimuth calculation."""
@@ -146,11 +174,13 @@ print(f"Mission file: {MISSION_FILE}")
 print(f"World file: {WORLD_FILE}")
 
 # Load data from files
-mission_gps = load_mission_gps()
+mission_gps, mission_profile_payload = load_mission_gps()
 world_waypoints = extract_waypoints_from_sdf()
+world_targets = extract_targets_from_sdf()
 
 print(f"\n✓ Loaded mission: {len(mission_gps)} waypoints from {MISSION_FILE}")
 print(f"✓ Extracted world waypoints: {len(world_waypoints)} models from {WORLD_FILE}")
+print(f"✓ Extracted target buoys: {len(world_targets)} models from {WORLD_FILE}")
 print(f"✓ SIM_HOME GPS: {SIM_HOME[0]:.7f}, {SIM_HOME[1]:.7f}")
 
 print("\n" + "-" * 80)
@@ -196,8 +226,24 @@ for i, gps in enumerate(mission_gps, 1):
         if bearing_diff >= 1.0:
             all_pass = False
     else:
-        print(f"⚠ WP{i}: GPS({lat:.7f}, {lon:.7f}) | NO MATCHING WORLD WAYPOINT (expected {len(sorted_wp_names)} waypoints but mission has {len(mission_gps)})")
-        all_pass = False
+        target_color = str(mission_profile_payload.get('target_color', 'RED') or 'RED').upper()
+        target = world_targets.get(target_color)
+        if not target:
+            print(f"⚠ WP{i}: GPS({lat:.7f}, {lon:.7f}) | NO MATCHING TARGET BUOY for {target_color}")
+            all_pass = False
+            continue
+        world_x, world_y = target['world_xy']
+        world_bearing = world_xy_to_bearing(world_x, world_y)
+        gps_bearing = calculate_bearing(SIM_HOME[0], SIM_HOME[1], lat, lon)
+        distance = haversine_distance(SIM_HOME[0], SIM_HOME[1], lat, lon)
+        bearing_diff = abs(gps_bearing - world_bearing)
+        if bearing_diff > 180:
+            bearing_diff = 360 - bearing_diff
+        status = "✓" if bearing_diff < 1.0 else "⚠"
+        print(f"{status} P3 Target {target_color}: GPS({lat:.7f}, {lon:.7f}) | Bearing: {gps_bearing:.2f}° vs Target: {world_bearing:.2f}° (Δ={bearing_diff:.2f}°)")
+        print(f"   Distance: {distance:.2f}m | World coords: ({world_x:.1f}, {world_y:.1f}) | Model: {target['name']}")
+        if bearing_diff >= 1.0:
+            all_pass = False
 
 print("\n" + "=" * 80)
 if all_pass:

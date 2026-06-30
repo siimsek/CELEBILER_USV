@@ -23,6 +23,18 @@ function drawUnifiedSpatialMap(canvas, payload) {
     const staticFeatures = Array.isArray(course.static_features) ? course.static_features : [];
     const bounds = payload.bounds || null;
     const lidarWorldPts = lidarPts.filter(p => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]));
+    const corridor = payload.traversable_corridor || {};
+    const corridorCandidates = Array.isArray(corridor.candidates) ? corridor.candidates : [];
+    const corridorLookahead = Number(corridor.lookahead_m || 7.0);
+    const corridorEndpoint = (deltaDeg, distanceM) => {
+        if (!boat) return null;
+        const headingDeg = Number(boat.heading_deg || 0);
+        const bearingRad = (headingDeg - Number(deltaDeg || 0)) * Math.PI / 180.0;
+        return [
+            Number(boat.x_m || 0) + (Math.sin(bearingRad) * Number(distanceM || corridorLookahead)),
+            Number(boat.y_m || 0) + (Math.cos(bearingRad) * Number(distanceM || corridorLookahead))
+        ];
+    };
 
     const allPts = [];
     for (const p of trail) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
@@ -30,6 +42,14 @@ function drawUnifiedSpatialMap(canvas, payload) {
     for (const p of lidarWorldPts) allPts.push([Number(p[0]), Number(p[1])]);
     for (const f of staticFeatures) allPts.push([Number(f.x_m || 0), Number(f.y_m || 0)]);
     if (boat) allPts.push([Number(boat.x_m || 0), Number(boat.y_m || 0)]);
+    if (boat && corridor && corridor.stale !== true) {
+        for (const c of corridorCandidates) {
+            const p = corridorEndpoint(Number(c.heading_delta_deg || 0), corridorLookahead);
+            if (p) allPts.push(p);
+        }
+        const best = corridorEndpoint(Number(corridor.best_heading_delta_deg || 0), corridorLookahead);
+        if (best) allPts.push(best);
+    }
 
     let cx = boat ? Number(boat.x_m || 0) : 0;
     let cy = boat ? Number(boat.y_m || 0) : 0;
@@ -111,6 +131,38 @@ function drawUnifiedSpatialMap(canvas, payload) {
     for (const p of lidarWorldPts) {
         const q = toPx(Number(p[0]), Number(p[1]));
         ctx.fillRect(q[0] - 1, q[1] - 1, 2, 2);
+    }
+
+    if (boat && corridor && corridor.enabled !== false && corridor.stale !== true) {
+        const boatPx = toPx(Number(boat.x_m || 0), Number(boat.y_m || 0));
+        for (const c of corridorCandidates) {
+            const endpoint = corridorEndpoint(Number(c.heading_delta_deg || 0), corridorLookahead);
+            if (!endpoint) continue;
+            const q = toPx(endpoint[0], endpoint[1]);
+            const score = Math.max(0, Math.min(1, Number(c.score || 0)));
+            ctx.strokeStyle = `rgba(34,197,94,${0.08 + score * 0.20})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(boatPx[0], boatPx[1]);
+            ctx.lineTo(q[0], q[1]);
+            ctx.stroke();
+        }
+        const bestDelta = Number(corridor.best_heading_delta_deg || 0);
+        const bestEndpoint = corridorEndpoint(bestDelta, corridorLookahead);
+        if (bestEndpoint) {
+            const q = toPx(bestEndpoint[0], bestEndpoint[1]);
+            const score = Math.max(0, Math.min(1, Number(corridor.score || 0)));
+            ctx.strokeStyle = score >= 0.55 ? 'rgba(34,197,94,0.95)' : 'rgba(245,158,11,0.9)';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(boatPx[0], boatPx[1]);
+            ctx.lineTo(q[0], q[1]);
+            ctx.stroke();
+            ctx.fillStyle = score >= 0.55 ? 'rgba(34,197,94,0.95)' : 'rgba(245,158,11,0.95)';
+            ctx.beginPath();
+            ctx.arc(q[0], q[1], 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
     }
 
     if (trail.length >= 2) {

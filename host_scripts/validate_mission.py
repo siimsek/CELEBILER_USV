@@ -28,6 +28,12 @@ def mission_waypoints(payload):
                 return value
     return []
 
+def mission_profile(payload):
+    """Return optional mission_profile object from structured mission payload."""
+    if isinstance(payload, dict) and isinstance(payload.get("mission_profile"), dict):
+        return payload["mission_profile"]
+    return {}
+
 def extract_world_markers():
     """Extract world coordinates from water_world.sdf waypoint comments"""
     markers = []
@@ -52,6 +58,23 @@ def extract_world_markers():
     
     return markers
 
+def extract_target_markers():
+    """Extract target buoy positions and convert Gazebo pose to mission ENU world xy."""
+    targets = {}
+    try:
+        with open(WORLD_FILE, 'r') as f:
+            content = f.read()
+        pattern = r'<include><uri>model://target_buoy_([^<]+)</uri><name>(target_buoy_[^<]+)</name><pose>([^ ]+) ([^ ]+)'
+        for match in re.finditer(pattern, content):
+            color = match.group(1).strip().upper()
+            name = match.group(2).strip()
+            pose_x = float(match.group(3))
+            pose_y = float(match.group(4))
+            targets[color] = ((-pose_y, pose_x), name)
+    except Exception as e:
+        print(f"Error parsing targets: {e}")
+    return targets
+
 def calculate_bearing(lat1, lon1, lat2, lon2):
     """Calculate bearing from point 1 to point 2"""
     d_lon = math.radians(lon2 - lon1)
@@ -75,6 +98,7 @@ try:
     with open(MISSION_FILE) as f:
         mission_payload = json.load(f)
     mission = mission_waypoints(mission_payload)
+    profile = mission_profile(mission_payload)
     if not mission:
         raise ValueError("mission payload has no waypoint list")
     print(f"✓ Mission file loaded: {len(mission)} waypoints")
@@ -84,34 +108,44 @@ except Exception as e:
 
 # Extract world markers
 world_markers = extract_world_markers()
+target_markers = extract_target_markers()
 print(f"✓ World markers extracted: {len(world_markers)} waypoints")
+print(f"✓ Target markers extracted: {len(target_markers)} buoys")
 
 print("\n" + "-" * 80)
 
 # Validate bearing consistency
 all_valid = True
-for i, (wp_gps, marker_name) in enumerate(zip(mission, world_markers), 1):
+for i, wp_gps in enumerate(mission, 1):
     mission_lat, mission_lon = wp_gps
-    world_xy, _ = wp_gps
-    world_x, world_y = marker_name if isinstance(marker_name, tuple) else (0, 0)
     
     # Get world marker coordinates
     if i <= len(world_markers):
         world_x, world_y = world_markers[i-1][0]
-        
-        # Calculate bearings
-        mission_bearing = calculate_bearing(SIM_HOME[0], SIM_HOME[1], mission_lat, mission_lon)
-        world_bearing = world_xy_to_bearing(world_x, world_y)
-        
-        bearing_diff = abs(mission_bearing - world_bearing)
-        if bearing_diff > 180:
-            bearing_diff = 360 - bearing_diff
-        
-        if bearing_diff < 1.0:
-            print(f"✓ WP{i}: Bearing {mission_bearing:.2f}° (Mission) vs {world_bearing:.2f}° (World) - Δ {bearing_diff:.3f}°")
-        else:
-            print(f"⚠ WP{i}: Bearing MISMATCH {mission_bearing:.2f}° vs {world_bearing:.2f}° - Δ {bearing_diff:.3f}°")
+        label = f"WP{i}"
+    else:
+        target_color = str(profile.get("target_color", "RED") or "RED").upper()
+        target = target_markers.get(target_color)
+        if not target:
+            print(f"⚠ WP{i}: no target marker for target_color={target_color}")
             all_valid = False
+            continue
+        world_x, world_y = target[0]
+        label = f"P3 Target {target_color}"
+        
+    # Calculate bearings
+    mission_bearing = calculate_bearing(SIM_HOME[0], SIM_HOME[1], mission_lat, mission_lon)
+    world_bearing = world_xy_to_bearing(world_x, world_y)
+    
+    bearing_diff = abs(mission_bearing - world_bearing)
+    if bearing_diff > 180:
+        bearing_diff = 360 - bearing_diff
+    
+    if bearing_diff < 1.0:
+        print(f"✓ {label}: Bearing {mission_bearing:.2f}° (Mission) vs {world_bearing:.2f}° (World) - Δ {bearing_diff:.3f}°")
+    else:
+        print(f"⚠ {label}: Bearing MISMATCH {mission_bearing:.2f}° vs {world_bearing:.2f}° - Δ {bearing_diff:.3f}°")
+        all_valid = False
 
 print("\n" + "=" * 80)
 if all_valid:

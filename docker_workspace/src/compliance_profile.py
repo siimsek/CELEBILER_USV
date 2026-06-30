@@ -79,6 +79,14 @@ P2_GATE_CONFIRM_S = 0.5
 P3_MAX_SPEED_MPS = 1.5
 P3_TARGET_BEARING_GAIN = float(os.environ.get("P3_TARGET_BEARING_GAIN", "0.85"))
 P3_TARGET_HEADING_CLAMP_DEG = float(os.environ.get("P3_TARGET_HEADING_CLAMP_DEG", "45.0"))
+P3_TARGET_LOST_GRACE_S = float(os.environ.get("P3_TARGET_LOST_GRACE_S", "1.5"))
+P3_TARGET_MEMORY_S = float(os.environ.get("P3_TARGET_MEMORY_S", "4.0"))
+P3_GPS_FALLBACK_SPEED_MPS = float(os.environ.get("P3_GPS_FALLBACK_SPEED_MPS", "0.55"))
+P3_TARGET_SEARCH_HOLD_SPEED_MPS = float(os.environ.get("P3_TARGET_SEARCH_HOLD_SPEED_MPS", "0.0"))
+TRAVERSABLE_CORRIDOR_LOOKAHEAD_M = float(os.environ.get("TRAVERSABLE_CORRIDOR_LOOKAHEAD_M", "7.0"))
+TRAVERSABLE_CORRIDOR_HALF_WIDTH_M = float(os.environ.get("TRAVERSABLE_CORRIDOR_HALF_WIDTH_M", "0.75"))
+TRAVERSABLE_CORRIDOR_MIN_CLEARANCE_M = float(os.environ.get("TRAVERSABLE_CORRIDOR_MIN_CLEARANCE_M", "1.0"))
+TRAVERSABLE_CORRIDOR_LOG_PERIOD_S = float(os.environ.get("TRAVERSABLE_CORRIDOR_LOG_PERIOD_S", "2.0"))
 P3_TIMEOUT_S = 180
 P3_RETRY_S = 60
 P3_RETRY_COUNT = 1
@@ -132,7 +140,8 @@ def resolve_nav_align_turn_immunity_s() -> float:
 
 
 def resolve_nav_align_revert_align_deg() -> float:
-    default = "18.0" if os.environ.get("USV_SIM") == "1" else "12.0"
+    # FIX: Revert threshold artırıldı (18°/12° → 25°/20°) - creep cycle önleme
+    default = "25.0" if os.environ.get("USV_SIM") == "1" else "20.0"
     return max(8.0, float(os.environ.get("NAV_ALIGN_REVERT_ALIGN_DEG", default)))
 
 

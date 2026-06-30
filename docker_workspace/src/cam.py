@@ -82,6 +82,8 @@ CAM_PROCESS_DT = max(0.02, float(os.environ.get("CAM_PROCESS_DT", "0.033")))
 CAM_RX_BUFFER_MAX = max(64 * 1024, int(os.environ.get("CAM_RX_BUFFER_MAX", "1048576")))
 CAM_DETECT_SCALE = float(os.environ.get("CAM_DETECT_SCALE", "0.5" if CAM_SOURCE == "sim" else "0.4"))
 CAM_DETECT_SCALE = clamp(CAM_DETECT_SCALE, 0.25, 1.0)
+CAM_TARGET_FILTER_ALPHA = clamp(float(os.environ.get("CAM_TARGET_FILTER_ALPHA", "0.45")), 0.05, 1.0)
+CAM_TARGET_STRONG_AREA_NORM = float(os.environ.get("CAM_TARGET_STRONG_AREA_NORM", "0.08"))
 CONTROL_DIR = os.environ.get("CONTROL_DIR", DEFAULT_CONTROL_DIR)
 LOG_DIR = os.environ.get("LOG_DIR", DEFAULT_LOG_DIR)
 STATUS_FILE = f"{CONTROL_DIR}/camera_status.json"
@@ -171,6 +173,10 @@ class VideoCamera:
         self.last_gate_seen_ts = 0.0
         self.last_gate_stable = 0.0
         self.gate_passed_until = 0.0
+        self.target_seen_since = None
+        self.target_last_seen_ts = 0.0
+        self.target_bearing_filtered = 0.0
+        self.target_area_filtered = 0.0
         self.status = {
             "ts_monotonic": 0.0,
             "frame_age_s": 999.0,
@@ -211,9 +217,15 @@ class VideoCamera:
             "target_detected_raw": False,
             "target_bearing_error_deg_raw": 0.0,
             "target_area_norm_raw": 0.0,
+            "target_stable_s_raw": 0.0,
             "target_detected": False,
             "target_bearing_error_deg": 0.0,
             "target_area_norm": 0.0,
+            "target_bearing_error_deg_filtered": 0.0,
+            "target_area_norm_filtered": 0.0,
+            "target_stable_s": 0.0,
+            "target_lost_s": 999.0,
+            "target_confidence": 0.0,
             "wrong_target_detected_raw": False,
             "wrong_target_bearing_deg_raw": 0.0,
             "wrong_target_area_norm_raw": 0.0,
@@ -1005,8 +1017,45 @@ class VideoCamera:
         boundary_bearing = boundary_bearing_raw if orange_boundary_actionable else 0.0
         boundary_area_norm = boundary_area_norm_raw if orange_boundary_actionable else 0.0
         target_detected = target_detected_raw if target_actionable else False
-        target_bearing = target_bearing_raw if target_actionable else 0.0
-        target_area_norm = target_area_norm_raw if target_actionable else 0.0
+        target_confidence_raw = (
+            clamp(target_area_norm_raw / max(float(CAM_TARGET_STRONG_AREA_NORM), 1e-6), 0.0, 1.0)
+            if target_detected_raw
+            else 0.0
+        )
+        if target_actionable and target_detected_raw:
+            if self.target_seen_since is None:
+                self.target_seen_since = now
+                self.target_bearing_filtered = target_bearing_raw
+                self.target_area_filtered = target_area_norm_raw
+            else:
+                alpha = float(CAM_TARGET_FILTER_ALPHA)
+                self.target_bearing_filtered = (
+                    alpha * float(target_bearing_raw)
+                    + (1.0 - alpha) * float(self.target_bearing_filtered)
+                )
+                self.target_area_filtered = (
+                    alpha * float(target_area_norm_raw)
+                    + (1.0 - alpha) * float(self.target_area_filtered)
+                )
+            self.target_last_seen_ts = now
+        else:
+            self.target_seen_since = None
+
+        target_stable_s_raw = (
+            max(0.0, now - float(self.target_seen_since))
+            if target_actionable and target_detected_raw and self.target_seen_since is not None
+            else 0.0
+        )
+        target_lost_s = (
+            0.0
+            if target_actionable and target_detected_raw
+            else (max(0.0, now - float(self.target_last_seen_ts)) if self.target_last_seen_ts > 0.0 else 999.0)
+        )
+        target_bearing_filtered = self.target_bearing_filtered if target_actionable else 0.0
+        target_area_filtered = self.target_area_filtered if target_actionable else 0.0
+        target_bearing = target_bearing_filtered if target_detected else 0.0
+        target_area_norm = target_area_filtered if target_detected else 0.0
+        target_confidence = target_confidence_raw if target_detected else 0.0
         wrong_target_detected = wrong_target_detected_raw if target_actionable else False
         wrong_target_bearing = wrong_target_bearing_raw if target_actionable else 0.0
         wrong_target_area_norm = wrong_target_area_norm_raw if target_actionable else 0.0
@@ -1079,9 +1128,15 @@ class VideoCamera:
             "target_detected_raw": target_detected_raw,
             "target_bearing_error_deg_raw": round(target_bearing_raw, 3),
             "target_area_norm_raw": round(target_area_norm_raw, 4),
+            "target_stable_s_raw": round(target_stable_s_raw, 3),
             "target_detected": target_detected,
             "target_bearing_error_deg": round(target_bearing, 3),
             "target_area_norm": round(target_area_norm, 4),
+            "target_bearing_error_deg_filtered": round(target_bearing_filtered, 3),
+            "target_area_norm_filtered": round(target_area_filtered, 4),
+            "target_stable_s": round(target_stable_s_raw if target_detected else 0.0, 3),
+            "target_lost_s": round(target_lost_s, 3),
+            "target_confidence": round(float(target_confidence), 4),
             "wrong_target_detected_raw": wrong_target_detected_raw,
             "wrong_target_bearing_deg_raw": round(wrong_target_bearing_raw, 3),
             "wrong_target_area_norm_raw": round(wrong_target_area_norm_raw, 4),

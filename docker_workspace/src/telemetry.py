@@ -39,6 +39,7 @@ from mission_config import (
     TARGET_STATE_FILE,
     get_mission_split_profile,
     load_target_state,
+    parse_mission_profile_payload,
     split_mission_waypoints,
     split_nav_engage,
     validate_coordinate_mission,
@@ -605,6 +606,9 @@ HTML_PAGE = """
                 <div class="m-mp-line">Nav faz: <b id="m_nav_phase">--</b></div>
                 <div class="m-mp-line">Heading hata: <b id="m_nav_hdg_err">--</b></div>
                 <div class="m-mp-line">Surge izni: <b id="m_nav_surge">--</b></div>
+                <div class="m-mp-line">Koridor: <b id="m_corridor">--</b></div>
+                <div class="m-mp-line">P3 hedef: <b id="m_p3_target">--</b></div>
+                <div class="m-mp-line">P3 temas: <b id="m_p3_contact">--</b></div>
                 <div class="m-mp-line">MP/GCS heartbeat yasi: <b id="m_gcs_age">--</b></div>
                 <div class="m-reject-reason" id="m_reject_reason"></div>
 
@@ -896,6 +900,30 @@ HTML_PAGE = """
                         navSurgeEl.innerText = surge ? 'evet' : 'hayir';
                         navSurgeEl.style.color = surge ? 'var(--success)' : 'var(--warning)';
                     }
+                    const corrEl = document.getElementById('m_corridor');
+                    if (corrEl) {
+                        const c = d.traversable_corridor || {};
+                        const stale = Boolean(c.stale);
+                        const score = Number(c.score || 0);
+                        const clear = Number(c.clearance_m || 0);
+                        const delta = Number(c.best_heading_delta_deg || 0);
+                        corrEl.innerText = stale ? (c.reason || 'lidar bekleniyor') : `${delta.toFixed(0)} deg | ${score.toFixed(2)} | ${clear.toFixed(1)} m`;
+                        corrEl.style.color = stale ? 'var(--warning)' : (score >= 0.55 ? 'var(--success)' : 'var(--warning)');
+                    }
+                    const p3El = document.getElementById('m_p3_target');
+                    if (p3El) {
+                        const p3 = d.p3_target_status || {};
+                        const detected = Boolean(p3.target_detected);
+                        const memory = Boolean(p3.target_memory_active);
+                        p3El.innerText = `${p3.mode || '--'} | ${detected ? 'goruyor' : (memory ? 'memory' : 'yok')} | conf ${Number(p3.target_confidence || 0).toFixed(2)}`;
+                        p3El.style.color = detected ? 'var(--success)' : (memory ? 'var(--warning)' : 'var(--text2)');
+                    }
+                    const p3ContactEl = document.getElementById('m_p3_contact');
+                    if (p3ContactEl) {
+                        const wrong = Boolean(d.p3_wrong_target_avoidance);
+                        p3ContactEl.innerText = `${d.p3_contact_confirmation_source || 'none'}${wrong ? ' | wrong target' : ''}`;
+                        p3ContactEl.style.color = wrong ? 'var(--danger)' : 'var(--text2)';
+                    }
                     const gcsAgeEl = document.getElementById('m_gcs_age');
                     if (gcsAgeEl) {
                         const ga = d.mission_planner_gcs_age_s;
@@ -1020,8 +1048,8 @@ HTML_PAGE = """
 
         setInterval(updateStats, 200);
         setInterval(updateTimer, 1000);
-        setInterval(refreshSpatialMapState, 200);
-        setInterval(refreshVisualFeeds, 200);
+        setInterval(refreshSpatialMapState, 500);
+        setInterval(refreshVisualFeeds, 500);
 
         // Load feeds (test mode only)
         window.onload = function() {
@@ -2342,6 +2370,30 @@ CONTROLLER_PAGE = """
             </div>
 
             <div class="card">
+                <header><h2>P3 Angajman</h2><span class="mini" id="p3TargetMode">--</span></header>
+                <div class="body">
+                    <div class="kv">
+                        <div class="item"><div class="label">Hedef Durumu</div><div class="value" id="p3TargetSummary">--</div></div>
+                        <div class="item"><div class="label">Wrong Target</div><div class="value" id="p3WrongTarget">--</div></div>
+                        <div class="item"><div class="label">Contact Source</div><div class="value" id="p3ContactSource">--</div></div>
+                        <div class="item"><div class="label">Fallback</div><div class="value" id="p3Fallback">--</div></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <header><h2>Harita / Koridor</h2><span class="mini" id="navSource">--</span></header>
+                <div class="body">
+                    <div class="kv">
+                        <div class="item"><div class="label">Koridor</div><div class="value" id="corridorSummary">--</div></div>
+                        <div class="item"><div class="label">Açıklık</div><div class="value" id="corridorClearance">--</div></div>
+                        <div class="item"><div class="label">Lidar Map</div><div class="value" id="corridorReason">--</div></div>
+                        <div class="item"><div class="label">Blocked</div><div class="value" id="blockedSummary">--</div></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
                 <header><h2>Manuel ve Güvenlik</h2><span class="mini" id="commandLock">--</span></header>
                 <div class="body">
                     <div class="kv">
@@ -2620,6 +2672,25 @@ CONTROLLER_PAGE = """
             text('linkAge', `${fmtNum(data.link_heartbeat_age_s, 2)} s`);
             text('positionAge', `state age ${fmtNum(data.state_age_s, 2)} s`);
             text('lidarLcr', `${fmtLidarM(data.lidar_left_m)} / ${fmtLidarM(data.lidar_center_m)} / ${fmtLidarM(data.lidar_right_m)}`);
+            const p3 = data.p3_target_status || {};
+            text('p3TargetMode', p3.mode || '--');
+            text(
+                'p3TargetSummary',
+                `${Boolean(p3.target_detected) ? 'görüyor' : (Boolean(p3.target_memory_active) ? 'memory' : 'yok')} | conf ${fmtNum(p3.target_confidence, 2)} | area ${fmtNum(p3.target_area_norm, 3)}`
+            );
+            text('p3WrongTarget', `${Boolean(data.p3_wrong_target_avoidance)} ${data.p3_wrong_target_class || ''}`.trim());
+            text('p3ContactSource', data.p3_contact_confirmation_source || 'none');
+            text('p3Fallback', Boolean(p3.gps_fallback_allowed) ? 'GPS/search aktif' : 'vision only');
+            const corridor = data.traversable_corridor || {};
+            const corridorStale = Boolean(corridor.stale);
+            text('navSource', data.nav_solution_source || data.nav_position_source || '--');
+            text(
+                'corridorSummary',
+                corridorStale ? (corridor.reason || 'lidar bekleniyor') : `${fmtNum(corridor.best_heading_delta_deg, 0)} deg | skor ${fmtNum(corridor.score, 2)}`
+            );
+            text('corridorClearance', corridorStale ? '--' : `${fmtNum(corridor.clearance_m, 2)} m / ${fmtNum(corridor.lookahead_m, 1)} m`);
+            text('corridorReason', `${data.lidar_frame_status || corridor.reason || '--'} | cells ${data.map_occupied_cells ?? '--'}`);
+            text('blockedSummary', `${fmtNum(data.blocked_level, 2)} | ${data.obstacle_threat_source || 'none'}`);
             text('manualLock', data.manual_lock_reason || '--');
             text('commandLock', `command_lock=${Boolean(data.command_lock)}`);
             text('rcSummary', `${data.RC1 ?? '--'} / ${data.RC3 ?? '--'}`);
@@ -2728,8 +2799,8 @@ CONTROLLER_PAGE = """
             refreshVisualFeeds();
             setInterval(refreshData, 1500);
             setInterval(refreshLogs, 2500);
-            setInterval(refreshSpatialMapState, 200);
-            setInterval(refreshVisualFeeds, 200);
+            setInterval(refreshSpatialMapState, 500);
+            setInterval(refreshVisualFeeds, 500);
             pollEvents();
         })();
     </script>
@@ -2915,6 +2986,16 @@ def _load_mission_waypoints():
             if engage_wp is not None:
                 out.append(engage_wp)
             return out
+        if isinstance(payload, dict) and "mission_profile" in payload:
+            parsed = parse_mission_profile_payload(payload, race_required=False)
+            out = list(parsed.get("nav_waypoints", []) or [])
+            for wp in list(parsed.get("parkur3", []) or []):
+                if wp not in out:
+                    out.append(wp)
+            engage_wp = parsed.get("engage_wp")
+            if engage_wp is not None and engage_wp not in out:
+                out.append(engage_wp)
+            return out
         if isinstance(payload, dict) and MISSION_ALLOW_STRUCTURED_LEGACY:
             mission = adapt_mission_to_structured(payload, strict=True)
             out = list(mission.get("parkur1", [])) + list(mission.get("parkur2", [])) + list(mission.get("parkur3", []))
@@ -2956,6 +3037,8 @@ def _build_spatial_payload(state):
                 "source": "state",
                 "stale": True,
             },
+            "traversable_corridor": {},
+            "p3_target_status": {},
         }
 
     boat = resolve_boat_spatial_enu(
@@ -3092,6 +3175,8 @@ def _build_spatial_payload(state):
             "quality_ready": bool(state.get("lidar_quality_ready", False)),
             "frame_status": str(state.get("lidar_frame_status", "") or ""),
         },
+        "traversable_corridor": state.get("traversable_corridor", {}) if isinstance(state.get("traversable_corridor", {}), dict) else {},
+        "p3_target_status": state.get("p3_target_status", {}) if isinstance(state.get("p3_target_status", {}), dict) else {},
     }
 
 @app.route('/api/data')
@@ -3247,6 +3332,16 @@ def get_data():
     out['lidar_degraded_age_s'] = float(state.get('lidar_degraded_age_s', 0.0) or 0.0)
     out['lidar_clock_source'] = state.get('lidar_clock_source', 'none')
     out['lidar_stamp_age_s'] = state.get('lidar_stamp_age_s')
+    out['lidar_frame_status'] = state.get('lidar_frame_status', '--')
+    out['lidar_quality_ready'] = bool(state.get('lidar_quality_ready', False))
+    out['map_occupied_cells'] = int(state.get('map_occupied_cells', 0) or 0)
+    traversable_corridor = state.get('traversable_corridor', {})
+    out['traversable_corridor'] = traversable_corridor if isinstance(traversable_corridor, dict) else {}
+    p3_target_status = state.get('p3_target_status', {})
+    out['p3_target_status'] = p3_target_status if isinstance(p3_target_status, dict) else {}
+    out['p3_wrong_target_avoidance'] = bool(state.get('p3_wrong_target_avoidance', False))
+    out['p3_wrong_target_class'] = str(state.get('p3_wrong_target_class', '') or '')
+    out['p3_contact_confirmation_source'] = str(state.get('p3_contact_confirmation_source', 'none') or 'none')
     out['active_parkur'] = state.get('active_parkur', '--')
     out['active_waypoint_index'] = state.get('active_waypoint_index', -1)
     out['guidance_detail_source'] = state.get('guidance_detail_source', '--')
@@ -3519,6 +3614,10 @@ def get_data():
             'mission_profile_race_ready': out['mission_profile_race_ready'],
             'p2_min_gate_count': out['p2_min_gate_count'],
             'p3_engagement_mode': out['p3_engagement_mode'],
+            'p3_target_status': out['p3_target_status'],
+            'p3_wrong_target_avoidance': out['p3_wrong_target_avoidance'],
+            'p3_wrong_target_class': out['p3_wrong_target_class'],
+            'p3_contact_confirmation_source': out['p3_contact_confirmation_source'],
             'gate_count': out['gate_count'],
         },
         'event_flags': {
@@ -3575,6 +3674,7 @@ def get_data():
             'link_heartbeat_age_s': out['link_heartbeat_age_s'],
             'state_age_s': out['state_age_s'],
             'camera_pipeline': out['camera_pipeline'],
+            'traversable_corridor': out['traversable_corridor'],
             'sensor_fusion': fusion_summary,
             'dynamic_speed_profile': dyn_speed_summary,
             'wind_assist': wind_assist_summary,

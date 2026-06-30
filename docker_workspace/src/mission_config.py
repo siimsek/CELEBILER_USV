@@ -340,11 +340,12 @@ def parse_mission_profile_payload(
                 parkur2 = _slice_range(coords, ranges["p2"])
             if "p3" in ranges:
                 parkur3 = _slice_range(coords, ranges["p3"])
+        nav_waypoints = (list(parkur1) + list(parkur2)) if (parkur1 or parkur2 or parkur3) else list(coords)
         return {
             "input_format": "structured_profile",
             "race_ready": True,
             "flat_waypoints": coords,
-            "nav_waypoints": list(coords),
+            "nav_waypoints": nav_waypoints,
             "engage_wp": None,
             "parkur1": parkur1,
             "parkur2": parkur2,
