@@ -37,6 +37,7 @@ def main() -> int:
     nav_guidance_py = read(SRC / "nav_guidance.py")
     cam_py = read(SRC / "cam.py")
     telem_py = read(SRC / "telemetry.py")
+    console_utils_py = read(SRC / "console_utils.py")
     sim_stack = read(ROOT / "sim" / "bin" / "run_sim_stack.sh")
     check_stack = read(ROOT / "sim" / "bin" / "check_stack.sh")
     sim_bridge = read(ROOT / "sim" / "bridges" / "sitl_gazebo_bridge.py")
@@ -128,12 +129,20 @@ def main() -> int:
         "lidar_sector_config_centralized": has(profile_py, "classify_lidar_scan_sector") and has(profile_py, "classify_lidar_map_sector") and has(usv_py, "classify_lidar_scan_sector"),
         "lidar_status_json_not_used": has(profile_py, "LIDAR_STATUS_JSON_ENABLED = False"),
         "pixhawk_param_compare_script_present": (ROOT / "host_scripts" / "compare_pixhawk_param_baseline.py").exists(),
-        "race_cert_pixhawk_doc_present": (ROOT / "documents" / "race_cert_pixhawk_arming_failsafe.md").exists(),
-        "servo_mapping_water_test_plan_present": (ROOT / "documents" / "servo_mapping_water_test_plan.md").exists(),
-        "oto_race_cert_docs_linked": has(read(ROOT / "OTOMASYON.md"), "race_cert_pixhawk_arming_failsafe.md") and has(read(ROOT / "OTOMASYON.md"), "servo_mapping_water_test_plan.md"),
+        "core_documents_present": (ROOT / "documents" / "ida_sartname.md").exists()
+        and (ROOT / "documents" / "rapor_calismasistemi.md").exists()
+        and (ROOT / "README.md").exists(),
+        "doc_readme_pixhawk_baseline_safety": has(readme_doc, "config/pixhawk_ida.param")
+        and has(readme_doc, "ARMING_CHECK=0")
+        and has(readme_doc, "fiziksel E-stop/kontaktor"),
+        "doc_readme_servo_mapping_guard": has(readme_doc, "SERVO1/3")
+        and has(readme_doc, "1100/1500/1900")
+        and has(readme_doc, "su ustu test"),
         "mission_profile_unit_script_present": (ROOT / "host_scripts" / "check_mission_profile_unit.py").exists(),
         "race_readiness_score_script_present": (ROOT / "host_scripts" / "check_race_readiness_score.py").exists(),
-        "manual_operator_checklist_present": (ROOT / "documents" / "manual_operator_verification_checklist.md").exists(),
+        "readme_operation_references_current_docs": has(readme_doc, "documents/rapor_calismasistemi.md")
+        and has(readme_doc, "documents/ida_sartname.md")
+        and has(readme_doc, "Kontrol sahipligi ve operasyon ozeti icin bu README"),
         "mission_api_writes_flat": has(telem_py, "'input_format': MISSION_INPUT_FORMAT") and has(telem_py, "atomic_write_json(mission_file"),
         "runtime_loader_uses_target_state": has(usv_py, "load_target_state(TARGET_STATE_FILE)") and has(usv_py, "self.target_color = target_from_state or mission_target_color or self.target_color or \"RED\""),
         "mission_state_contract_visible": has(usv_py, "\"mission_input_format\": self.mission_input_format") and has(usv_py, "\"mission_split_profile\": dict(self.mission_split_profile)"),
@@ -151,7 +160,8 @@ def main() -> int:
         "deprecated_sim_bridge_shims_removed": not (ROOT / "sim" / "bridges" / "mavlink_to_gz_pose_simple.py").exists() and not (ROOT / "sim" / "bridges" / "gazebo_pose_updater.py").exists(),
         "sim_lidar_map_started_before_usv_main": (
             sim_stack.find("Starting lidar_map service") != -1
-            and sim_stack.find("Starting lidar_map service") < sim_stack.find("USV_SIM=1 LOG_DIR")
+            and sim_stack.find("Starting usv_main state machine") != -1
+            and sim_stack.find("Starting lidar_map service") < sim_stack.find("Starting usv_main state machine")
             and has(check_stack, "lidar_map.py")
         ),
         "sim_check_stack_log_pairs": has(check_stack, "report_log_pair") and has(check_stack, "sitl_gazebo_bridge") and has(check_stack, "lidar_map"),
@@ -197,6 +207,11 @@ def main() -> int:
         "sim_start_latest_session_logs_only": has(sim_stack, "prepare_latest_log_session")
         and has(sim_stack, "rm -rf \"$ROOT_LOG_DIR\"")
         and has(sim_stack, "loglar sadece son session icin /logs altinda tutulur"),
+        "sim_terminal_line_buffering": has(sim_stack, "run_line_buffered")
+        and has(sim_stack, "stdbuf -oL -eL")
+        and has(sim_stack, "kill_if_running \"$pid\" KILL")
+        and has(console_utils_py, "line_buffering=True")
+        and has(console_utils_py, "write_through=True"),
         "system_start_latest_session_logs_only": has(system_start, "prepare_latest_log_session")
         and has(system_start, "rm -rf \"$LOG_DIR\"")
         and has(system_start, "yalnız son session /logs altında tutulacak"),

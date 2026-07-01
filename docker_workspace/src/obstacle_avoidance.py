@@ -9,6 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from compliance_profile import (
+    OBSTACLE_TTC_DANGER_S,
+    OBSTACLE_TTC_EMERGENCY_S,
+    OBSTACLE_TTC_STOP_S,
+    OBSTACLE_TTC_WARN_S,
+)
+
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(max_value, value))
@@ -22,6 +29,35 @@ class AvoidanceDecision:
     speed_limit_mps: float | None
     escape_side: str
     reason: str
+
+
+@dataclass(frozen=True)
+class TTCSpeedProfile:
+    active: bool
+    level: str
+    speed_factor: float
+    speed_limit_mps: float | None
+    reason: str
+
+
+def speed_profile_for_ttc(base_speed_mps: float, min_ttc_s: float | None) -> TTCSpeedProfile:
+    """Return conservative speed shaping for a dynamic obstacle TTC estimate."""
+    try:
+        ttc = float(min_ttc_s)
+    except (TypeError, ValueError):
+        ttc = 9999.0
+    base = max(0.0, float(base_speed_mps))
+    if ttc <= float(OBSTACLE_TTC_STOP_S):
+        return TTCSpeedProfile(True, "stop", 0.0, 0.0, "ttc_stop")
+    if ttc <= float(OBSTACLE_TTC_EMERGENCY_S):
+        return TTCSpeedProfile(True, "emergency", 0.0, 0.0, "ttc_emergency")
+    if ttc <= float(OBSTACLE_TTC_DANGER_S):
+        limit = base * 0.25
+        return TTCSpeedProfile(True, "danger", 0.25, limit, "ttc_danger")
+    if ttc <= float(OBSTACLE_TTC_WARN_S):
+        limit = base * 0.50
+        return TTCSpeedProfile(True, "warn", 0.50, limit, "ttc_warn")
+    return TTCSpeedProfile(False, "normal", 1.0, None, "ttc_clear")
 
 
 def _finite_or_clear(value: float | None) -> float:

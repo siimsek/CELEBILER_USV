@@ -24,6 +24,8 @@ from compliance_profile import (
     CAM_ADAPT_LUMA_DARK_THRESHOLD,
     CAM_ADAPT_DARK_BETA,
     CAM_WRONG_TARGET_BEARING_MAX_DEG,
+    CAM_WRONG_TARGET_CONFIRM_BEARING_JUMP_DEG,
+    CAM_WRONG_TARGET_CONFIRM_FRAMES,
     CAM_WRONG_TARGET_MIN_AREA_NORM,
     CAM_WRONG_TARGET_STRONG_AREA_NORM,
     camera_wrong_target_contract,
@@ -35,6 +37,7 @@ from compliance_profile import (
 )
 from json_atomic import atomic_write_json
 from mission_config import TARGET_STATE_FILE, load_target_state
+from run_logger import get_run_logger
 from runtime_debug_log import (
     install_module_function_tracing,
     log_jsonl,
@@ -77,6 +80,10 @@ else:
 
 PORT = 8888
 WEB_PORT = 5000
+
+# Initialize structured logger (after CAM_SOURCE and WEB_PORT are defined)
+rl = get_run_logger(component="cam")
+rl.info("service_init_begin", cam_source=CAM_SOURCE, web_port=WEB_PORT)
 # Default ~30 Hz processing cap; lower CAM_PROCESS_DT = lower latency, higher CPU.
 CAM_PROCESS_DT = max(0.02, float(os.environ.get("CAM_PROCESS_DT", "0.033")))
 CAM_RX_BUFFER_MAX = max(64 * 1024, int(os.environ.get("CAM_RX_BUFFER_MAX", "1048576")))
@@ -177,6 +184,10 @@ class VideoCamera:
         self.target_last_seen_ts = 0.0
         self.target_bearing_filtered = 0.0
         self.target_area_filtered = 0.0
+        self.wrong_target_seen_since = None
+        self.wrong_target_confirm_count = 0
+        self.wrong_target_last_class = ""
+        self.wrong_target_last_bearing = 0.0
         self.status = {
             "ts_monotonic": 0.0,
             "frame_age_s": 999.0,
@@ -235,6 +246,8 @@ class VideoCamera:
             "wrong_target_area_norm": 0.0,
             "wrong_target_class": "",
             "wrong_target_confidence": 0.0,
+            "wrong_target_confirm_frames": 0,
+            "wrong_target_stable_s": 0.0,
             "bearing_half_deg": float(BEARING_HALF_DEG),
             "wrong_target_policy": dict(WRONG_TARGET_CONTRACT),
             "camera_adaptation": {
@@ -869,6 +882,7 @@ class VideoCamera:
             elapsed = now - self._last_frame_log_time
             fps = delta_frames / elapsed if elapsed > 0 else 0.0
             print(f"[CAM] [FRAME] count={self._frame_count} fps={fps:.1f}")
+            rl.debug("camera_frame_summary", frame_count=self._frame_count, fps=round(fps, 1))
             self._last_frame_log_time = now
             self._last_frame_log_count = self._frame_count
         
@@ -1056,10 +1070,48 @@ class VideoCamera:
         target_bearing = target_bearing_filtered if target_detected else 0.0
         target_area_norm = target_area_filtered if target_detected else 0.0
         target_confidence = target_confidence_raw if target_detected else 0.0
-        wrong_target_detected = wrong_target_detected_raw if target_actionable else False
-        wrong_target_bearing = wrong_target_bearing_raw if target_actionable else 0.0
-        wrong_target_area_norm = wrong_target_area_norm_raw if target_actionable else 0.0
+        if target_actionable and wrong_target_detected_raw:
+            same_class = wrong_target_class_raw == self.wrong_target_last_class
+            bearing_jump_ok = (
+                self.wrong_target_confirm_count <= 0
+                or abs(float(wrong_target_bearing_raw) - float(self.wrong_target_last_bearing)) <= float(CAM_WRONG_TARGET_CONFIRM_BEARING_JUMP_DEG)
+            )
+            if same_class and bearing_jump_ok:
+                self.wrong_target_confirm_count += 1
+            else:
+                self.wrong_target_confirm_count = 1
+                self.wrong_target_seen_since = now
+            self.wrong_target_last_class = wrong_target_class_raw
+            self.wrong_target_last_bearing = wrong_target_bearing_raw
+        else:
+            self.wrong_target_confirm_count = 0
+            self.wrong_target_seen_since = None
+            self.wrong_target_last_class = ""
+            self.wrong_target_last_bearing = 0.0
+
+        wrong_target_stable_s = (
+            max(0.0, now - float(self.wrong_target_seen_since))
+            if self.wrong_target_seen_since is not None and self.wrong_target_confirm_count > 0
+            else 0.0
+        )
+        wrong_target_confirmed = bool(
+            target_actionable
+            and wrong_target_detected_raw
+            and self.wrong_target_confirm_count >= max(1, int(CAM_WRONG_TARGET_CONFIRM_FRAMES))
+        )
+        wrong_target_detected = wrong_target_confirmed
+        wrong_target_bearing = wrong_target_bearing_raw if wrong_target_detected else 0.0
+        wrong_target_area_norm = wrong_target_area_norm_raw if wrong_target_detected else 0.0
         wrong_target_class = wrong_target_class_raw if wrong_target_detected else ""
+        wrong_target_confidence = (
+            wrong_target_confidence
+            if wrong_target_detected
+            else wrong_target_confidence * clamp(
+                self.wrong_target_confirm_count / max(1.0, float(CAM_WRONG_TARGET_CONFIRM_FRAMES)),
+                0.0,
+                1.0,
+            )
+        )
 
         if target_actionable:
             if target_detected:
@@ -1146,6 +1198,8 @@ class VideoCamera:
             "wrong_target_area_norm": round(wrong_target_area_norm, 4),
             "wrong_target_class": wrong_target_class,
             "wrong_target_confidence": round(float(wrong_target_confidence), 4),
+            "wrong_target_confirm_frames": int(self.wrong_target_confirm_count),
+            "wrong_target_stable_s": round(float(wrong_target_stable_s), 3),
             "bearing_half_deg": round(float(BEARING_HALF_DEG), 3),
             "wrong_target_policy": dict(WRONG_TARGET_CONTRACT),
             "camera_adaptation": {
@@ -1299,6 +1353,7 @@ def _write_latest_jpeg():
 
 
 if __name__ == "__main__":
+    rl.info("service_init_complete", web_port=WEB_PORT, cam_source=CAM_SOURCE)
     camera_stream = VideoCamera().start(processing_loop=False)
 
     try:

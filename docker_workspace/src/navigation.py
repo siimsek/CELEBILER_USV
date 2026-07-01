@@ -77,6 +77,43 @@ class WaypointRequest:
     reason: str
 
 
+def adaptive_l1_distance_m(
+    *,
+    speed_mps: float,
+    l1_min_m: float = 3.0,
+    l1_max_m: float = 10.0,
+    speed_max_mps: float = 2.0,
+) -> float:
+    speed = max(0.0, float(speed_mps))
+    ratio = clamp(speed / max(float(speed_max_mps), 0.1), 0.0, 1.0)
+    return float(l1_min_m) + ((float(l1_max_m) - float(l1_min_m)) * ratio)
+
+
+def adaptive_l1_waypoint_request(
+    *,
+    distance_m: float,
+    heading_error_deg: float,
+    cruise_speed_mps: float,
+    approach_speed_mps: float,
+    current_speed_mps: float,
+    acceptance_radius_m: float = R_WP_M,
+    heading_threshold_deg: float = NAV_ALIGN_HEADING_DONE_DEG,
+    creep_speed_mps: float = NAV_ALIGN_CREEP_SPEED_MPS,
+) -> WaypointRequest:
+    l1_distance = adaptive_l1_distance_m(speed_mps=current_speed_mps or cruise_speed_mps)
+    slow_radius = max(float(l1_distance), float(acceptance_radius_m) + 0.1)
+    return heading_first_waypoint_request(
+        distance_m=distance_m,
+        heading_error_deg=heading_error_deg,
+        cruise_speed_mps=cruise_speed_mps,
+        approach_speed_mps=approach_speed_mps,
+        acceptance_radius_m=acceptance_radius_m,
+        slow_down_radius_m=slow_radius,
+        heading_threshold_deg=heading_threshold_deg,
+        creep_speed_mps=creep_speed_mps,
+    )
+
+
 def heading_first_waypoint_request(
     *,
     distance_m: float,

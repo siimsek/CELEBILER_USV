@@ -79,10 +79,12 @@ P2_GATE_CONFIRM_S = 0.5
 P3_MAX_SPEED_MPS = 1.5
 P3_TARGET_BEARING_GAIN = float(os.environ.get("P3_TARGET_BEARING_GAIN", "0.85"))
 P3_TARGET_HEADING_CLAMP_DEG = float(os.environ.get("P3_TARGET_HEADING_CLAMP_DEG", "45.0"))
-P3_TARGET_LOST_GRACE_S = float(os.environ.get("P3_TARGET_LOST_GRACE_S", "1.5"))
-P3_TARGET_MEMORY_S = float(os.environ.get("P3_TARGET_MEMORY_S", "4.0"))
+P3_TARGET_LOST_GRACE_S = float(os.environ.get("P3_TARGET_LOST_GRACE_S", "8.0"))
+P3_TARGET_MEMORY_S = float(os.environ.get("P3_TARGET_MEMORY_S", "8.0"))
 P3_GPS_FALLBACK_SPEED_MPS = float(os.environ.get("P3_GPS_FALLBACK_SPEED_MPS", "0.55"))
 P3_TARGET_SEARCH_HOLD_SPEED_MPS = float(os.environ.get("P3_TARGET_SEARCH_HOLD_SPEED_MPS", "0.0"))
+P3_TARGET_SEARCH_SPIRAL_MAX_DEG = float(os.environ.get("P3_TARGET_SEARCH_SPIRAL_MAX_DEG", "45.0"))
+P3_TARGET_SEARCH_SPIRAL_PERIOD_S = float(os.environ.get("P3_TARGET_SEARCH_SPIRAL_PERIOD_S", "6.0"))
 TRAVERSABLE_CORRIDOR_LOOKAHEAD_M = float(os.environ.get("TRAVERSABLE_CORRIDOR_LOOKAHEAD_M", "7.0"))
 TRAVERSABLE_CORRIDOR_HALF_WIDTH_M = float(os.environ.get("TRAVERSABLE_CORRIDOR_HALF_WIDTH_M", "0.75"))
 TRAVERSABLE_CORRIDOR_MIN_CLEARANCE_M = float(os.environ.get("TRAVERSABLE_CORRIDOR_MIN_CLEARANCE_M", "1.0"))
@@ -140,8 +142,8 @@ def resolve_nav_align_turn_immunity_s() -> float:
 
 
 def resolve_nav_align_revert_align_deg() -> float:
-    # FIX: Revert threshold artırıldı (18°/12° → 25°/20°) - creep cycle önleme
-    default = "25.0" if os.environ.get("USV_SIM") == "1" else "20.0"
+    # Revert threshold for heading alignment oscillation prevention
+    default = "18.0" if os.environ.get("USV_SIM") == "1" else "12.0"
     return max(8.0, float(os.environ.get("NAV_ALIGN_REVERT_ALIGN_DEG", default)))
 
 
@@ -221,6 +223,8 @@ INNOVATION_SWITCHES = {
     "horizon_lock": True,
     "camera_adaptation": True,
     "autonomy_health_trust_bar": True,
+    "predictive_local_planner": True,
+    "control_smoothing": True,
     # Disabled by race contract: P1 remains pure Pixhawk AUTO, while test/P2/P3
     # use the shared Pi-guided waypoint engine.
     "unified_execution_path": False,
@@ -309,6 +313,8 @@ CAM_WRONG_TARGET_PRIORITY = "locked_target_color_first"
 CAM_WRONG_TARGET_MIN_AREA_NORM = float(os.environ.get("CAM_WRONG_TARGET_MIN_AREA_NORM", "0.025"))
 CAM_WRONG_TARGET_BEARING_MAX_DEG = float(os.environ.get("CAM_WRONG_TARGET_BEARING_MAX_DEG", "18.0"))
 CAM_WRONG_TARGET_STRONG_AREA_NORM = float(os.environ.get("CAM_WRONG_TARGET_STRONG_AREA_NORM", "0.08"))
+CAM_WRONG_TARGET_CONFIRM_FRAMES = int(float(os.environ.get("CAM_WRONG_TARGET_CONFIRM_FRAMES", "3")))
+CAM_WRONG_TARGET_CONFIRM_BEARING_JUMP_DEG = float(os.environ.get("CAM_WRONG_TARGET_CONFIRM_BEARING_JUMP_DEG", "14.0"))
 
 # HSV hue boundaries are intentionally non-overlapping (red/orange/yellow margins at H=5/22).
 CAM_HSV_BOUNDARY_POLICY = {
@@ -381,6 +387,8 @@ def camera_wrong_target_contract() -> Dict[str, object]:
         "min_area_norm": CAM_WRONG_TARGET_MIN_AREA_NORM,
         "strong_area_norm": CAM_WRONG_TARGET_STRONG_AREA_NORM,
         "bearing_max_deg": CAM_WRONG_TARGET_BEARING_MAX_DEG,
+        "confirm_frames": CAM_WRONG_TARGET_CONFIRM_FRAMES,
+        "confirm_bearing_jump_deg": CAM_WRONG_TARGET_CONFIRM_BEARING_JUMP_DEG,
         "hsv_boundary_policy": dict(CAM_HSV_BOUNDARY_POLICY),
     }
 TRUST_BAR_ENABLED = bool(INNOVATION_SWITCHES.get("autonomy_health_trust_bar", True))
@@ -499,7 +507,7 @@ REPORT_TELEMETRY_GROUPS = {
     "mode_state": ["mode", "state", "active_parkur"],
     "mission_progress": ["target", "wp_info", "gate_count"],
     "event_flags": ["gate_gecildi", "angajman_tamam", "timeout", "failsafe_state"],
-    "navigation_health": ["gps", "ekf", "imu", "camera_ready", "lidar_ready"],
+    "navigation_health": ["gps", "ekf", "imu", "camera_ready", "lidar_ready", "advanced_avoidance", "behavior_selector", "autonomy_confidence"],
     "link_health": ["heartbeat_age_s", "rc_link_active"],
     "safety": ["estop_state", "estop_source", "command_lock", "health_ready"],
     "energy": ["battery_voltage"],
@@ -512,6 +520,91 @@ COMMS_POLICY = {
     "video_tx_allowed": False,
     "frequency_channel_selection_required": True,
 }
+
+
+# ---------------------------------------------------------------------------
+# Local Costmap Configuration
+# ---------------------------------------------------------------------------
+COSTMAP_RESOLUTION_M = float(os.environ.get("USV_COSTMAP_RESOLUTION_M", "0.20"))
+COSTMAP_FRONT_M = float(os.environ.get("USV_COSTMAP_FRONT_M", "12.0"))
+COSTMAP_REAR_M = float(os.environ.get("USV_COSTMAP_REAR_M", "3.0"))
+COSTMAP_SIDE_M = float(os.environ.get("USV_COSTMAP_SIDE_M", "6.0"))
+COSTMAP_DECAY_FACTOR = float(os.environ.get("USV_COSTMAP_DECAY_FACTOR", "0.92"))
+COSTMAP_DECAY_INTERVAL_S = float(os.environ.get("USV_COSTMAP_DECAY_INTERVAL_S", "0.5"))
+# Adım 4 — Decay-tazelik ilişkisi: sensör bayatsa decay hızlansın (eski engeller çabuk kaybolsun)
+COSTMAP_STALE_DECAY_TIMEOUT_S = float(os.environ.get("USV_COSTMAP_STALE_DECAY_TIMEOUT_S", "3.0"))
+COSTMAP_STALE_DECAY_BOOST = float(os.environ.get("USV_COSTMAP_STALE_DECAY_BOOST", "2.0"))
+COSTMAP_INFLATION_RADIUS_M = float(os.environ.get("USV_COSTMAP_INFLATION_M", "0.60"))
+COSTMAP_BOAT_WIDTH_M = float(os.environ.get("USV_BOAT_WIDTH_M", "0.81"))
+COSTMAP_BOAT_LENGTH_M = float(os.environ.get("USV_BOAT_LENGTH_M", "1.62"))
+COSTMAP_SAFETY_MARGIN_M = float(os.environ.get("USV_COSTMAP_SAFETY_MARGIN_M", "0.20"))
+COSTMAP_FATAL_COST = 255
+COSTMAP_OBSTACLE_COST = 200
+COSTMAP_WRONG_TARGET_COST = int(float(os.environ.get("USV_COSTMAP_WRONG_TARGET_COST", "240")))
+COSTMAP_INFLATED_COST = 128
+COSTMAP_CAMERA_COST = 80
+COSTMAP_CLEAR_THRESHOLD = 10
+COSTMAP_LIDAR_QUALITY_MIN = float(os.environ.get("USV_COSTMAP_LIDAR_QUALITY_MIN", "0.3"))
+COSTMAP_LIDAR_MAX_RANGE_M = float(os.environ.get("USV_COSTMAP_LIDAR_MAX_RANGE_M", "12.0"))
+COSTMAP_LIDAR_MIN_RANGE_M = float(os.environ.get("USV_COSTMAP_LIDAR_MIN_RANGE_M", "0.15"))
+COSTMAP_FRESHNESS_TIMEOUT_S = float(os.environ.get("USV_COSTMAP_FRESHNESS_S", "2.0"))
+_costmap_width_m = COSTMAP_SIDE_M * 2.0
+_costmap_height_m = COSTMAP_FRONT_M + COSTMAP_REAR_M
+COSTMAP_WIDTH_CELLS = max(10, int(_costmap_width_m / COSTMAP_RESOLUTION_M))
+COSTMAP_HEIGHT_CELLS = max(10, int(_costmap_height_m / COSTMAP_RESOLUTION_M))
+COSTMAP_ORIGIN_X_M = -COSTMAP_REAR_M
+COSTMAP_ORIGIN_Y_M = -COSTMAP_SIDE_M
+
+# ---------------------------------------------------------------------------
+# Predictive Local Planner Configuration
+# ---------------------------------------------------------------------------
+ADVANCED_AUTONOMY_ENABLED = bool(INNOVATION_SWITCHES.get("predictive_local_planner", True))
+PLANNER_HORIZON_S = float(os.environ.get("USV_PLANNER_HORIZON_S", "5.0"))
+PLANNER_CANDIDATE_HEADINGS_DEG = int(os.environ.get("USV_PLANNER_CANDIDATE_HEADINGS", "36"))
+PLANNER_HEADING_STEP_DEG = 360.0 / max(4, PLANNER_CANDIDATE_HEADINGS_DEG)
+PLANNER_MAX_SPEED_P2_MPS = float(os.environ.get("USV_PLANNER_MAX_SPEED_P2", str(P2_CRUISE_MPS)))
+PLANNER_MAX_SPEED_P3_MPS = float(os.environ.get("USV_PLANNER_MAX_SPEED_P3", "1.5"))
+PLANNER_APPROACH_SPEED_MPS = float(os.environ.get("USV_PLANNER_APPROACH_SPEED", "0.6"))
+PLANNER_YAW_RATE_LIMIT_DPS = float(os.environ.get("USV_PLANNER_YAW_RATE_LIMIT_DPS", "45.0"))
+PLANNER_HEADING_RATE_LIMIT_DEG = float(os.environ.get("USV_PLANNER_HEADING_RATE_DEG", "30.0"))
+PLANNER_SETPOINT_RATE_HZ = float(os.environ.get("USV_PLANNER_SETPOINT_HZ", "10.0"))
+PLANNER_SMOOTHING_ALPHA = float(os.environ.get("USV_PLANNER_SMOOTHING_ALPHA", "0.6"))
+PLANNER_W_COLLISION = float(os.environ.get("USV_PLANNER_W_COLLISION", "100.0"))
+PLANNER_W_PROGRESS = float(os.environ.get("USV_PLANNER_W_PROGRESS", "10.0"))
+PLANNER_W_SMOOTHNESS = float(os.environ.get("USV_PLANNER_W_SMOOTHNESS", "5.0"))
+PLANNER_W_BOUNDARY = float(os.environ.get("USV_PLANNER_W_BOUNDARY", "8.0"))
+PLANNER_W_GATE = float(os.environ.get("USV_PLANNER_W_GATE", "6.0"))
+PLANNER_W_SENSOR = float(os.environ.get("USV_PLANNER_W_SENSOR", "3.0"))
+PLANNER_W_WRONG_TARGET = float(os.environ.get("USV_PLANNER_W_WRONG_TARGET", "50.0"))
+PLANNER_MAX_HEADING_ERROR_DEG = float(os.environ.get("USV_PLANNER_MAX_HEADING_ERROR_DEG", "75.0"))
+PLANNER_HYSTERESIS_SCORE_MARGIN = float(os.environ.get("USV_PLANNER_HYSTERESIS_SCORE_MARGIN", "4.0"))
+PLANNER_CONFIDENCE_HOLD_THRESHOLD = float(os.environ.get("USV_PLANNER_CONF_HOLD", "0.30"))
+PLANNER_CONFIDENCE_SLOW_THRESHOLD = float(os.environ.get("USV_PLANNER_CONF_SLOW", "0.50"))
+PLANNER_MIN_CLEARANCE_NORMAL_M = float(os.environ.get("USV_PLANNER_MIN_CLEARANCE_NORMAL_M", "1.6"))
+PLANNER_STUCK_TIMEOUT_S = float(os.environ.get("USV_PLANNER_STUCK_TIMEOUT_S", "4.0"))
+PLANNER_STUCK_PROGRESS_EPS_M = float(os.environ.get("USV_PLANNER_STUCK_PROGRESS_EPS_M", "0.08"))
+PLANNER_TRAJECTORY_LOG_LIMIT = int(os.environ.get("USV_PLANNER_TRAJECTORY_LOG_LIMIT", "9"))
+# Adım 2 — Karar otoritesi merkezileştirme (A/B) tunable'ları
+PLANNER_CORRIDOR_HYSTERESIS_BONUS = float(os.environ.get("USV_PLANNER_CORRIDOR_HYSTERESIS_BONUS", "0.8"))
+PLANNER_GATE_CENTER_BONUS = float(os.environ.get("USV_PLANNER_GATE_CENTER_BONUS", "0.6"))
+PLANNER_GATE_AUTHORITY = env_flag("USV_PLANNER_GATE_AUTHORITY", False)
+OBSTACLE_TTC_WARN_S = float(os.environ.get("USV_OBSTACLE_TTC_WARN_S", "5.0"))
+OBSTACLE_TTC_DANGER_S = float(os.environ.get("USV_OBSTACLE_TTC_DANGER_S", "3.0"))
+OBSTACLE_TTC_EMERGENCY_S = float(os.environ.get("USV_OBSTACLE_TTC_EMERGENCY_S", "1.5"))
+OBSTACLE_TTC_STOP_S = float(os.environ.get("USV_OBSTACLE_TTC_STOP_S", "0.5"))
+CONTROL_SMOOTHING_ENABLED = bool(INNOVATION_SWITCHES.get("control_smoothing", True))
+CONTROL_SPEED_ACCEL_LIMIT_MPS2 = float(os.environ.get("USV_CONTROL_ACCEL_LIMIT_MPS2", "0.50"))
+CONTROL_SPEED_DECEL_LIMIT_MPS2 = float(os.environ.get("USV_CONTROL_DECEL_LIMIT_MPS2", "1.00"))
+CONTROL_SPEED_JERK_LIMIT_MPS3 = float(os.environ.get("USV_CONTROL_JERK_LIMIT_MPS3", "2.0"))
+CONTROL_HEADING_RATE_LIMIT_DPS = float(os.environ.get("USV_CONTROL_HEADING_RATE_LIMIT_DPS", "55.0"))
+CONTROL_SMOOTHING_ALPHA = float(os.environ.get("USV_CONTROL_SMOOTHING_ALPHA", "0.65"))
+CONTROL_SMOOTHING_LOG_PERIOD_S = float(os.environ.get("USV_CONTROL_SMOOTHING_LOG_PERIOD_S", "1.0"))
+# Adım 5 — Heading input EMA varsayılan kapalı: ölçüm gecikmesini kontrol smoothing'e bindirmeyelim.
+HEADING_INPUT_FILTER_ENABLED = env_flag("USV_HEADING_INPUT_FILTER", False)
+HEADING_INPUT_FILTER_ALPHA = float(os.environ.get("USV_HEADING_INPUT_FILTER_ALPHA", "1.0"))
+
+KALMAN_POSITION_OUTLIER_CHI2 = float(os.environ.get("USV_KALMAN_POS_OUTLIER_CHI2", "9.21"))
+KALMAN_HEADING_OUTLIER_CHI2 = float(os.environ.get("USV_KALMAN_HEADING_OUTLIER_CHI2", "6.63"))
 
 
 def _is_dir_writable(path: Path) -> bool:
@@ -563,6 +656,10 @@ def evaluate_readiness_flags(
     camera_fresh: bool,
     lidar_fresh: bool,
     storage_health: Dict[str, object],
+    sensor_fusion_ready: bool = True,
+    video_recording_ready: bool = True,
+    predicted_goals_ready: bool = True,
+    costmap_ready: bool = True,
 ) -> Tuple[Dict[str, bool], List[str]]:
     flags = {
         "mavlink_vehicle_link": bool(mavlink_vehicle_link),
@@ -573,6 +670,10 @@ def evaluate_readiness_flags(
         "lidar_fresh": bool(lidar_fresh),
         "storage_local_writable": bool(storage_health.get("local_writable", False)),
         "storage_usb_writable": bool(storage_health.get("usb_writable", False)),
+        "sensor_fusion_ready": bool(sensor_fusion_ready),
+        "video_recording_ready": bool(video_recording_ready),
+        "predicted_goals_ready": bool(predicted_goals_ready),
+        "costmap_ready": bool(costmap_ready),
     }
 
     required_keys = [
@@ -583,9 +684,64 @@ def evaluate_readiness_flags(
         "camera_fresh",
         "lidar_fresh",
         "storage_local_writable",
+        "sensor_fusion_ready",
+        "video_recording_ready",
+        "predicted_goals_ready",
+        "costmap_ready",
     ]
     if storage_health.get("usb_required", False):
         required_keys.append("storage_usb_writable")
 
     missing = [key for key in required_keys if not flags.get(key, False)]
     return flags, missing
+
+
+# ---------------------------------------------------------------------------
+# Sensor Fusion Configuration
+# ---------------------------------------------------------------------------
+FUSION_LIDAR_CAMERA_CORR_M = float(os.environ.get("USV_FUSION_CORR_M", "1.5"))
+FUSION_CAMERA_BEARING_UNCERTAINTY_DEG = float(os.environ.get("USV_FUSION_CAM_UNCERT_DEG", "10.0"))
+FUSION_LIDAR_STALE_TIMEOUT_S = float(os.environ.get("USV_FUSION_LIDAR_STALE_S", "1.5"))
+FUSION_CAMERA_STALE_TIMEOUT_S = float(os.environ.get("USV_FUSION_CAM_STALE_S", "1.0"))
+FUSION_GPS_STALE_TIMEOUT_S = float(os.environ.get("USV_FUSION_GPS_STALE_S", "3.0"))
+FUSION_DEGRADED_SPEED_FACTOR = float(os.environ.get("USV_FUSION_DEGRADED_SPEED", "0.5"))
+FUSION_HOLD_SPEED_MPS = float(os.environ.get("USV_FUSION_HOLD_SPEED", "0.0"))
+# Adım 3 — Merkezî güven eşikleri (degrade/HOLD karar ağacı için)
+FUSION_CONF_SLOW_THRESHOLD = float(os.environ.get("USV_FUSION_CONF_SLOW", "0.5"))
+FUSION_CONF_HOLD_THRESHOLD = float(os.environ.get("USV_FUSION_CONF_HOLD", "0.2"))
+
+# ---------------------------------------------------------------------------
+# Predicted Goals and Trajectory Logging
+# ---------------------------------------------------------------------------
+PREDICTED_GOALS_LOG_HZ = float(os.environ.get("USV_PREDICTED_GOALS_HZ", "2.0"))
+PREDICTED_TRAJECTORY_HORIZON_S = float(os.environ.get("USV_PRED_TRAJ_HORIZON_S", "5.0"))
+PREDICTED_TRAJECTORY_STEP_S = float(os.environ.get("USV_PRED_TRAJ_STEP_S", "0.5"))
+
+# ---------------------------------------------------------------------------
+# Enhanced Mission Phase Names (backward-compatible extension)
+# ---------------------------------------------------------------------------
+PHASE_BOOT = "BOOT"
+PHASE_PREFLIGHT = "PREFLIGHT"
+PHASE_READY = "READY"
+PHASE_MISSION_LOCKED = "MISSION_LOCKED"
+PHASE_WAIT_FOR_START = "WAIT_FOR_START"
+PHASE_P1_AUTO = "P1_AUTO"
+PHASE_P1_TO_P2_GATE = "P1_TO_P2_GATE"
+PHASE_P2_MAPPING_AND_AVOIDANCE = "P2_MAPPING_AND_AVOIDANCE"
+PHASE_P2_COMPLETE_CHECK = "P2_COMPLETE_CHECK"
+PHASE_P2_TO_P3_GATE = "P2_TO_P3_GATE"
+PHASE_P3_TARGET_ACQUIRE = "P3_TARGET_ACQUIRE"
+PHASE_P3_ENGAGE = "P3_ENGAGE"
+PHASE_P3_CONTACT_CONFIRM = "P3_CONTACT_CONFIRM"
+PHASE_MISSION_COMPLETE = "MISSION_COMPLETE"
+PHASE_HOLD = "HOLD"
+PHASE_FAILSAFE = "FAILSAFE"
+PHASE_ESTOP = "ESTOP"
+
+ALL_PHASES = (
+    PHASE_BOOT, PHASE_PREFLIGHT, PHASE_READY, PHASE_MISSION_LOCKED,
+    PHASE_WAIT_FOR_START, PHASE_P1_AUTO, PHASE_P1_TO_P2_GATE,
+    PHASE_P2_MAPPING_AND_AVOIDANCE, PHASE_P2_COMPLETE_CHECK, PHASE_P2_TO_P3_GATE,
+    PHASE_P3_TARGET_ACQUIRE, PHASE_P3_ENGAGE, PHASE_P3_CONTACT_CONFIRM,
+    PHASE_MISSION_COMPLETE, PHASE_HOLD, PHASE_FAILSAFE, PHASE_ESTOP,
+)

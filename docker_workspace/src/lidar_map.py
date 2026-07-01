@@ -15,6 +15,12 @@ from pathlib import Path
 from flask import Flask, Response
 import logging
 from compliance_profile import USV_MODE, USV_MODE_RACE, CONTROL_DIR
+from run_logger import get_run_logger
+
+# Initialize structured logger
+rl = get_run_logger(component="lidar_map")
+rl.info("service_init_begin", web_port=5001, usv_mode=USV_MODE)
+
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR) # Gereksiz logları kapat
 _lidar_dbg = setup_component_logger("lidar_map")
@@ -36,6 +42,47 @@ if USV_MODE == USV_MODE_RACE:
 WEB_PORT = 5001
 MAP_SIZE = 600       # 600x600 piksel harita
 DEFAULT_SPAN_M = 20.0  # Default span (metre) - dynamic olarak ayarlanacak
+
+# --- VIDEO RECORDING (file3_costmap.mp4) ---
+from compliance_profile import LOG_DIR
+video_dir = os.path.join(LOG_DIR, "video")
+os.makedirs(video_dir, exist_ok=True)
+file3_costmap_path = os.path.join(video_dir, "file3_costmap.mp4")
+video_writer = None
+video_writer_lock = threading.Lock()
+
+def init_video_writer():
+    """Initialize video writer for costmap recording."""
+    global video_writer
+    with video_writer_lock:
+        if video_writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video_writer = cv2.VideoWriter(file3_costmap_path, fourcc, 10.0, (MAP_SIZE, MAP_SIZE))
+            if video_writer.isOpened():
+                print(f"📹 [LIDAR] Video recording started: {file3_costmap_path}")
+                _lidar_dbg.info("video_recording_started path=%s", file3_costmap_path)
+            else:
+                print(f"❌ [LIDAR] Video recording failed: {file3_costmap_path}")
+                video_writer = None
+
+def write_video_frame(frame):
+    """Write frame to video if writer is active."""
+    with video_writer_lock:
+        if video_writer is not None and video_writer.isOpened():
+            try:
+                video_writer.write(frame)
+            except Exception as e:
+                _lidar_dbg.warning("video_write_failed error=%s", str(e))
+
+def close_video_writer():
+    """Close video writer and finalize video file."""
+    global video_writer
+    with video_writer_lock:
+        if video_writer is not None:
+            video_writer.release()
+            print(f"✅ [LIDAR] Video recording saved: {file3_costmap_path}")
+            _lidar_dbg.info("video_recording_stopped path=%s", file3_costmap_path)
+            video_writer = None
 
 
 def _read_vehicle_pose():
@@ -105,6 +152,8 @@ class LidarMapper(Node):
         self.last_msg_time = time.time()
         SIMULATION_MODE = False
         self._scan_cb_n += 1
+        if self._scan_cb_n % 100 == 1:
+            rl.debug("lidar_scan_received", scan_count=self._scan_cb_n, range_count=len(msg.ranges))
         
         # Pozisyon Bilgisi Al (Dünya koordinatları için)
         pos_x, pos_y, hdg = _read_vehicle_pose()
@@ -222,6 +271,9 @@ class LidarMapper(Node):
 
         with lock:
             output_frame = img
+        
+        # Video recording (file3_costmap.mp4)
+        write_video_frame(img)
 
 def get_simulated_map():
     """Lidar verisi yoksa rastgele dönen noktalar üret (dashboard ile aynı coordinate system)"""
@@ -259,6 +311,7 @@ def get_simulated_map():
 def ros_thread():
     global SIMULATION_MODE, output_frame
     rclpy.init()
+    init_video_writer()
     node = None
     try:
         node = LidarMapper()
@@ -284,6 +337,7 @@ def ros_thread():
                 SIMULATION_MODE = True
                 if not node._scan_timeout_logged:
                     node._scan_timeout_logged = True
+                    rl.warn("lidar_timeout", timeout_s=3.0, reason="no_scan_data")
                     log_jsonl(
                         "lidar_map",
                         False,
@@ -326,6 +380,7 @@ def ros_thread():
                 output_frame = get_simulated_map()
             time.sleep(0.05)
     finally:
+        close_video_writer()
         if node: node.destroy_node()
         rclpy.shutdown()
 
@@ -361,10 +416,17 @@ if __name__ == "__main__":
         usv_mode=str(USV_MODE),
     )
 
+    rl.info("service_init_complete", web_port=int(WEB_PORT), usv_mode=str(USV_MODE))
     clean_port(WEB_PORT)
     t = threading.Thread(target=ros_thread)
     t.daemon = True
     t.start()
     
     print(f"🌍 HARİTA ARAYÜZÜ BAŞLATILIYOR: http://0.0.0.0:{WEB_PORT}")
-    app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)
+    try:
+        app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)
+    except KeyboardInterrupt:
+        rl.info("shutdown_requested", reason="keyboard_interrupt")
+    finally:
+        close_video_writer()
+        rl.info("shutdown_complete")

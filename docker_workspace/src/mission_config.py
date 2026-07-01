@@ -465,7 +465,6 @@ def default_sim_mission(base_lat: float, base_lon: float) -> list[list[float]]:
         xy_to_gps(2.5, 10.5),
         xy_to_gps(0.0, 14.0),
         xy_to_gps(0.0, 27.0),
-        xy_to_gps(-3.0, 29.8),
     ]
 
 

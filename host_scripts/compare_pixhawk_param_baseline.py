@@ -34,7 +34,7 @@ RISK_REGISTRY: dict[str, dict[str, str]] = {
         "risk_id": "RISK-ARMING-NO-PREARM",
         "default_hint": "1 (pre-arm checks enabled)",
         "race_note": "Manual-test baseline disables checks; race requires certified E-stop chain or re-enabled checks.",
-        "race_profile_suggestion": "1 for race pre-arm, or keep 0 with signed physical E-stop cert (see documents/race_cert_pixhawk_arming_failsafe.md).",
+        "race_profile_suggestion": "1 for race pre-arm, or keep 0 only with documented physical E-stop/contactor validation in README + working-system docs.",
     },
     "ARMING_REQUIRE": {
         "risk_level": "HIGH",
@@ -55,7 +55,7 @@ RISK_REGISTRY: dict[str, dict[str, str]] = {
         "risk_id": "RISK-FAILSAFE-GCS-DISABLED",
         "default_hint": "1 (GCS heartbeat failsafe)",
         "race_note": "GCS failsafe off; acceptable if race forbids mission telecommand except upload.",
-        "race_profile_suggestion": "Keep 0 for race if GCS link is monitoring-only; document in race cert.",
+        "race_profile_suggestion": "Keep 0 for race if GCS link is monitoring-only; document in README/operator procedure.",
     },
     "BATT_FS_LOW_ACT": {
         "risk_level": "HIGH",
@@ -104,7 +104,7 @@ RISK_REGISTRY: dict[str, dict[str, str]] = {
         "risk_id": "RISK-SERVO1-FUNCTION",
         "default_hint": "frame dependent (ThrottleLeft=74)",
         "race_note": "Must match left motor on real boat.",
-        "race_profile_suggestion": "74 left throttle per documents/servo_mapping_water_test_plan.md sign-off.",
+        "race_profile_suggestion": "74 left throttle after water-test sign-off recorded in README/operator procedure.",
     },
     "SERVO3_FUNCTION": {
         "risk_level": "MEDIUM",
@@ -138,7 +138,7 @@ RISK_REGISTRY: dict[str, dict[str, str]] = {
         "risk_id": "RISK-FS-ACTION",
         "default_hint": "2 (RTL/HOLD class action)",
         "race_note": "Failsafe action when enabled.",
-        "race_profile_suggestion": "Document chosen action in race cert; prefer HOLD near obstacles.",
+        "race_profile_suggestion": "Document chosen action in README/operator procedure; prefer HOLD near obstacles.",
     },
     "FS_EKF_ACTION": {
         "risk_level": "MEDIUM",
@@ -226,9 +226,10 @@ def build_report(current_path: Path, defaults_path: Path | None) -> dict[str, An
     race_profile = {
         "baseline_file": str(current_path),
         "reference_defaults_file": str(defaults_path) if defaults_path else None,
-        "cert_documents": [
-            "documents/race_cert_pixhawk_arming_failsafe.md",
-            "documents/servo_mapping_water_test_plan.md",
+        "reference_documents": [
+            "documents/ida_sartname.md",
+            "documents/rapor_calismasistemi.md",
+            "README.md",
         ],
         "recommendations": [
             "Complete servo mapping water test before changing SERVO* or FRAME_* params.",

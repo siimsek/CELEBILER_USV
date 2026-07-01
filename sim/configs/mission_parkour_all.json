@@ -19,10 +19,6 @@
     [
       -35.3630195,
       149.165237
-    ],
-    [
-      -35.3629943,
-      149.165204
     ]
   ],
   "mission_profile": {
@@ -36,7 +32,7 @@
       "p3_entry_source": "target_color_lock"
     },
     "p2_min_gate_count": 2,
-    "p3_engagement_mode": "vision_color_track_with_gps_fallback",
+    "p3_engagement_mode": "vision_color_track",
     "p1_waypoint_count": 4,
     "parkur_ranges": {
       "p1": {
@@ -49,7 +45,7 @@
       },
       "p3": {
         "start_index": 5,
-        "end_index": 6
+        "end_index": 5
       }
     }
   }

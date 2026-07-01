@@ -26,6 +26,10 @@ from compliance_profile import USV_MODE, USV_MODE_RACE
 log = setup_component_logger("ros_to_tcp_cam", prefer_simulation=True)
 redirect_std_streams(log)
 
+from run_logger import get_run_logger
+_rl_cam = get_run_logger(component="ros_to_tcp_cam")
+_rl_cam.info("service_init_begin", port=8888)
+
 # --- RACE MODE GUARD: Image transmission prohibited in race mode ---
 if USV_MODE == USV_MODE_RACE:
     print("[RACE] [ros_to_tcp_cam.py] Race mode: camera stream disabled, exiting.")
@@ -198,4 +202,6 @@ install_module_function_tracing(
 )
 
 if __name__ == '__main__':
+    _rl_cam.info("service_init_complete", port=8888)
     main()
+    _rl_cam.info("shutdown_complete")

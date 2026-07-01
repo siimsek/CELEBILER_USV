@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import math
 
 from motor_controller import mix_twin_thrusters
-from navigation import clamp_heading_error, heading_first_waypoint_request
+from navigation import adaptive_l1_waypoint_request, clamp_heading_error, heading_first_waypoint_request
 
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
@@ -129,12 +129,12 @@ def compute_nav_decision(
             1.0,
         )
 
-    waypoint_request = heading_first_waypoint_request(
+    waypoint_request = adaptive_l1_waypoint_request(
         distance_m=distance_m,
         heading_error_deg=nominal_heading,
         cruise_speed_mps=base_speed_mps,
         approach_speed_mps=min(float(base_speed_mps), float(failsafe_slow_mps)),
-        slow_down_radius_m=8.0,
+        current_speed_mps=base_speed_mps,
     )
     heading_error = clamp_heading_error(float(waypoint_request.heading_error_deg))
     speed = max(0.0, float(waypoint_request.speed_mps))

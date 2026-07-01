@@ -62,6 +62,7 @@ def main() -> int:
         "p3_target_lock_verified_before_engage": has(usv, "def _validate_p3_target_lock") and has(usv, "p3_target_color_lock_rejected") and has(usv, "target_color_changed_after_start"),
         "p3_contact_requires_multi_cue_quorum": has(usv, "def _p3_contact_evidence") and has(usv, "primary_source_count") and has(usv, "P3_CONTACT_LATCH") and has(usv, "len(primary_sources) >= 2"),
         "p3_wrong_target_blocks_contact_latch": has(usv, 'if not evidence["wrong_target_contact_risk"]') and has(usv, "wrong_target_area_norm") and has(usv, "wrong_target_bearing_deg"),
+        "p3_ts3_wrong_target_counter_exported": has(usv, "def _update_p3_wrong_target_ts3") and has(usv, '"p3_ts3":') and has(usv, '"p3_wrong_target_contact_count":') and has(usv, "P3_TS3_WRONG_TARGET_RISK_") and has(usv, "p3_contact_latch_blocked"),
         "startup_wait_is_probe_based": has(sim_stack, "probe_camera_endpoint") and not has(sim_stack, "sleep 12"),
         "shared_sim_nav_source_used": has(usv, "load_sim_nav_state(control_dir=CONTROL_DIR)") and has(telemetry, "load_sim_nav_state(control_dir=CONTROL_DIR)"),
         "sim_forced_sensor_ready_removed": not has(usv, "self.camera_ready = True") and not has(usv, "self.lidar_ready = True"),

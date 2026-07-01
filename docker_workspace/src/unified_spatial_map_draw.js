@@ -19,10 +19,32 @@ function drawUnifiedSpatialMap(canvas, payload) {
     const trail = (payload.trail && Array.isArray(payload.trail.points)) ? payload.trail.points : [];
     const wps = Array.isArray(payload.waypoints) ? payload.waypoints : [];
     const lidarPts = (payload.lidar && Array.isArray(payload.lidar.points)) ? payload.lidar.points : [];
+    const lidarCellsRaw = (payload.lidar && Array.isArray(payload.lidar.occupancy_cells)) ? payload.lidar.occupancy_cells : [];
     const course = payload.course || {};
     const staticFeatures = Array.isArray(course.static_features) ? course.static_features : [];
     const bounds = payload.bounds || null;
     const lidarWorldPts = lidarPts.filter(p => Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]));
+    const lidarCells = [];
+    for (const c of lidarCellsRaw) {
+        if (!c || typeof c !== 'object') continue;
+        const x = Number(c.x);
+        const y = Number(c.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        let confidence = Number(c.confidence);
+        if (!Number.isFinite(confidence)) {
+            const stable = Math.max(0, Number(c.stable_count || 0));
+            const hits = Math.max(0, Number(c.hit_count || 0));
+            confidence = Math.min(1, (stable / 8.0) * 0.55 + (hits / 12.0) * 0.45);
+        }
+        lidarCells.push({
+            x,
+            y,
+            confidence: Math.max(0, Math.min(1, confidence)),
+            stable_count: Math.max(0, Number(c.stable_count || 0)),
+            hit_count: Math.max(0, Number(c.hit_count || 0)),
+            persistence: String(c.persistence || '')
+        });
+    }
     const corridor = payload.traversable_corridor || {};
     const corridorCandidates = Array.isArray(corridor.candidates) ? corridor.candidates : [];
     const corridorLookahead = Number(corridor.lookahead_m || 7.0);
@@ -40,6 +62,14 @@ function drawUnifiedSpatialMap(canvas, payload) {
     for (const p of trail) if (Array.isArray(p) && p.length >= 2) allPts.push([Number(p[0]), Number(p[1])]);
     for (const w of wps) allPts.push([Number(w.x_m || 0), Number(w.y_m || 0)]);
     for (const p of lidarWorldPts) allPts.push([Number(p[0]), Number(p[1])]);
+    for (const c of lidarCells) allPts.push([Number(c.x), Number(c.y)]);
+    const obstacleLandmarks = Array.isArray(payload.obstacle_landmarks) ? payload.obstacle_landmarks : 
+                              (payload.lidar && Array.isArray(payload.lidar.landmarks) ? payload.lidar.landmarks : []);
+    for (const lm of obstacleLandmarks) {
+        if (lm && Number.isFinite(Number(lm.centroid_east_m)) && Number.isFinite(Number(lm.centroid_north_m))) {
+            allPts.push([Number(lm.centroid_east_m), Number(lm.centroid_north_m)]);
+        }
+    }
     for (const f of staticFeatures) allPts.push([Number(f.x_m || 0), Number(f.y_m || 0)]);
     if (boat) allPts.push([Number(boat.x_m || 0), Number(boat.y_m || 0)]);
     if (boat && corridor && corridor.stale !== true) {
@@ -127,10 +157,79 @@ function drawUnifiedSpatialMap(canvas, payload) {
     let lidarAlpha = 0.65;
     if (lidarStale) lidarAlpha = 0.35;
     else if (lidarAge != null && lidarAge > 0.35) lidarAlpha = 0.35;
-    ctx.fillStyle = `rgba(56,189,248,${lidarAlpha})`;
-    for (const p of lidarWorldPts) {
-        const q = toPx(Number(p[0]), Number(p[1]));
-        ctx.fillRect(q[0] - 1, q[1] - 1, 2, 2);
+    if (lidarCells.length > 0) {
+        for (const c of lidarCells) {
+            const q = toPx(Number(c.x), Number(c.y));
+            const conf = Math.max(0, Math.min(1, Number(c.confidence || 0)));
+            const persistent = c.persistence === 'persistent';
+            const radius = Math.max(1.5, Math.min(6.0, 1.4 + (conf * 4.4)));
+            const alpha = Math.max(0.16, Math.min(0.92, lidarAlpha * (0.30 + conf * 0.90)));
+            ctx.fillStyle = persistent ? `rgba(14,165,233,${alpha})` : `rgba(56,189,248,${alpha})`;
+            ctx.beginPath();
+            ctx.arc(q[0], q[1], radius, 0, Math.PI * 2);
+            ctx.fill();
+            if (conf >= 0.72) {
+                ctx.strokeStyle = `rgba(186,230,253,${Math.min(0.75, alpha + 0.10)})`;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.arc(q[0], q[1], radius + 1.0, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+    } else {
+        ctx.fillStyle = `rgba(56,189,248,${lidarAlpha})`;
+        for (const p of lidarWorldPts) {
+            const q = toPx(Number(p[0]), Number(p[1]));
+            ctx.fillRect(q[0] - 1, q[1] - 1, 2, 2);
+        }
+    }
+
+    // ----------------------------------------------------
+    // Draw Obstacle Landmarks
+    // ----------------------------------------------------
+    if (obstacleLandmarks && obstacleLandmarks.length > 0) {
+        for (const lm of obstacleLandmarks) {
+            const cx_lm = Number(lm.centroid_east_m);
+            const cy_lm = Number(lm.centroid_north_m);
+            const px_lm = Number(lm.peak_east_m);
+            const py_lm = Number(lm.peak_north_m);
+            const r_m = Math.max(0.5, Number(lm.radius_m || 1.0));
+            const conf = Math.max(0, Math.min(1, Number(lm.confidence || 0)));
+            
+            if (!Number.isFinite(cx_lm) || !Number.isFinite(cy_lm)) continue;
+
+            // 1. Draw Heatmap/Density Halo
+            const centerPx = toPx(cx_lm, cy_lm);
+            const radiusPx = r_m * scale;
+            
+            const grad = ctx.createRadialGradient(centerPx[0], centerPx[1], 1, centerPx[0], centerPx[1], Math.max(5, radiusPx));
+            grad.addColorStop(0, `rgba(239, 68, 68, ${conf * 0.4})`);      // rose-500
+            grad.addColorStop(0.5, `rgba(244, 63, 94, ${conf * 0.15})`);
+            grad.addColorStop(1, 'rgba(239, 68, 68, 0)');
+            
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(centerPx[0], centerPx[1], Math.max(5, radiusPx), 0, Math.PI * 2);
+            ctx.fill();
+
+            // 2. Draw Landmark Center (Centroid)
+            ctx.fillStyle = '#f43f5e'; // rose-500
+            ctx.beginPath();
+            ctx.arc(centerPx[0], centerPx[1], 3.0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // 3. Draw Peak Point
+            if (Number.isFinite(px_lm) && Number.isFinite(py_lm)) {
+                const peakPx = toPx(px_lm, py_lm);
+                ctx.fillStyle = '#facc15'; // amber-400
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.arc(peakPx[0], peakPx[1], 2.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+            }
+        }
     }
 
     if (boat && corridor && corridor.enabled !== false && corridor.stale !== true) {

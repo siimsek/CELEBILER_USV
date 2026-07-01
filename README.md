@@ -132,6 +132,8 @@ Manuel kontrol ve E-stop her zaman otonomiden onceliklidir. Fiziksel guc kesme z
 
 PWM araligi: `PWM_NEUTRAL_US=1500`, min 1100, max 1900. RC override ana otonomi yolu degildir.
 
+Pixhawk param baseline: `config/pixhawk_ida.param` mevcut manuel surus referansidir. Bu baseline'da `ARMING_CHECK=0`, `ARMING_REQUIRE=0` ve bazi Pixhawk native failsafe'leri kapali olabilir; yaris/otonom su testi oncesi fiziksel E-stop/kontaktor zinciri veya Pixhawk pre-arm/failsafe profiliyle dogrulanir. `SERVO1/3` motor eslesmesi ve `1100/1500/1900` PWM araligi su ustu test ile onaylanmadan degistirilmez.
+
 Yaris konfigurasyonu: Race modunda `USV_RACE_P1_AUTO_WAYPOINTS` ortam degiskeni ile P1 parkurundaki kac waypoint'in Pixhawk AUTO'da calistirilacagi belirtilmelidir. Varsayilan 1'dir; bu birden fazla waypoint varsa P2'ye erken gecise neden olabilir.
 
 ---
@@ -176,10 +178,10 @@ Loglar, gorev sonrasi analiz ve sistem dogrulama icin kullanilir. Yaris modunda 
 
 Operasyon ve dogrulama akislari icin proje kurallari takip edilir:
 
-- Ana otomasyon ve kontrol sahipligi icin `OTOMASYON.md`
 - Ajan, gelistirme ve test kurallari icin `AGENTS.md`
 - Sistem calisma ozeti icin `documents/rapor_calismasistemi.md`
 - Yaris sartname uyumu icin `documents/ida_sartname.md`
+- Kontrol sahipligi ve operasyon ozeti icin bu README
 - Host/sim baslatma ve dogrulama akislarinda ilgili betikler
 
 Otomatik gorev baslatan simulasyon veya hareket testleri operator kontrolu olmadan calistirilmaz. Kod ve dokuman degisikliklerinden sonra proje dogrulama betikleriyle uyum kontrolu yapilir.
@@ -190,14 +192,13 @@ Otomatik gorev baslatan simulasyon veya hareket testleri operator kontrolu olmad
 
 | Dizin/Dosya | Genel Icerik |
 |---|---|
-| `documents/` | Sartname, calisma sistemi ve destek dokumanlari |
+| `documents/` | Sartname ve calisma sistemi dokumanlari |
 | `config/` | Sistem ve Pixhawk konfigurasyon dosyalari |
 | `docker_workspace/` | Arac uzerinde calisan runtime yazilimlari |
 | `host_scripts/` | Host baslatma, durdurma ve dogrulama araclari |
 | `sim/` | Simulasyon ortami, kopruler ve sim konfigurasyonlari |
 | `logs/` | Sistem, host ve simulasyon loglari |
 | `AGENTS.md` | Proje ajan ve otomasyon kurallari |
-| `OTOMASYON.md` | Ana otomasyon mimarisi ve operasyon sozlesmesi |
 
 ---
 

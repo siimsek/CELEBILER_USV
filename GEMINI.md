@@ -9,10 +9,10 @@ Primary architecture references, in order:
 1. `documents/ida_sartname.md`
 2. `documents/rapor_calismasistemi.md`
 3. `host_scripts/` startup/stop/compliance flows
-4. `OTOMASYON.md`
+4. `README.md`
 5. `AGENTS.md` and this file
 
-`OTOMASYON.md` is the current operating architecture for sim-first behavior, control ownership, mission lifecycle, P3 engagement, and sim-to-real calibration.
+The current operating architecture for sim-first behavior, control ownership, mission lifecycle, P3 engagement, and sim-to-real calibration is kept in the two documents above, the main README, and executable host/sim scripts.
 
 ### Key Components:
 - **`usv_main.py`**: The central "brain" and state machine. It handles autonomous logic, MAVLink communication with Pixhawk (ArduRover), and mission orchestration.
@@ -57,7 +57,6 @@ Primary architecture references, in order:
 - Use `INNOVATION_SWITCHES` in `compliance_profile.py` to toggle advanced features (Sensor Fusion, Horizon Lock, etc.).
 
 ### 2. Architecture & Modularity
-- Follow the guidelines in `documents/module_boundaries.md`.
 - Keep `usv_main.py` focused on orchestration; move heavy math to `nav_guidance.py`.
 - Use `json_atomic.py` for file-based IPC to ensure data integrity.
 
@@ -86,7 +85,7 @@ Primary architecture references, in order:
 - `RC_CHANNELS_OVERRIDE` is not the normal autonomy path. It is limited to manual/safety/bench contexts; race autonomy must not use it.
 - If GUIDED setpoint delivery fails, Raspberry Pi must enter `HOLD`/failsafe semantics instead of falling back to RC override.
 
-### 7. OTOMASYON.md Control Ownership
+### 7. Control Ownership
 - P1: Pixhawk `AUTO` mission execution; Pi monitors health, mission progress, logs, and failsafe.
 - P2: Pi performs sensor fusion, waypoint/gate/avoidance decisions, and sends GUIDED setpoints; Pixhawk produces PWM.
 - P3: Pi performs locked target color tracking and wrong-target avoidance, then sends GUIDED setpoints; Pixhawk produces PWM.

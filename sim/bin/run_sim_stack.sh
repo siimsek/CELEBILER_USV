@@ -6,6 +6,7 @@
 # sitl.log icinde "Closed connection on SERIAL0" / "Exitting" genelde onceki istemci kopmasi veya
 # yeniden baglanma anidir; tek basina hata sayilmaz. Konum sicramasi: pose koprusu + ilk NED birlikte ele alinir.
 set -euo pipefail
+set +m 2>/dev/null || true
 
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJ_ROOT"
@@ -18,6 +19,11 @@ fi
 ROOT_LOG_DIR="$PROJ_ROOT/logs"
 export USV_LOG_ROOT="$ROOT_LOG_DIR"
 TERMINAL_LOG_FILE="$ROOT_LOG_DIR/terminal.log"
+UI_TTY=0
+if [ -t 1 ]; then
+    exec 3>&1
+    UI_TTY=1
+fi
 
 prepare_latest_log_session() {
     rm -rf "$ROOT_LOG_DIR"
@@ -28,7 +34,108 @@ prepare_latest_log_session
 : > "$TERMINAL_LOG_FILE"
 exec > >(tee -a "$TERMINAL_LOG_FILE") 2>&1
 
-echo "[SIM] Terminal log: $TERMINAL_LOG_FILE"
+UI_STEP=0
+UI_COLOR=0
+if [ "$UI_TTY" = "1" ] && [ -z "${NO_COLOR:-}" ] && [ "${SIM_UI_COLOR:-1}" != "0" ]; then
+    UI_COLOR=1
+fi
+if [ "$UI_COLOR" = "1" ]; then
+    UI_RESET=$'\033[0m'
+    UI_DIM=$'\033[2m'
+    UI_BOLD=$'\033[1m'
+    UI_BLUE=$'\033[34m'
+    UI_GREEN=$'\033[32m'
+    UI_YELLOW=$'\033[33m'
+    UI_RED=$'\033[31m'
+    UI_CYAN=$'\033[36m'
+else
+    UI_RESET=""
+    UI_DIM=""
+    UI_BOLD=""
+    UI_BLUE=""
+    UI_GREEN=""
+    UI_YELLOW=""
+    UI_RED=""
+    UI_CYAN=""
+fi
+
+relpath() {
+    local path="${1:-}"
+    if [[ "$path" == "$PROJ_ROOT"* ]]; then
+        printf ".%s" "${path#"$PROJ_ROOT"}"
+    else
+        printf "%s" "$path"
+    fi
+}
+
+ui_emit() {
+    local plain="$1"
+    local styled="${2:-$1}"
+    if [ "${SIM_UI:-pretty}" = "plain" ]; then
+        printf "%s\n" "$plain"
+        return
+    fi
+    if [ "$UI_TTY" = "1" ]; then
+        printf "%b\n" "$styled" >&3
+        printf "%s\n" "$plain" >> "$TERMINAL_LOG_FILE"
+    else
+        printf "%s\n" "$plain"
+    fi
+}
+
+ui_blank() {
+    ui_emit ""
+}
+
+ui_banner() {
+    local title="$1"
+    ui_emit "=============================================================================="
+    ui_emit "  $title" "${UI_BOLD}${UI_CYAN}  $title${UI_RESET}"
+    ui_emit "=============================================================================="
+}
+
+ui_step() {
+    UI_STEP=$((UI_STEP + 1))
+    local label
+    printf -v label "%02d" "$UI_STEP"
+    ui_emit "[STEP $label] $1" "${UI_BLUE}${UI_BOLD}[STEP $label]${UI_RESET} $1"
+}
+
+ui_ok() {
+    ui_emit "[OK] $1" "${UI_GREEN}[OK]${UI_RESET} $1"
+}
+
+ui_warn() {
+    ui_emit "[WARN] $1" "${UI_YELLOW}[WARN]${UI_RESET} $1"
+}
+
+ui_error() {
+    ui_emit "[ERROR] $1" "${UI_RED}[ERROR]${UI_RESET} $1"
+}
+
+ui_info() {
+    ui_emit "[INFO] $1" "${UI_DIM}[INFO]${UI_RESET} $1"
+}
+
+ui_kv() {
+    local key="$1"
+    local value="$2"
+    ui_emit "  $(printf '%-18s' "$key") $value" "${UI_DIM}  $(printf '%-18s' "$key")${UI_RESET} $value"
+}
+
+ui_live_clear() {
+    if [ "$UI_TTY" = "1" ] && [ "${SIM_UI:-pretty}" != "plain" ]; then
+        printf "\r\033[K" >&3
+    fi
+}
+
+run_line_buffered() {
+    if command -v stdbuf >/dev/null 2>&1; then
+        stdbuf -oL -eL "$@"
+    else
+        "$@"
+    fi
+}
 
 # Load ROS2 environment for rclpy, ros_gz_bridge
 # Note: ROS2 setup.bash has undefined variables, so temporarily disable -u
@@ -42,19 +149,18 @@ fi
 export IGN_GAZEBO_RESOURCE_PATH="$PROJ_ROOT/sim/models${IGN_GAZEBO_RESOURCE_PATH:+:$IGN_GAZEBO_RESOURCE_PATH}"
 export GZ_SIM_RESOURCE_PATH="$PROJ_ROOT/sim/models${GZ_SIM_RESOURCE_PATH:+:$GZ_SIM_RESOURCE_PATH}"
 export SDF_PATH="$PROJ_ROOT/sim/models${SDF_PATH:+:$SDF_PATH}"
-echo "[SIM] Gazebo resource paths configured"
 
 # CLI argument parsing
 while [ $# -gt 0 ]; do
     case "$1" in
         --auto-test)
-            echo "[ERROR] --auto-test kaldırıldı; otomatik görev başlatma ve motion doğrulaması ajan/otomasyon tarafından çalıştırılamaz."
+            ui_error "--auto-test kaldırıldı; otomatik görev başlatma ve motion doğrulaması ajan/otomasyon tarafından çalıştırılamaz."
             exit 2
             ;;
         mode=*)
             USV_MODE="${1#mode=}"
             if [ "$USV_MODE" != "race" ] && [ "$USV_MODE" != "test" ]; then
-                echo "[ERROR] Gecersiz mode=$USV_MODE; beklenen test veya race."
+                ui_error "Gecersiz mode=$USV_MODE; beklenen test veya race."
                 exit 2
             fi
             export USV_MODE
@@ -69,7 +175,7 @@ while [ $# -gt 0 ]; do
             if [ -f "$1" ]; then
                 MISSION_FILE="$1"
             else
-                echo "[ERROR] Bilinmeyen arguman veya bulunamayan mission dosyasi: $1"
+                ui_error "Bilinmeyen arguman veya bulunamayan mission dosyasi: $1"
                 exit 2
             fi
             shift
@@ -84,15 +190,22 @@ fi
 export PROJ_ROOT
 export USV_SIM=1
 export USV_MODE="${USV_MODE:-test}"
+export MISSION_FILE="${MISSION_FILE:-$PROJ_ROOT/sim/configs/mission_parkour_all.json}"
 export PYTHONUNBUFFERED=1
 export PATH="$PATH:$HOME/ardupilot/Tools/autotest"
 
+ui_banner "CELEBILER USV Simulation Stack"
+ui_kv "Mode" "$USV_MODE"
+ui_kv "Mission" "$(relpath "${MISSION_FILE:-$PROJ_ROOT/sim/configs/mission_parkour_all.json}")"
+ui_kv "Terminal log" "$(relpath "$TERMINAL_LOG_FILE")"
+ui_ok "Gazebo resource paths configured"
+
 if [ "${USV_USE_RC_OVERRIDE:-}" = "1" ]; then
-    echo "[ERROR] Simulasyonda USV_USE_RC_OVERRIDE=1 yasak; sim her zaman race-like ArduPilot PWM yolu kullanmali."
+    ui_error "Simulasyonda USV_USE_RC_OVERRIDE=1 yasak; sim her zaman race-like ArduPilot PWM yolu kullanmali."
     exit 2
 fi
 if [ "${SIM_GZ_ALLOW_MOTOR_COMMAND_JSON:-}" = "1" ]; then
-    echo "[ERROR] Simulasyonda SIM_GZ_ALLOW_MOTOR_COMMAND_JSON=1 yasak; motor kaynagi SITL servo olmali."
+    ui_error "Simulasyonda SIM_GZ_ALLOW_MOTOR_COMMAND_JSON=1 yasak; motor kaynagi SITL servo olmali."
     exit 2
 fi
 
@@ -212,11 +325,11 @@ wait_for_tcp_port() {
     local deadline=$((SECONDS + timeout_s))
     while true; do
         if (echo > "/dev/tcp/${host}/${port}") >/dev/null 2>&1; then
-            echo "[SIM] Ready: $label (${host}:${port})"
+            ui_ok "$label ready (${host}:${port})"
             return 0
         fi
         if [ "$SECONDS" -ge "$deadline" ]; then
-            echo "[WARN] Timeout waiting for $label (${host}:${port})"
+            ui_warn "Timeout waiting for $label (${host}:${port})"
             return 1
         fi
         sleep 0.2
@@ -242,7 +355,7 @@ while time.monotonic() < deadline:
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=1.0) as resp:
             if int(getattr(resp, "status", 200) or 200) < 500:
-                print(f"[SIM] Ready: {label} ({url})")
+                print(f"[OK] {label} ready ({url})")
                 raise SystemExit(0)
     except Exception as exc:
         last_error = str(exc)
@@ -259,11 +372,11 @@ wait_for_process_alive() {
     local deadline=$((SECONDS + timeout_s))
     while true; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            echo "[SIM] Ready: $label process pid=$pid"
+            ui_ok "$label process ready (pid=$pid)"
             return 0
         fi
         if [ "$SECONDS" -ge "$deadline" ]; then
-            echo "[WARN] Timeout waiting for $label process pid=$pid"
+            ui_warn "Timeout waiting for $label process pid=$pid"
             return 1
         fi
         sleep 0.2
@@ -278,11 +391,11 @@ wait_for_log_pattern() {
     local deadline=$((SECONDS + timeout_s))
     while true; do
         if [ -f "$file" ] && grep -Eq "$pattern" "$file" 2>/dev/null; then
-            echo "[SIM] Ready: $label ($file)"
+            ui_ok "$label log ready ($(relpath "$file"))"
             return 0
         fi
         if [ "$SECONDS" -ge "$deadline" ]; then
-            echo "[WARN] Timeout waiting for $label log pattern '$pattern' in $file"
+            ui_warn "Timeout waiting for $label log pattern '$pattern' in $(relpath "$file")"
             return 1
         fi
         sleep 0.2
@@ -295,16 +408,16 @@ wait_for_ros_topic() {
     local timeout_s="${3:-20}"
     local deadline=$((SECONDS + timeout_s))
     if ! command -v ros2 >/dev/null 2>&1; then
-        echo "[WARN] ros2 CLI unavailable; cannot probe $label topic $topic"
+        ui_warn "ros2 CLI unavailable; cannot probe $label topic $topic"
         return 1
     fi
     while true; do
         if ros2 topic list 2>/dev/null | grep -qx "$topic"; then
-            echo "[SIM] Ready: $label topic $topic"
+            ui_ok "$label topic ready ($topic)"
             return 0
         fi
         if [ "$SECONDS" -ge "$deadline" ]; then
-            echo "[WARN] Timeout waiting for $label topic $topic"
+            ui_warn "Timeout waiting for $label topic $topic"
             return 1
         fi
         sleep 0.5
@@ -327,7 +440,7 @@ while time.monotonic() < deadline:
     try:
         age = time.time() - os.path.getmtime(path)
         if os.path.getsize(path) > 0 and age <= max_age_s:
-            print(f"[SIM] Ready: {label} ({path}, age={age:.2f}s)")
+            print(f"[OK] {label} fresh ({path}, age={age:.2f}s)")
             raise SystemExit(0)
     except OSError:
         pass
@@ -449,8 +562,89 @@ sys.exit(1)
 PY
 }
 
+print_stack_card() {
+    ui_blank
+    ui_banner "Stack Ready"
+    ui_kv "Dashboard" "http://127.0.0.1:8080/dashboard"
+    ui_kv "Telemetry API" "http://127.0.0.1:8080/api/data"
+    if [ "${USV_MODE:-test}" != "race" ]; then
+        ui_kv "Lidar map" "http://127.0.0.1:5001/"
+    fi
+    ui_kv "Mission Planner" "UDP 14552"
+    ui_kv "Start" "test: dashboard/API, race: RC CH5"
+    ui_kv "Stop" "ESC or q in this terminal"
+}
+
+print_log_shortcuts() {
+    ui_blank
+    ui_banner "Log Shortcuts"
+    ui_kv "Terminal" "$(relpath "$TERMINAL_LOG_FILE")"
+    ui_kv "System logs" "$(relpath "$LOG_DIR")"
+    ui_kv "Simulation logs" "$(relpath "$SIM_LOG_DIR")"
+    ui_kv "Main service" "$(relpath "$LOG_DIR/usv_main.log")"
+    ui_kv "Telemetry" "$(relpath "$LOG_DIR/telemetry.log")"
+    ui_kv "Camera" "$(relpath "$LOG_DIR/cam.log")"
+    ui_kv "Lidar" "$(relpath "$LOG_DIR/lidar_map.log")"
+    ui_kv "SITL" "$(relpath "$SIM_LOG_DIR/sitl.log")"
+}
+
+render_live_status() {
+    python3 - "$USV_MODE" <<'PY'
+import json
+import sys
+import urllib.request
+
+mode = sys.argv[1]
+try:
+    req = urllib.request.Request("http://127.0.0.1:8080/api/data", method="GET")
+    with urllib.request.urlopen(req, timeout=0.5) as response:
+        data = json.load(response)
+except Exception as exc:
+    print(f"api=down error={str(exc)[:42]}")
+    raise SystemExit(0)
+
+def flag(name):
+    return "ok" if bool(data.get(name)) else "--"
+
+mission_active = bool(data.get("mission_active", False))
+ready = "READY" if bool(data.get("ready_state")) else "WAIT"
+phase = str(data.get("start_phase") or data.get("mission_lifecycle") or "idle")
+state = str(data.get("state_name") or data.get("state") or data.get("mission_state") or "-")
+reason = str(data.get("mission_end_reason") or data.get("hold_reason") or "none")
+wp = data.get("waypoint_index", data.get("wp_index", "-"))
+wp_total = data.get("waypoint_count", data.get("wp_count", "-"))
+speed = data.get("speed_mps", data.get("Speed", data.get("groundspeed_mps", 0.0)))
+try:
+    speed_text = f"{float(speed):.2f}m/s"
+except Exception:
+    speed_text = str(speed)
+print(
+    f"{ready} mode={mode} active={'yes' if mission_active else 'no'} "
+    f"phase={phase} state={state} cam={flag('camera_ready')} lidar={flag('lidar_ready')} "
+    f"wp={wp}/{wp_total} v={speed_text} reason={reason}"
+)
+PY
+}
+
+ui_live_status() {
+    local line="$1"
+    local hint="h help | l logs | s snapshot | q/ESC stop"
+    if [ "$UI_TTY" = "1" ] && [ "${SIM_UI:-pretty}" != "plain" ]; then
+        printf "\r\033[K%b" "${UI_CYAN}[LIVE]${UI_RESET} $line ${UI_DIM}($hint)${UI_RESET}" >&3
+    else
+        ui_info "LIVE $line"
+    fi
+}
+
+print_status_snapshot() {
+    ui_live_clear
+    local line
+    line="$(render_live_status)"
+    ui_emit "[STATUS] $line" "${UI_CYAN}[STATUS]${UI_RESET} $line"
+}
+
 stop_stale_stack() {
-    echo "[SIM] Cleaning stale simulation processes..."
+    ui_step "Cleaning stale simulation processes"
     kill_stale_launchers
     for pattern in "${STALE_PATTERNS[@]}"; do
         kill_matching_pattern "$pattern" TERM
@@ -467,11 +661,12 @@ stop_stale_stack() {
     kill_stale_ports
     ensure_endpoints_released || true
     rm -f "$CAM_PID_FILE" "$TELEMETRY_PID_FILE" "$LIDAR_MAP_PID_FILE"
-    echo "[SIM] Stale stack cleanup complete."
+    ui_ok "Stale stack cleanup complete"
 }
 
 reset_runtime_dirs() {
-    echo "[SIM] FULL RESET: runtime/control/artifact dosyalari temizleniyor; loglar sadece son session icin /logs altinda tutulur."
+    ui_step "Resetting runtime/control/artifact directories"
+    ui_info "loglar sadece son session icin /logs altinda tutulur"
     # 1) Log dizinlerini yeniden olustur; root log dizini silinmez.
     mkdir -p "$USV_LOG_ROOT/host" "$SIM_LOG_DIR" "$SIM_LOG_DIR/ros2" "$LOG_DIR" "$LOG_DIR/video"
     # 2) Sim kontrol ve artifact dizinleri
@@ -492,19 +687,20 @@ reset_runtime_dirs() {
         "$SIM_ARTIFACT_DIR/sitl" "$SIM_ARTIFACT_DIR/gz_home" \
         "$ROS_HOME" \
         "$PROJ_ROOT/docker_workspace/logs" "$PROJ_ROOT/docker_workspace/control"
-    echo "[SIM] FULL RESET tamam: clean start garantili."
+    ui_ok "Full reset complete; clean start guaranteed"
 }
 
 cleanup() {
     trap - SIGINT SIGTERM EXIT
+    ui_live_clear
     echo ""
-    echo "[SIM] ========== SHUTDOWN INITIATED =========="
+    ui_warn "Shutdown initiated"
     # Kill registered PIDs with aggressive -9
     kill_if_running "$(cat "$CAM_PID_FILE" 2>/dev/null || true)" KILL
     kill_if_running "$(cat "$TELEMETRY_PID_FILE" 2>/dev/null || true)" KILL
     kill_if_running "$(cat "$LIDAR_MAP_PID_FILE" 2>/dev/null || true)" KILL
     for pid in "${PIDS[@]}"; do
-        kill -9 "$pid" 2>/dev/null || true
+        kill_if_running "$pid" KILL
     done
     # Immediately kill all simulation processes
     pkill -9 -f "docker_workspace/src/usv_main" 2>/dev/null || true
@@ -517,7 +713,7 @@ cleanup() {
     # Port cleanup
     fuser -k 8080/tcp 8888/tcp 14550/udp 14551/udp 14552/udp 5760/tcp 2>/dev/null || true
     rm -f "$CAM_PID_FILE" "$TELEMETRY_PID_FILE" "$LIDAR_MAP_PID_FILE"
-    echo "[SIM] ========== SHUTDOWN COMPLETE =========="
+    ui_ok "Shutdown complete"
 }
 trap cleanup SIGINT SIGTERM EXIT
 
@@ -526,15 +722,16 @@ export TARGET_CLASS="$(resolve_target_class)"
 stop_stale_stack
 reset_runtime_dirs
 
-echo "[SIM] Starting Gazebo (logging to $SIM_LOG_DIR/gazebo.log)..."
-./sim/bin/run_gz_world.sh > "$SIM_LOG_DIR/gazebo.log" 2>&1 &
+ui_step "Starting Gazebo"
+ui_info "Log: $(relpath "$SIM_LOG_DIR/gazebo.log")"
+run_line_buffered ./sim/bin/run_gz_world.sh > "$SIM_LOG_DIR/gazebo.log" 2>&1 &
 GZ_PID=$!
 register_pid "$GZ_PID"
 wait_for_process_alive "$GZ_PID" "Gazebo" 10 || true
 wait_for_log_pattern "$SIM_LOG_DIR/gazebo.log" "Gazebo|Ignition|server|world" "Gazebo log" 15 || true
 
-echo "[SIM] Starting ROS<->Gazebo bridges (pose service + scan + camera + odom + cmd_vel)..."
-"$ROS_GZ_BRIDGE_BIN" \
+ui_step "Starting ROS-Gazebo bridges"
+run_line_buffered "$ROS_GZ_BRIDGE_BIN" \
     "/world/${SIM_GZ_WORLD_NAME}/set_pose@ros_gz_interfaces/srv/SetEntityPose" \
     /scan@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan \
     /camera/image_raw@sensor_msgs/msg/Image[ignition.msgs.Image \
@@ -546,69 +743,51 @@ register_pid "$ROS_GZ_PID"
 wait_for_process_alive "$ROS_GZ_PID" "ROS-GZ bridge" 10 || true
 wait_for_ros_topic "/scan" "ROS-GZ scan bridge" 20 || true
 
-echo "[SIM] Starting ArduPilot SITL (logging to $SIM_LOG_DIR/sitl.log)..."
-./sim/bin/run_sitl.sh > "$SIM_LOG_DIR/sitl.log" 2>&1 &
+ui_step "Starting ArduPilot SITL"
+ui_info "Log: $(relpath "$SIM_LOG_DIR/sitl.log")"
+run_line_buffered ./sim/bin/run_sitl.sh > "$SIM_LOG_DIR/sitl.log" 2>&1 &
 SITL_PID=$!
 register_pid "$SITL_PID"
 wait_for_tcp_port 127.0.0.1 5760 "ArduPilot SITL MAVLink" 25 || true
 
-echo "[SIM] Starting SITL↔Gazebo bridge (tek MAVLink 14551: pose + motor + JSON)..."
-python3 sim/bridges/sitl_gazebo_bridge.py > "$SIM_LOG_DIR/pose.log" 2>&1 &
+ui_step "Starting SITL-Gazebo bridge"
+run_line_buffered python3 sim/bridges/sitl_gazebo_bridge.py > "$SIM_LOG_DIR/pose.log" 2>&1 &
 POSE_BRIDGE_PID=$!
 register_pid "$POSE_BRIDGE_PID"
 wait_for_process_alive "$POSE_BRIDGE_PID" "SITL-Gazebo bridge" 10 || true
 wait_for_file_fresh "$SIM_CONTROL_DIR/vehicle_position.json" "SITL-Gazebo pose JSON" 20 3.0 || true
 
-echo "[SIM] Starting Camera TCP bridge (logging to $SIM_LOG_DIR/cam_bridge.log)..."
-python3 sim/bridges/ros_to_tcp_cam.py > "$SIM_LOG_DIR/cam_bridge.log" 2>&1 &
+ui_step "Starting Camera TCP bridge"
+run_line_buffered python3 sim/bridges/ros_to_tcp_cam.py > "$SIM_LOG_DIR/cam_bridge.log" 2>&1 &
 export LOG_DIR  # Ensure application logs route to system directory
 CAM_BRIDGE_PID=$!
 register_pid "$CAM_BRIDGE_PID"
 wait_for_process_alive "$CAM_BRIDGE_PID" "Camera TCP bridge" 10 || true
 wait_for_tcp_port 127.0.0.1 8888 "Camera TCP bridge" 20 || true
 
-echo "[SIM] Camera target class: $TARGET_CLASS"
-echo "[SIM] Starting camera processor (logging to $LOG_DIR/cam.log)..."
+ui_step "Starting camera processor"
+ui_kv "Target class" "$TARGET_CLASS"
 (
     cd docker_workspace/src
-    LOG_DIR="$LOG_DIR" USV_SIM=1 CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" python3 cam.py > "$LOG_DIR/cam.log" 2>&1 &
+    run_line_buffered python3 cam.py > "$LOG_DIR/cam.log" 2>&1 &
     echo $! > "$CAM_PID_FILE"
 )
-echo "[SIM] Camera processor headless (no webserver)"
+ui_ok "Camera processor headless (no webserver)"
 
-echo "[SIM] Starting telemetry dashboard (logging to $LOG_DIR/telemetry.log)..."
+ui_step "Starting telemetry dashboard"
 (
     cd docker_workspace/src
-    LOG_DIR="$LOG_DIR" USV_SIM=1 CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" SIM_LOG_DIR="$SIM_LOG_DIR" python3 telemetry.py > "$LOG_DIR/telemetry.log" 2>&1 &
+    run_line_buffered python3 telemetry.py > "$LOG_DIR/telemetry.log" 2>&1 &
     echo $! > "$TELEMETRY_PID_FILE"
 )
 wait_for_http_endpoint "http://127.0.0.1:8080/api/data" "telemetry API" 25 || true
 
-echo "============================================================"
-echo "[SIM] Stack temiz baslatildi."
-echo "[SIM] SIM Loglar: $SIM_LOG_DIR (Gazebo, SITL, ROS2, bridges)"
-echo "[SIM] APP Loglar: $LOG_DIR (cam, telemetry, usv_main, CSV, video)"
-echo "[SIM] Kontrol dosyalari: $SIM_CONTROL_DIR"
-echo "[SIM] Varsayilan sim gorevi: $MISSION_FILE"
-echo "[SIM] Alternatif gorev: ./sim/bin/run_sim_stack.sh <mission_json_path>"
-echo "[SIM] Telemetry UI: http://127.0.0.1:8080/dashboard"
-echo "[SIM] Mission Planner: UDP 14552 (SITL vehicle telemetry + mission upload)"
-echo "[SIM] Start: otomatik değil; testte dashboard/API, race'te RC CH5"
-echo "[SIM] Kapatmak: CTRL+C veya ESC (bu terminal odaktayken)"
-echo "[SIM] Simulation logs (debug):"
-echo "  $SIM_LOG_DIR/gazebo.log sitl.log pose.log cam_bridge.log ros_gz.log"
-echo "  $SIM_LOG_DIR/*debug.log *.trace.log  $SIM_LOG_DIR/check_stack.log  $SIM_LOG_DIR/ros2/*.log"
-echo "[SIM] Application logs (debug):"
-echo "  $LOG_DIR/cam.log telemetry.log lidar_map.log usv_main.log telemetri_verisi.csv"
-echo "  $LOG_DIR/*.debug.log   $LOG_DIR/video/*.mp4"
-echo "[SIM] Tee: $ROOT_LOG_DIR/terminal.log"
-echo "============================================================"
-
 cd docker_workspace/src
-echo "[SIM] Starting lidar_map service (logging to $LOG_DIR/lidar_map.log)..."
+ui_step "Starting lidar_map service"
+ui_info "Log: $(relpath "$LOG_DIR/lidar_map.log")"
 (
     cd "$PROJ_ROOT/docker_workspace/src"
-    LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" python3 lidar_map.py > "$LOG_DIR/lidar_map.log" 2>&1 &
+    run_line_buffered python3 lidar_map.py > "$LOG_DIR/lidar_map.log" 2>&1 &
     echo $! > "$LIDAR_MAP_PID_FILE"
 )
 if [ "${USV_MODE:-test}" = "race" ]; then
@@ -618,55 +797,80 @@ else
 fi
 # stdin ayrilir: ESC bu kabukta yakalanir, usv_main klavye beklemez
 # Export critical env vars: CONTROL_DIR for mission state/flags, USV_MODE for startup logic, USV_SIM for simulation detection
-USV_SIM=1 LOG_DIR="$LOG_DIR" CONTROL_DIR="$CONTROL_DIR" USV_MODE="${USV_MODE:-test}" MISSION_FILE="${MISSION_FILE}" python3 usv_main.py </dev/null > "$LOG_DIR/usv_main.log" 2>&1 &
+ui_step "Starting usv_main state machine"
+run_line_buffered python3 usv_main.py </dev/null > "$LOG_DIR/usv_main.log" 2>&1 &
 USV_PID=$!
 register_pid "$USV_PID"
 wait_for_process_alive "$USV_PID" "usv_main.py" 10 || true
 
-echo "[SIM] Checking status of components..."
-"$PROJ_ROOT/sim/bin/check_stack.sh" | tee "$SIM_LOG_DIR/check_stack.log"
+ui_step "Checking component health"
+"$PROJ_ROOT/sim/bin/check_stack.sh" > "$SIM_LOG_DIR/check_stack.log"
+if grep -q "^\[WARN\]" "$SIM_LOG_DIR/check_stack.log"; then
+    ui_warn "Stack health has warnings; see $(relpath "$SIM_LOG_DIR/check_stack.log")"
+else
+    ui_ok "All expected stack components are running"
+fi
 
-echo "[SIM] Environment check:"
-echo "  SIM_LOG_DIR=$SIM_LOG_DIR"
-echo "  LOG_DIR=$LOG_DIR"
-echo "  ROS_LOG_DIR=$ROS_LOG_DIR"
+ui_step "Waiting for startup readiness"
+ui_kv "SIM logs" "$(relpath "$SIM_LOG_DIR")"
+ui_kv "APP logs" "$(relpath "$LOG_DIR")"
+ui_kv "ROS logs" "$(relpath "$ROS_LOG_DIR")"
 
 wait_for_startup_readiness || true
+print_stack_card
 
 # COMPLIANCE TESTING: Run race-level compliance checks after stack startup
-echo "[COMPLIANCE] Running race-level compliance tests..."
-python3 "$PROJ_ROOT/host_scripts/check_compliance_race.py" > "$ROOT_LOG_DIR/simulation/compliance_race_test.log" 2>&1
-COMPLIANCE_EXIT_CODE=$?
+ui_step "Running race-level compliance tests"
+if python3 "$PROJ_ROOT/host_scripts/check_compliance_race.py" > "$ROOT_LOG_DIR/simulation/compliance_race_test.log" 2>&1; then
+    COMPLIANCE_EXIT_CODE=0
+else
+    COMPLIANCE_EXIT_CODE=$?
+fi
 
 if [ $COMPLIANCE_EXIT_CODE -eq 0 ]; then
-    echo "[COMPLIANCE] ✅ All 8 acceptance criteria PASSED"
+    ui_ok "Race-level compliance passed"
 else
-    echo "[COMPLIANCE] ❌ Compliance tests FAILED (exit code: $COMPLIANCE_EXIT_CODE)"
-    echo "[COMPLIANCE] See logs: $ROOT_LOG_DIR/simulation/compliance_race_test.log"
+    ui_warn "Compliance tests failed (exit code: $COMPLIANCE_EXIT_CODE)"
+    ui_info "See logs: $(relpath "$ROOT_LOG_DIR/simulation/compliance_race_test.log")"
     # Log compliance failure but keep the manual stack available for inspection.
 fi
+print_log_shortcuts
 
 # Interactive mode: TTY-based ESC listener (with TTY check to avoid blocking)
 if [ -t 0 ]; then
-    # Interactive: TTY exists, can read user input
-    echo "[SIM] Interactive mode: Press ESC to stop simulation"
+    ui_blank
+    ui_info "Interactive controls: h help, l logs, s status snapshot, q/ESC stop"
     while kill -0 "$USV_PID" 2>/dev/null; do
+        ui_live_status "$(render_live_status)"
         if read -rsn1 -t 1 key 2>/dev/null; then
-            if [[ "$key" == $'\e' ]]; then
-                echo ""
-                echo "[SIM] ESC - tum simulasyon sonlandiriliyor..."
-                kill -TERM "$USV_PID" 2>/dev/null || true
-                sleep 0.2
-                kill -KILL "$USV_PID" 2>/dev/null || true
-                wait "$USV_PID" 2>/dev/null || true
-                cleanup
-                exit 0
-            fi
+            case "$key" in
+                $'\e'|q|Q)
+                    ui_live_clear
+                    ui_warn "Stop requested from terminal"
+                    kill -TERM "$USV_PID" 2>/dev/null || true
+                    sleep 0.2
+                    kill -KILL "$USV_PID" 2>/dev/null || true
+                    wait "$USV_PID" 2>/dev/null || true
+                    cleanup
+                    exit 0
+                    ;;
+                h|H)
+                    ui_live_clear
+                    ui_info "Controls: h help, l log paths, s status snapshot, q or ESC stop"
+                    ;;
+                l|L)
+                    ui_live_clear
+                    print_log_shortcuts
+                    ;;
+                s|S)
+                    print_status_snapshot
+                    ;;
+            esac
         fi
     done
 else
     # Non-interactive: No TTY, just wait for process
-    echo "[SIM] Non-interactive mode: waiting for usv_main to complete..."
+    ui_info "Non-interactive mode: waiting for usv_main to complete"
     wait "$USV_PID" 2>/dev/null || true
 fi
 

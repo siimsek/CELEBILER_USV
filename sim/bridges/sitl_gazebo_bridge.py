@@ -19,9 +19,13 @@ if str(_ROOT / "docker_workspace" / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "docker_workspace" / "src"))
 from json_atomic import atomic_write_json
 from runtime_debug_log import log_jsonl, redirect_std_streams, setup_component_logger
+from run_logger import get_run_logger
 
 log = setup_component_logger("sitl_gazebo_bridge", prefer_simulation=True)
 redirect_std_streams(log)
+
+_rl_bridge = get_run_logger(component="sitl_gazebo_bridge")
+_rl_bridge.info("service_init_begin", sitl_port=9002)
 
 CONTROL_DIR = os.environ.get("CONTROL_DIR", str(_ROOT / "sim" / "control"))
 POS_FILE = Path(CONTROL_DIR) / "vehicle_position.json"
@@ -512,6 +516,40 @@ class SitlGazeboBridge:
                 f"left_n={left_n:.2f} right_n={right_n:.2f} yaw_cmd={self.last_yaw_cmd_norm:.2f} "
                 f"yaw_rate_nav={observed_yaw_rate_dps:.2f}dps heading_delta={heading_delta_deg:.2f}deg"
             )
+            # P0 idle-yaw drift diagnostic (şartname 4.3: istemsiz dönüş → video başarısız).
+            # Tespit: ileri itki ~0 iken ArduPilot SITL asimetrik servo üretip gövdeyi döndürüyorsa.
+            # Yalnızca tanı/loj; motor çıkışını değiştirmez. Eşik env ile ayarlanabilir.
+            _avg_thrust_chk = (float(left_n) + float(right_n)) / 2.0
+            _yaw_cmd_chk = (float(left_n) - float(right_n)) / 2.0
+            _obs_yaw_chk = float(observed_yaw_rate_dps or 0.0)
+            _idle_yaw_thresh = max(0.5, float(os.environ.get("SIM_GZ_IDLE_YAW_DRIFT_DPS", "1.5")))
+            if (
+                abs(_avg_thrust_chk) <= 0.05
+                and abs(_yaw_cmd_chk) >= 0.05
+                and abs(_obs_yaw_chk) >= _idle_yaw_thresh
+            ):
+                if not hasattr(self, "_last_idle_yaw_diag"):
+                    self._last_idle_yaw_diag = 0.0
+                if (now - float(self._last_idle_yaw_diag)) >= 5.0:
+                    self._last_idle_yaw_diag = now
+                    log.warning(
+                        "[IDLE-YAW-DRIFT] Zero-thrust yaw command: CH1=%.0f CH3=%.0f "
+                        "left_n=%.3f right_n=%.3f avg_thrust=%.3f yaw_cmd=%.3f "
+                        "observed_yaw=%.2fdps. ArduPilot SITL servo trim "
+                        "(SERVO1/3_TRIM, SERVO3_REVERSED, MOT_TRIM) veya SIM_GZ_PWM_TRIM_US "
+                        "off-neutral olabilir; v=0 iken GUIDED yaw hold kontrol edilmeli.",
+                        c1_sitl, c2_sitl, left_n, right_n,
+                        _avg_thrust_chk, _yaw_cmd_chk, _obs_yaw_chk,
+                    )
+                    log_jsonl(
+                        "sitl_gazebo_bridge", True, event="idle_yaw_drift",
+                        ch1_pwm=round(float(c1_sitl), 1), ch3_pwm=round(float(c2_sitl), 1),
+                        left_norm=round(float(left_n), 4), right_norm=round(float(right_n), 4),
+                        avg_thrust=round(float(_avg_thrust_chk), 4),
+                        yaw_cmd_norm=round(float(_yaw_cmd_chk), 4),
+                        observed_yaw_rate_dps=round(float(_obs_yaw_chk), 4),
+                        motor_source=str(motor_source), threshold_dps=float(_idle_yaw_thresh),
+                    )
             if count % 1000 == 0:
                 log_jsonl(
                     "sitl_gazebo_bridge",
@@ -646,5 +684,11 @@ class SitlGazeboBridge:
             self.running = False
 
 if __name__ == "__main__":
+    _rl_bridge.info("service_init_complete", sitl_port=9002)
     b = SitlGazeboBridge()
-    b.run()
+    try:
+        b.run()
+    except KeyboardInterrupt:
+        _rl_bridge.info("shutdown_requested", reason="keyboard_interrupt")
+    finally:
+        _rl_bridge.info("shutdown_complete")

@@ -31,6 +31,7 @@ from compliance_profile import (
     USV_MODE_RACE,
 )
 from json_atomic import atomic_read_json, atomic_write_json
+from run_logger import get_run_logger
 from mission_adapter import (
     adapt_mission_to_structured,
     validate_target_color,
@@ -81,6 +82,10 @@ _telem_dbg.info(
     CONTROL_DIR,
 )
 
+# Initialize structured logger
+rl = get_run_logger(component="telemetry")
+rl.info("service_init_begin", web_port=WEB_PORT, usv_mode=USV_MODE)
+
 CSV_FILE = f"{LOG_DIR}/telemetri_verisi.csv"
 RC7_SAFE_PWM = 1100
 RC7_ESTOP_FORCE_PWM = 2011
@@ -114,14 +119,30 @@ telemetry_data = {
 }
 CSV_COLUMNS = [
     "timestamp",
+    "state",
+    "guidance_source",
     "lat",
     "lon",
-    "ground_speed",
-    "roll",
-    "pitch",
-    "heading",
-    "speed_setpoint",
-    "heading_setpoint",
+    "ground_speed_mps",
+    "roll_deg",
+    "pitch_deg",
+    "heading_deg",
+    "speed_setpoint_mps",
+    "heading_setpoint_deg",
+    "battery_voltage",
+    "battery_current",
+    "gps_fix_type",
+    "camera_fresh",
+    "lidar_fresh",
+    "lidar_center_min_m",
+    "lidar_left_min_m",
+    "lidar_right_min_m",
+    "selected_corridor",
+    "target_color",
+    "target_visible",
+    "wrong_target_visible",
+    "p3_contact_confirmation_source",
+    "estop_active",
     "left_pwm",
     "right_pwm",
     "mode",
@@ -559,6 +580,81 @@ HTML_PAGE = """
         /* Race mode layout */
         .main.race-mode { grid-template-columns:280px 1fr; }
         .main.race-mode .stats-row { grid-column:span 1; grid-template-columns:repeat(3,1fr); }
+
+        /* === RESPONSIVE DESIGN === */
+        /* Tablet ve küçük ekranlar (1200px altı) */
+        @media (max-width: 1200px) {
+            body { overflow-y:auto; height:auto; min-height:100vh; }
+            .main { 
+                grid-template-columns: 1fr; 
+                grid-template-rows: auto auto auto;
+                overflow-y:auto;
+                gap:10px;
+            }
+            .mission-panel { 
+                grid-row: auto; 
+                max-width:100%;
+            }
+            .mission-panel .card-b {
+                padding:12px;
+            }
+            .card {
+                min-height:300px;
+            }
+            .feed {
+                min-height:280px;
+            }
+            .stats-row { 
+                grid-column: span 1; 
+                grid-template-columns: repeat(3, 1fr);
+                gap:6px;
+            }
+            .s-card {
+                max-height:none;
+            }
+        }
+
+        /* Mobil ekranlar (768px altı) */
+        @media (max-width: 768px) {
+            header { 
+                height:auto; 
+                min-height:52px;
+                flex-wrap:wrap; 
+                padding:8px 12px;
+                gap:8px;
+            }
+            .h-left, .h-right {
+                flex-wrap:wrap;
+                gap:8px;
+            }
+            .main { 
+                padding:6px;
+                gap:8px;
+            }
+            .stats-row { 
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .m-timer {
+                font-size:1.5rem;
+            }
+            .btn {
+                font-size:0.8rem;
+                padding:8px 12px;
+            }
+        }
+
+        /* Çok küçük ekranlar (480px altı) */
+        @media (max-width: 480px) {
+            .stats-row { 
+                grid-template-columns: 1fr;
+            }
+            .logo {
+                font-size:0.85rem;
+            }
+            .hm {
+                font-size:0.7rem;
+            }
+        }
     </style>
 </head>
 <body>
@@ -862,10 +958,15 @@ HTML_PAGE = """
                         const legacyError = (d.pixhawk_mission_sync_error || '').toString();
                         const localActive = ((d.mission_upload_source || '').toString() !== 'pixhawk_mission');
                         if (mirrorStatus) {
-                            const label = localActive ? 'local mission active, mirror ' : 'pixhawk mission ';
-                            syncEl.innerText = label + mirrorStatus + (mirrorError ? ': ' + mirrorError : '');
-                            syncEl.style.color = mirrorStatus === 'synced' ? 'var(--success)' :
-                                (mirrorStatus === 'failed' ? 'var(--danger)' : 'var(--warn)');
+                            if (localActive && mirrorStatus === 'local_only') {
+                                syncEl.innerText = 'local mission active, Pixhawk mirror gerekmez';
+                                syncEl.style.color = 'var(--success)';
+                            } else {
+                                const label = localActive ? 'local mission active, mirror ' : 'pixhawk mission ';
+                                syncEl.innerText = label + mirrorStatus + (mirrorError ? ': ' + mirrorError : '');
+                                syncEl.style.color = mirrorStatus === 'synced' ? 'var(--success)' :
+                                    (mirrorStatus === 'failed' ? 'var(--danger)' : 'var(--warn)');
+                            }
                         } else {
                             syncEl.innerText = legacyError || 'OK';
                             syncEl.style.color = legacyError ? 'var(--danger)' : 'var(--success)';
@@ -881,8 +982,10 @@ HTML_PAGE = """
                     const fcTextEl = document.getElementById('m_fc_text');
                     if (fcTextEl) {
                         const st = (d.last_statustext && d.last_statustext.text) ? String(d.last_statustext.text) : '--';
-                        fcTextEl.innerText = st;
-                        fcTextEl.style.color = /prearm:|arm:/i.test(st) ? 'var(--danger)' : 'var(--text2)';
+                        const missionSyncText = /mission upload|mission item|mission request/i.test(st);
+                        fcTextEl.innerText = missionSyncText ? ('mission sync: ' + st) : st;
+                        fcTextEl.style.color = /prearm:|arm:/i.test(st) ? 'var(--danger)' :
+                            (missionSyncText ? 'var(--warn)' : 'var(--text2)');
                     }
                     const navPhaseEl = document.getElementById('m_nav_phase');
                     if (navPhaseEl) {
@@ -1285,8 +1388,17 @@ class SmartTelemetry:
             or state.get("lidar_frame_status")
             or "none"
         )
+        cam_status = _read_camera_status()
+        lidar_status = state.get("lidar_status", {})
+        if not isinstance(lidar_status, dict):
+            lidar_status = {}
+        mode_state = state.get("mode_state", {})
+        if not isinstance(mode_state, dict):
+            mode_state = {}
         return [
             self._csv_timestamp(),
+            state.get("state", 0),
+            state.get("guidance_detail_source", state.get("guidance_source", "idle")),
             telemetry_data.get("Lat"),
             telemetry_data.get("Lon"),
             telemetry_data.get("Speed"),
@@ -1295,6 +1407,20 @@ class SmartTelemetry:
             telemetry_data.get("Heading"),
             telemetry_data.get("Speed_Setpoint"),
             telemetry_data.get("Heading_Setpoint"),
+            telemetry_data.get("Battery", 0),
+            telemetry_data.get("Battery_Current", 0),
+            telemetry_data.get("GPS_FixType", 0),
+            cam_status.get("frame_age_s", 999.0) < 2.0 if isinstance(cam_status, dict) else False,
+            state.get("lidar_ready", False),
+            lidar_status.get("center_min_m", state.get("lidar_center_min_m", 99.0)),
+            lidar_status.get("left_min_m", state.get("lidar_left_min_m", 99.0)),
+            lidar_status.get("right_min_m", state.get("lidar_right_min_m", 99.0)),
+            state.get("selected_corridor", lidar_status.get("selected_corridor", "center")),
+            state.get("target_color", cam_status.get("target_class", "") if isinstance(cam_status, dict) else ""),
+            cam_status.get("target_detected", False) if isinstance(cam_status, dict) else False,
+            cam_status.get("wrong_target_detected", False) if isinstance(cam_status, dict) else False,
+            state.get("p3_contact_confirmation_source", "none"),
+            bool(mode_state.get("estop_state", state.get("estop_state", False))),
             telemetry_data.get("CMD_Port", telemetry_data.get("Out1", 1500)),
             telemetry_data.get("CMD_Stbd", telemetry_data.get("Out3", 1500)),
             telemetry_data.get("Mode"),
@@ -2703,7 +2829,14 @@ CONTROLLER_PAGE = """
             const elapsed = Number(data.mission_active) && data.report_view ? data.report_view.mode_state.active_parkur : 'IDLE';
             text('elapsed', `parkur=${elapsed}`);
 
-            renderHealth((data.health_check || {}).flags || {});
+            const healthFlags = Object.assign({}, (data.health_check || {}).flags || {});
+            const healthGate = data.health_gate || {};
+            for (const key of ['mission_locked', 'target_locked', 'estop_clear', 'race_hardening_ok']) {
+                if (Object.prototype.hasOwnProperty.call(healthGate, key)) {
+                    healthFlags[`gate_${key}`] = Boolean(healthGate[key]);
+                }
+            }
+            renderHealth(healthFlags);
 
             const ready = Boolean(data.ready_state);
             const active = Boolean(data.mission_active);
@@ -2925,6 +3058,27 @@ def lidar_map():
         return response
     return _svg_placeholder("Lidar haritasi yok", "file3 local map snapshot henuz olusmadi")
 
+_last_cam_status_cache = {}
+_cam_status_mtime_age = 999.0
+
+
+def _read_camera_status():
+    """Read camera_status.json written by cam.py. Returns cached dict on error."""
+    global _last_cam_status_cache, _cam_status_mtime_age
+    path = f"{CONTROL_DIR}/camera_status.json"
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                _last_cam_status_cache = data
+                _cam_status_mtime_age = max(0.0, time.time() - os.path.getmtime(path))
+                return _last_cam_status_cache
+    except Exception:
+        pass
+    return _last_cam_status_cache
+
+
 def _read_mission_state():
     """usv_main tarafından yazılan state dosyasını oku."""
     global last_state_cache
@@ -3030,8 +3184,10 @@ def _build_spatial_payload(state):
             "bounds": compute_spatial_bounds([]),
             "lidar": {
                 "points": [],
+                "occupancy_cells": [],
                 "frame": "enu_world",
                 "point_count": 0,
+                "occupancy_cell_count": 0,
                 "ts_monotonic": state.get("ts_monotonic"),
                 "age_s": None,
                 "source": "state",
@@ -3120,6 +3276,53 @@ def _build_spatial_payload(state):
                 lidar_points.append([round(east_m, 2), round(north_m, 2)])
             else:
                 lidar_points.append([round(lx, 2), round(ly, 2)])
+    lidar_occupancy_raw = state.get("lidar_occupancy_cells_world", [])
+    lidar_occupancy_cells = []
+    if isinstance(lidar_occupancy_raw, list):
+        for item in lidar_occupancy_raw[:8192]:
+            if isinstance(item, dict):
+                try:
+                    lx = float(item.get("x", item.get("x_m")))
+                    ly = float(item.get("y", item.get("y_m")))
+                except (TypeError, ValueError):
+                    continue
+                if not (math.isfinite(lx) and math.isfinite(ly)):
+                    continue
+                try:
+                    confidence = float(item.get("confidence", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                confidence = max(0.0, min(1.0, confidence))
+                cell = {
+                    "x": round(lx, 2),
+                    "y": round(ly, 2),
+                    "confidence": round(confidence, 3),
+                }
+                for key in ("hit_count", "stable_count", "grid_ix", "grid_iy"):
+                    try:
+                        cell[key] = int(item.get(key, 0) or 0)
+                    except (TypeError, ValueError):
+                        cell[key] = 0
+                for key in ("log_odds", "last_seen_age_s"):
+                    raw_value = item.get(key)
+                    if raw_value is None:
+                        cell[key] = None
+                        continue
+                    try:
+                        value = float(raw_value)
+                        cell[key] = round(value, 3) if math.isfinite(value) else None
+                    except (TypeError, ValueError):
+                        cell[key] = None
+                cell["persistence"] = str(item.get("persistence", "") or "")
+                lidar_occupancy_cells.append(cell)
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                try:
+                    lx = float(item[0])
+                    ly = float(item[1])
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(lx) and math.isfinite(ly):
+                    lidar_occupancy_cells.append({"x": round(lx, 2), "y": round(ly, 2), "confidence": 0.35})
     if lidar_frame == "boat_local" and boat is not None:
         lidar_frame = "enu_world_from_legacy_local"
     elif lidar_frame != "enu_world":
@@ -3136,6 +3339,7 @@ def _build_spatial_payload(state):
     point_groups = [
         [(float(w["x_m"]), float(w["y_m"])) for w in wps],
         [(float(p[0]), float(p[1])) for p in lidar_points if isinstance(p, (list, tuple)) and len(p) >= 2],
+        [(float(c["x"]), float(c["y"])) for c in lidar_occupancy_cells if isinstance(c, dict)],
         [(float(f["x_m"]), float(f["y_m"])) for f in course_features],
     ]
     if isinstance(boat, dict):
@@ -3144,6 +3348,7 @@ def _build_spatial_payload(state):
         point_groups.append([(float(x), float(y)) for x, y in SPATIAL_TRAIL])
     bounds = compute_spatial_bounds(point_groups)
 
+    obstacle_landmarks = state.get("obstacle_landmarks_world", {}).get("landmarks", [])
     return {
         "frame": {
             "name": "enu_local",
@@ -3166,8 +3371,12 @@ def _build_spatial_payload(state):
         "bounds": bounds,
         "lidar": {
             "points": lidar_points,
+            "landmarks": obstacle_landmarks,
+            "occupancy_cells": lidar_occupancy_cells,
             "frame": lidar_frame,
             "point_count": int(len(lidar_points)),
+            "occupancy_cell_count": int(len(lidar_occupancy_cells)),
+            "grid_resolution_m": state.get("lidar_map_resolution_m"),
             "ts_monotonic": state.get("ts_monotonic"),
             "age_s": age_s,
             "source": lidar_source,
@@ -3175,6 +3384,7 @@ def _build_spatial_payload(state):
             "quality_ready": bool(state.get("lidar_quality_ready", False)),
             "frame_status": str(state.get("lidar_frame_status", "") or ""),
         },
+        "obstacle_landmarks": obstacle_landmarks,
         "traversable_corridor": state.get("traversable_corridor", {}) if isinstance(state.get("traversable_corridor", {}), dict) else {},
         "p3_target_status": state.get("p3_target_status", {}) if isinstance(state.get("p3_target_status", {}), dict) else {},
     }
@@ -3202,8 +3412,13 @@ def get_data():
     out['command_lock'] = state.get('command_lock', False)
     out['gate_count'] = state.get('gate_count', 0)
     out['health_check'] = state.get('health_check', {})
+    health_gate = state.get('health_gate', {})
+    out['health_gate'] = health_gate if isinstance(health_gate, dict) else {}
     out['ready_state'] = state.get('ready_state', False)
     out['ready_missing'] = state.get('ready_missing', [])
+    out['mission_locked'] = bool(state.get('mission_locked', out['health_gate'].get('mission_locked', False)))
+    out['target_locked'] = bool(state.get('target_locked', out['health_gate'].get('target_locked', False)))
+    out['race_hardening_ok'] = bool(state.get('race_hardening_ok', out['health_gate'].get('race_hardening_ok', USV_MODE != USV_MODE_RACE)))
     out['guided_ready'] = bool(state.get('guided_ready', False))
     out['guided_ready_missing'] = state.get('guided_ready_missing', [])
     out['guided_position_source'] = state.get('guided_position_source', 'invalid')
@@ -3470,6 +3685,16 @@ def get_data():
     }
     sensor_fusion = state.get('sensor_fusion', {})
     out['sensor_fusion'] = sensor_fusion if isinstance(sensor_fusion, dict) else {}
+    local_costmap = state.get('local_costmap', {})
+    out['local_costmap'] = local_costmap if isinstance(local_costmap, dict) else {}
+    local_planner = state.get('local_planner', {})
+    out['local_planner'] = local_planner if isinstance(local_planner, dict) else {}
+    advanced_avoidance = state.get('advanced_avoidance', {})
+    out['advanced_avoidance'] = advanced_avoidance if isinstance(advanced_avoidance, dict) else {}
+    behavior_selector = state.get('behavior_selector', {})
+    out['behavior_selector'] = behavior_selector if isinstance(behavior_selector, dict) else {}
+    autonomy_confidence = state.get('autonomy_confidence', {})
+    out['autonomy_confidence'] = autonomy_confidence if isinstance(autonomy_confidence, dict) else {}
     dynamic_speed_profile = state.get('dynamic_speed_profile', {})
     out['dynamic_speed_profile'] = dynamic_speed_profile if isinstance(dynamic_speed_profile, dict) else {}
     wind_assist = state.get('wind_assist', {})
@@ -3676,6 +3901,11 @@ def get_data():
             'camera_pipeline': out['camera_pipeline'],
             'traversable_corridor': out['traversable_corridor'],
             'sensor_fusion': fusion_summary,
+            'local_costmap': out['local_costmap'],
+            'local_planner': out['local_planner'],
+            'advanced_avoidance': out['advanced_avoidance'],
+            'behavior_selector': out['behavior_selector'],
+            'autonomy_confidence': out['autonomy_confidence'],
             'dynamic_speed_profile': dyn_speed_summary,
             'wind_assist': wind_assist_summary,
             'horizon_lock': horizon_lock_summary,
@@ -3699,6 +3929,10 @@ def get_data():
             'cmd_stbd_pwm': out.get('cmd_stbd_pwm'),
             'health_ready': out['ready_state'],
             'health_missing': out['ready_missing'],
+            'health_gate': out['health_gate'],
+            'mission_locked': out['mission_locked'],
+            'target_locked': out['target_locked'],
+            'race_hardening_ok': out['race_hardening_ok'],
         },
         'energy': {
             'battery_v': telemetry_data.get('Battery', 0),

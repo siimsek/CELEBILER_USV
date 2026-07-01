@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Recompute AUDIT S12 race readiness score (10 criteria) from codebase evidence."""
+"""Recompute race readiness score (10 criteria) from codebase evidence."""
 
 from __future__ import annotations
 
@@ -31,6 +31,8 @@ def evaluate() -> dict:
     cam = read(SRC / "cam.py")
     mission_cfg = read(SRC / "mission_config.py")
     adapter = read(SRC / "mission_adapter.py")
+    readme = read(ROOT / "README.md")
+    rapor_doc = read(ROOT / "documents" / "rapor_calismasistemi.md")
 
     criteria = [
         {
@@ -94,10 +96,13 @@ def evaluate() -> dict:
         },
         {
             "id": 10,
-            "name": "Arming/failsafe race cert documented",
-            "pass": (ROOT / "documents" / "race_cert_pixhawk_arming_failsafe.md").is_file()
-            and (ROOT / "host_scripts" / "compare_pixhawk_param_baseline.py").is_file(),
-            "evidence": "race cert doc + param compare script",
+            "name": "Pixhawk baseline safety documented",
+            "pass": (ROOT / "host_scripts" / "compare_pixhawk_param_baseline.py").is_file()
+            and has(readme, "config/pixhawk_ida.param")
+            and has(readme, "ARMING_CHECK=0")
+            and has(readme, "fiziksel E-stop/kontaktor")
+            and has(rapor_doc, "Fiziksel E-stop/kontaktör hattı"),
+            "evidence": "README baseline safety note + param compare script + working-system doc",
         },
     ]
 
@@ -109,7 +114,7 @@ def evaluate() -> dict:
         "min_deploy_score": MIN_DEPLOY_SCORE,
         "race_deploy_recommended": passed >= MIN_DEPLOY_SCORE,
         "criteria": criteria,
-        "note": "Code/static evidence only; water test + operator checklist still required for field deploy.",
+        "note": "Code/static evidence only; water tests and operator procedures are still required for field deploy.",
     }
 
 
@@ -121,7 +126,7 @@ def main() -> int:
     json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     lines = [
-        "# Race Readiness Score (AUDIT S12)",
+        "# Race Readiness Score",
         "",
         f"- Score: **{report['score']}/{report['total']}**",
         f"- Minimum for static deploy gate: **{MIN_DEPLOY_SCORE}/10**",

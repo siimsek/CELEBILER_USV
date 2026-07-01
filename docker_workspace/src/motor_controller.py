@@ -80,7 +80,8 @@ def mix_twin_thrusters(
         if 0.0 < surge_norm < 0.14:
             surge_norm = 0.14
 
-    yaw_gain = 0.92 - (0.22 * abs(surge_norm))
+    # Yaw gain reduced from 0.92 to 0.55 to prevent aggressive turning and 360° spinning
+    yaw_gain = 0.55 - (0.15 * abs(surge_norm))
     left_mix = surge_norm - (yaw_norm * yaw_gain)
     right_mix = surge_norm + (yaw_norm * yaw_gain)
 

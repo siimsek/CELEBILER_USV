@@ -4,6 +4,57 @@ import sys
 import time
 
 
+# ANSI renk kodları
+COLORS = {
+    "RESET": "\x1b[0m",
+    "RED": "\x1b[31m",
+    "GREEN": "\x1b[32m",
+    "YELLOW": "\x1b[33m",
+    "BLUE": "\x1b[34m",
+    "MAGENTA": "\x1b[35m",
+    "CYAN": "\x1b[36m",
+    "WHITE": "\x1b[37m",
+    "BRIGHT_RED": "\x1b[91m",
+    "BRIGHT_GREEN": "\x1b[92m",
+    "BRIGHT_YELLOW": "\x1b[93m",
+    "BRIGHT_BLUE": "\x1b[94m",
+    "BRIGHT_MAGENTA": "\x1b[95m",
+    "BRIGHT_CYAN": "\x1b[96m",
+    "BRIGHT_WHITE": "\x1b[97m",
+}
+
+# Component bazlı renk eşlemesi
+COMPONENT_COLORS = {
+    "GAZEBO": COLORS["CYAN"],
+    "ROS-GZ": COLORS["BLUE"],
+    "SITL": COLORS["MAGENTA"],
+    "MAVPROXY": COLORS["YELLOW"],
+    "CAM": COLORS["GREEN"],
+    "LIDAR": COLORS["BRIGHT_BLUE"],
+    "USV": COLORS["BRIGHT_WHITE"],
+    "TELEM": COLORS["BRIGHT_GREEN"],
+    "TEST": COLORS["RED"],
+    "COMPLIANCE": COLORS["RED"],
+    "SIM": COLORS["CYAN"],
+    "WARN": COLORS["BRIGHT_YELLOW"],
+    "ERROR": COLORS["BRIGHT_RED"],
+}
+
+
+def _colors_enabled():
+    """Renkli çıktı aktif mi kontrol et."""
+    # NO_COLOR environment variable varsa renkleri kapat
+    if os.environ.get("NO_COLOR", "").lower() in ("1", "true", "yes"):
+        return False
+    # CI ortamında renkleri kapat
+    if os.environ.get("CI", "").lower() in ("1", "true", "yes"):
+        return False
+    # TTY değilse renkleri kapat
+    if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
+        return False
+    return True
+
+
 def _enable_windows_virtual_terminal():
     if os.name != "nt":
         return
@@ -32,22 +83,39 @@ def setup_utf8_console():
             pass
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            stream.reconfigure(
+                encoding="utf-8",
+                errors="replace",
+                line_buffering=True,
+                write_through=True,
+            )
+        except TypeError:
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
         except Exception:
             pass
     _enable_windows_virtual_terminal()
 
 
-def _pick_color(message):
+def _pick_color(component, message):
+    """Mesaj içeriğine ve component'a göre renk seç."""
+    if not _colors_enabled():
+        return None
+
+    # Önce mesaj içeriğine göre kontrol et
     if "[ESTOP]" in message or "❌" in message or "🚨" in message:
-        return "\x1b[91m"
+        return COLORS["BRIGHT_RED"]
     if "[WARN]" in message or "⚠️" in message:
-        return "\x1b[93m"
+        return COLORS["BRIGHT_YELLOW"]
     if "[OK]" in message or "✅" in message:
-        return "\x1b[92m"
+        return COLORS["BRIGHT_GREEN"]
     if "[START]" in message or "[DONE]" in message:
-        return "\x1b[96m"
-    return "\x1b[37m"
+        return COLORS["CYAN"]
+
+    # Sonra component bazlı renk
+    return COMPONENT_COLORS.get(component, COLORS["WHITE"])
 
 
 def make_console_printer(component):
@@ -58,15 +126,16 @@ def make_console_printer(component):
         sep = kwargs.pop("sep", " ")
         end = kwargs.pop("end", "\n")
         file = kwargs.pop("file", sys.stdout)
-        flush = kwargs.pop("flush", False)
+        flush = kwargs.pop("flush", True)
         message = sep.join(str(arg) for arg in args)
         stamp = time.strftime("%H:%M:%S")
         prefix = f"[{stamp}] [{component}]"
 
-        if os.name == "nt" and file in (sys.stdout, sys.stderr):
-            color = _pick_color(message)
+        # Renkli çıktı (sadece terminal için, dosya logları için değil)
+        color = _pick_color(component, message)
+        if color and file in (sys.stdout, sys.stderr) and _colors_enabled():
             raw_print(
-                f"{color}{prefix} {message}\x1b[0m",
+                f"{color}{prefix} {message}{COLORS['RESET']}",
                 end=end,
                 file=file,
                 flush=flush,
@@ -74,6 +143,7 @@ def make_console_printer(component):
             )
             return
 
+        # Renksiz çıktı (dosya logları veya NO_COLOR aktif)
         raw_print(
             f"{prefix} {message}",
             end=end,
@@ -83,4 +153,3 @@ def make_console_printer(component):
         )
 
     return console_print
-

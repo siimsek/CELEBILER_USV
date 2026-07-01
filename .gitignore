@@ -6,6 +6,7 @@ __pycache__/
 
 # === Log / Gecici / Medya ===
 *.log
+*.log.*
 *.csv
 *.tmp
 *.bak
@@ -17,7 +18,7 @@ __pycache__/
 *.png
 
 # === Compliance Reports (auto-generated) ===
-logs/*
+logs/
 
 # === Ref ===
 moos_referans/
@@ -45,3 +46,11 @@ Thumbs.db
 # === Virtual env ===
 .venv*/
 venv/
+
+# === Debug bundles ===
+debug_bundle_*.tar.gz
+
+# === Docker workspace pycache ===
+docker_workspace/src/__pycache__/
+docker_workspace/src/common/__pycache__/
+docker_workspace/src/adapters/__pycache__/

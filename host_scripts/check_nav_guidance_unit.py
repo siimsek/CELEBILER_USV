@@ -148,6 +148,13 @@ def main() -> int:
     if not USVStateMachine._allow_simple_avoidance_bias(False, False):
         raise AssertionError("simple avoidance must remain allowed outside turn priority")
 
+    if USVStateMachine._allow_predictive_override_during_turn(True, True, False):
+        raise AssertionError("predictive override must not suppress heading acquisition without a hard threat")
+    if not USVStateMachine._allow_predictive_override_during_turn(True, True, True):
+        raise AssertionError("hard nearby threat must allow predictive override during heading acquisition")
+    if not USVStateMachine._allow_predictive_override_during_turn(False, True, False):
+        raise AssertionError("predictive override must remain allowed outside turn priority")
+
     pivot_speed, pivot_reason = USVStateMachine._resolve_nav_align_pivot_speed(
         True,
         -94.0,
