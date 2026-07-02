@@ -310,10 +310,7 @@ CAMERA_STATUS_MTIME_TIMEOUT_S = float(os.environ.get("CAMERA_STATUS_MTIME_TIMEOU
 GUIDED_COMMAND_HZ = max(5.0, min(10.0, float(os.environ.get("USV_GUIDED_COMMAND_HZ", "10"))))
 GUIDED_COMMAND_MIN_PERIOD_S = 1.0 / GUIDED_COMMAND_HZ
 GUIDED_IDLE_SPEED_EPS_MPS = max(0.0, float(os.environ.get("USV_GUIDED_IDLE_SPEED_EPS_MPS", "0.02")))
-P2_PREDICTIVE_CONTROL_ENABLED = (
-    os.environ.get("USV_P2_PREDICTIVE_CONTROL", "").strip().lower()
-    in ("1", "true", "yes", "on")
-)
+P2_PREDICTIVE_CONTROL_ENABLED = ADVANCED_AUTONOMY_ENABLED
 MAP_CORRIDOR_BIAS_ENABLED = os.environ.get("USV_MAP_CORRIDOR_BIAS", "1").strip().lower() not in ("0", "false", "no", "off")
 MAP_CORRIDOR_BIAS_MAX_DEG = max(0.0, float(os.environ.get("USV_MAP_CORRIDOR_BIAS_MAX_DEG", "18.0")))
 MAP_CORRIDOR_BIAS_MIN_SCORE = max(0.0, min(1.0, float(os.environ.get("USV_MAP_CORRIDOR_BIAS_MIN_SCORE", "0.34"))))
@@ -3181,7 +3178,6 @@ class USVStateMachine:
         if not gate_detected:
             fused["gate_stable_s"] = 0.0
             fused["gate_center_bearing_deg"] = 0.0
-            fused["gate_passed_event"] = False
 
         fused["target_detected"] = target_detected
         if not target_detected:
